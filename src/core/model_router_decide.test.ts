@@ -25,12 +25,15 @@ function entry(id: string, rank: number, available: boolean): ModelEntry {
   return { id, provider: "anthropic", label: id, rank, agentModel: id, source: "", available };
 }
 
+// The simple tier is a Haiku 4.5 row an install chose to keep (an edited row is never migrated): it takes no effort.
+// The default install (Haiku 5.5, which takes effort) is DEFAULT_TIERS below.
 const CATALOG: readonly ModelEntry[] = [
   entry("claude-fable-5-1", 1, false),
   entry("claude-opus-5-5", 2, true),
   entry("claude-sonnet-5-5", 3, true),
-  entry("claude-haiku-4-5-20251001", 4, true),
+  { ...entry("claude-haiku-4-5-20251001", 4, true), tier: "simple", supportsEffort: false },
 ];
+const DEFAULT_TIERS = resolveAccountTiers({ env: {}, catalog: [], quota: null });
 const TIERS = resolveAccountTiers({ env: {}, catalog: CATALOG, quota: null });
 const GATEWAY_TIERS = resolveAccountTiers({
   env: { ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic", ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.3", ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.2", ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-4.5-air" },
@@ -167,6 +170,14 @@ test("start: a simple prompt on an Opus session moves to Haiku, with no effort (
   assert.equal(decision.guard, null);
 });
 
+test("start: on the default ladder a simple prompt moves to Haiku 5.5 at the simple tier's medium effort", () => {
+  const decision = decideStart({ tiers: DEFAULT_TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  assert.equal(decision.model, "claude-haiku-5-5");
+  assert.equal(decision.effort, "medium", "Haiku 5.5 takes effort, and the simple tier asks for medium (its own default too)");
+  assert.equal(decision.changed, true);
+  assert.equal(decision.proposed, "claude-haiku-5-5");
+});
+
 test("start: a standard prompt picks Sonnet at medium effort", () => {
   const decision = decideStart({ tiers: TIERS, jev: { tier: "standard", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
   assert.equal(decision.model, "claude-sonnet-5-5");
@@ -258,6 +269,21 @@ test("0.6.16 T2: a subagent row carries the work kind, its source, the keywords'
   const workKind = { mode: "measure", kind: "read", confidence: 0.9, source: "jev", keywords: "read", effort: "medium", hold: null, applied: false } as const;
   const record = routerDecisionRecord({ at: "2026-09-26T14:05:00.000Z", account: "acct", point: "subagent", decision, applied: false, quotaBand: "normal", workKind });
   assert.deepEqual(record.workKind, workKind);
+});
+
+test("0.6.29 T8: a row says when the engine kept it off a model, or did not know the engine's version -- and carries neither field otherwise", () => {
+  const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "start", decision, applied: true, quotaBand: "normal" } as const;
+  const tooOld = routerDecisionRecord({ ...base, engine: { fallbackReason: "engine-too-old" } });
+  assert.equal(tooOld.fallbackReason, "engine-too-old");
+  assert.equal("engineVersionUnknown" in tooOld, false);
+  const unknown = routerDecisionRecord({ ...base, engine: { engineVersionUnknown: true } });
+  assert.equal(unknown.engineVersionUnknown, true);
+  assert.equal("fallbackReason" in unknown, false);
+  for (const record of [routerDecisionRecord(base), routerDecisionRecord({ ...base, engine: {} })]) {
+    assert.equal("fallbackReason" in record, false);
+    assert.equal("engineVersionUnknown" in record, false);
+  }
 });
 
 test("decision log record: project is carried through verbatim (JEVADV-63)", () => {

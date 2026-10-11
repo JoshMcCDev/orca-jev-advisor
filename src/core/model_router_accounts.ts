@@ -25,11 +25,22 @@ import { isRecord } from "../guards.ts";
 import type { QuotaAccount } from "./consumption.ts";
 import { ROUTER_TIERS } from "./model_catalog.ts";
 import type { ModelEntry, ModelPrices, RouterTier } from "./model_catalog.ts";
+import { engineFallbackFor, engineSupports, hasEngineRequirement, parseEngineVersion } from "./engine_support.ts";
+import { LONG_PROMPT_TOKENS } from "./model_cost.ts";
 
 export { ROUTER_TIERS };
 export type { ModelPrices, RouterTier };
 
-export interface ResolvedTierModel {
+/** Why a tier is not on the model the ladder names: the engine running the session is older than that model's floor (engine_support.ts). */
+export type EngineFallbackReason = "engine-too-old";
+
+/** What a decision row says about the engine behind the model it names; both absent when there is nothing to say. */
+export interface EngineNotes {
+  readonly fallbackReason?: EngineFallbackReason;
+  readonly engineVersionUnknown?: true;
+}
+
+export interface ResolvedTierModel extends EngineNotes {
   readonly modelId: string;
   /** Short display name for the status line ("Sonnet 5.5"); the id itself on a gateway. */
   readonly label: string;
@@ -42,46 +53,70 @@ export interface ResolvedTierModel {
 
 export type ResolvedTiers = Readonly<Record<RouterTier, ResolvedTierModel>>;
 
-// The built-in facts (platform.claude.com models overview and pricing,
-// 2026-09-29): the fallback when the catalog has no usable row or field.
+// The built-in facts (platform.claude.com models overview and pricing, read
+// 2026-10-11): the fallback when the catalog has no usable row or field. The
+// ids after the tier models are not on the ladder; they stay so the usage
+// logs of past turns on them are still costed.
 export const FABLE_ID = "claude-fable-5-1";
 const OPUS_ID = "claude-opus-5-5";
 const SONNET_ID = "claude-sonnet-5-5";
 const HAIKU_ID = "claude-haiku-4-5-20251001";
+const HAIKU_5_5_ID = "claude-haiku-5-5";
 const LEGACY_SONNET_ID = "claude-sonnet-5";
+const LEGACY_FABLE_ID = "claude-fable-5";
+const OPUS_5_ID = "claude-opus-5";
+const OPUS_4_8_ID = "claude-opus-4-8";
+const SONNET_4_6_ID = "claude-sonnet-4-6";
 
 const ANTHROPIC_TIER_MODEL: Readonly<Record<RouterTier, string>> = {
-  simple: HAIKU_ID,
+  simple: HAIKU_5_5_ID,
   standard: SONNET_ID,
   complex: OPUS_ID,
   frontier: FABLE_ID,
 };
 
 export const ANTHROPIC_PRICES: Readonly<Record<string, ModelPrices>> = {
+  // Haiku 5.5 is priced by prompt length: the base card up to 100K tokens, `longPrompt` above (model_cost.ts).
+  [HAIKU_5_5_ID]: { input: 0.1, cacheWrite: 0.2, cacheRead: 0.01, output: 0.5, longPrompt: { overTokens: LONG_PROMPT_TOKENS, input: 0.5, cacheWrite: 1, cacheRead: 0.05, output: 2.5 } },
   [HAIKU_ID]: { input: 1, cacheWrite: 2, cacheRead: 0.1, output: 5 },
-  [SONNET_ID]: { input: 2, cacheWrite: 4, cacheRead: 0.2, output: 10 },
+  // Cache hits are 0.05x input on Sonnet 5.5, Opus 5.5 and Fable 5.1 (0.025x); 0.1x on every other model.
+  [SONNET_ID]: { input: 2, cacheWrite: 4, cacheRead: 0.1, output: 10 },
   [LEGACY_SONNET_ID]: { input: 2, cacheWrite: 4, cacheRead: 0.2, output: 10 },
+  [SONNET_4_6_ID]: { input: 3, cacheWrite: 6, cacheRead: 0.3, output: 15 },
   [OPUS_ID]: { input: 4, cacheWrite: 8, cacheRead: 0.2, output: 20 },
+  [OPUS_5_ID]: { input: 5, cacheWrite: 10, cacheRead: 0.5, output: 25 },
+  [OPUS_4_8_ID]: { input: 5, cacheWrite: 10, cacheRead: 0.5, output: 25 },
   [FABLE_ID]: { input: 10, cacheWrite: 20, cacheRead: 0.25, output: 50 },
+  [LEGACY_FABLE_ID]: { input: 10, cacheWrite: 20, cacheRead: 1, output: 50 },
 };
 
 const ANTHROPIC_LABELS: Readonly<Record<string, string>> = {
+  [HAIKU_5_5_ID]: "Haiku 5.5",
   [HAIKU_ID]: "Haiku 4.5",
   [SONNET_ID]: "Sonnet 5.5",
   [LEGACY_SONNET_ID]: "Sonnet 5",
+  [SONNET_4_6_ID]: "Sonnet 4.6",
   [OPUS_ID]: "Opus 5.5",
+  [OPUS_5_ID]: "Opus 5",
+  [OPUS_4_8_ID]: "Opus 4.8",
   [FABLE_ID]: "Fable 5.1",
+  [LEGACY_FABLE_ID]: "Fable 5",
 };
 
 const ANTHROPIC_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+  [HAIKU_5_5_ID]: 1_000_000,
   [HAIKU_ID]: 200_000,
   [SONNET_ID]: 1_000_000,
   [LEGACY_SONNET_ID]: 1_000_000,
+  [SONNET_4_6_ID]: 1_000_000,
   [OPUS_ID]: 1_000_000,
+  [OPUS_5_ID]: 1_000_000,
+  [OPUS_4_8_ID]: 1_000_000,
   [FABLE_ID]: 1_000_000,
+  [LEGACY_FABLE_ID]: 1_000_000,
 };
 
-/** Haiku takes no effort parameter (§4). */
+/** Haiku 4.5 takes no effort parameter (§4); Haiku 5.5 does, and defaults to medium. */
 const ANTHROPIC_NO_EFFORT: ReadonlySet<string> = new Set([HAIKU_ID]);
 
 /** The string values of a vault settings.json's `env` block (already JSON.parse'd); anything else reads as none. */
@@ -204,6 +239,8 @@ export interface ResolveAccountTiersInput {
   readonly env: Readonly<Record<string, string>>;
   readonly catalog: readonly ModelEntry[];
   readonly quota: QuotaAccount | null;
+  /** The running engine's version (`$.session.version()`); null or absent = unknown, which supports every model (engine_support.ts). */
+  readonly engineVersion?: string | null;
 }
 
 export function resolveAccountTiers(input: ResolveAccountTiersInput): ResolvedTiers {
@@ -220,7 +257,10 @@ export function resolveAccountTiers(input: ResolveAccountTiersInput): ResolvedTi
     const weak = haiku ?? sonnet ?? opus ?? fallback ?? strong;
     return { simple: gatewayModel(weak), standard: gatewayModel(middle), complex: gatewayModel(strong), frontier: gatewayModel(strong) };
   }
-  const served = (id: string): boolean => anthropicServes(id, input.catalog, input.quota);
+  const engineVersion = input.engineVersion ?? null;
+  const engineKnown = engineVersion !== null && parseEngineVersion(engineVersion) !== null;
+  // A model the engine cannot run is never served, whatever the catalog says.
+  const served = (id: string): boolean => anthropicServes(id, input.catalog, input.quota) && engineSupports(id, engineVersion);
   // Weakest to strongest: the ladder a tier falls along when its own model is unavailable.
   const ladder = ROUTER_TIERS.map((tier) => tierModelId(tier, input.catalog, served));
   const frontierAt = ROUTER_TIERS.indexOf("frontier");
@@ -228,9 +268,26 @@ export function resolveAccountTiers(input: ResolveAccountTiersInput): ResolvedTi
     const at = ROUTER_TIERS.indexOf(tier);
     // Frontier without its model is complex (§5), not "the next stronger" (there is none).
     const from = at === frontierAt && !served(ladder[at] as string) ? at - 1 : at;
-    return anthropicModel(pickServed(ladder, from, served), input.catalog);
+    const wanted = ladder[from] as string;
+    if (!engineSupports(wanted, engineVersion)) {
+      // The model this engine keeps in its place first (Haiku 4.5), else the next one the catalog allows.
+      const kept = engineFallbackFor(wanted);
+      const id = kept !== null && served(kept) ? kept : pickServed(ladder, from, served);
+      return { ...anthropicModel(id, input.catalog), fallbackReason: "engine-too-old" };
+    }
+    const model = anthropicModel(pickServed(ladder, from, served), input.catalog);
+    // An unreadable engine version supports the model; the row says it was not known.
+    return !engineKnown && hasEngineRequirement(model.modelId) ? { ...model, engineVersionUnknown: true } : model;
   };
   return { simple: resolve("simple"), standard: resolve("standard"), complex: resolve("complex"), frontier: resolve("frontier") };
+}
+
+/** The engine note of the tier that resolves to `modelId`, for a decision row; empty when `modelId` is null, resolves nowhere or has nothing to say. */
+export function engineNotesOf(tiers: ResolvedTiers, modelId: string | null): EngineNotes {
+  const tier = modelId === null ? undefined : ROUTER_TIERS.find((candidate) => tiers[candidate].modelId === baseModelId(modelId));
+  if (tier === undefined) return {};
+  const { fallbackReason, engineVersionUnknown } = tiers[tier];
+  return { ...(fallbackReason === undefined ? {} : { fallbackReason }), ...(engineVersionUnknown === undefined ? {} : { engineVersionUnknown }) };
 }
 
 /** §5 collapse: a tier is the lowest tier resolving to the same model id. */
