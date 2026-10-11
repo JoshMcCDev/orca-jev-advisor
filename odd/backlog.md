@@ -120,6 +120,99 @@ how you miss the tail.
 
 ---
 
+## Ideas from similar tools (reviewed 2026-10-10)
+
+Source for this group: [toolgate](https://github.com/RiskAverseTech/toolgate)
+0.16.0 (commit `87e26c1`), a Claude Code gate on Jev with the same shape as
+ours, which publishes its measurements. They are ranked by expected value.
+None of them is verified against our data yet. The first step of each one
+is that verification.
+
+### The task the person asked for softens the gate
+
+**What.** toolgate sends Jev the latest user prompt, the two before it and
+the session's first substantive request (`session_goal`). It adds an
+`authorized` question: does the task explicitly call for this action? When it
+does, each verdict softens one step, except secret exposure and explicit
+prohibitions. Our gate state (`buildActionGateState`, `src/core/decisions.ts:916`) carries
+the command, the destination and `branchEffect`, and nothing of what the person
+asked for.
+
+**Why.** Advice on work the person explicitly requested is the noise the
+owner keeps hitting. Remembered delivery authorizations (0.6.28) cover only
+five delivery classes. Their lesson is to use more than the latest prompt,
+which in a working session is usually "yes" or "go ahead". Their `off_task`
+axis caused most of their friction, so they capped it at ask.
+
+**First thing to verify.** Replay the advised commands from the 0.6.28 measurement
+set (834) with the three prompts and the session goal added to the state, and
+count how many an `authorized` answer of 0.8 or more would soften. Do the same
+for the 31 must-stop commands, which must still stop. Also measure the added
+latency and what extra text leaves the machine.
+
+### Write a file, then run it: the action ledger
+
+**What.** When the agent writes a file, toolgate's gate also asks four
+capability questions about the content: if executed, would it read secrets,
+send data out, destroy data, or change privilege? It stores the booleans
+(never the content) per session. When a later Bash call runs that path
+(`bash x.sh`, `python x.py`, `./x`, `npm run` after `package.json` changed),
+the command is judged by what the file does. A run that arrives before the
+write is confirmed is floored at ask. Our file gate
+(`adapters/claude/gate-files.ts`) only protects the plugin's own files; it
+does not judge content.
+
+**Why.** It is the one composition our gate cannot see: a freshly written
+script looks harmless when it runs. toolgate's set 7 separated every pair by
+ledger facts alone, with no dangerous allow.
+
+**First thing to verify.** How often real transcripts contain a Write or Edit
+followed by a Bash call that executes the same path, and how many of those
+our gate allowed. If it is rare, this is a security feature with low
+friction cost. If it is common, the extra Jev call on writes has a price.
+
+### Frozen challenge sets for the gate
+
+**What.** toolgate keeps small labelled sets (`docs/challenge-set-*.json`). Each
+set is labelled before it is run, built in matched pairs (inert text against
+the same effect performed), and run once per pinned build by
+`scripts/challenge.mjs`.
+
+**Why.** We measure on real logs, which finds friction, but a change to a
+question's wording has no fixed regression to pass. The 31 must-stop commands
+from 0.6.28 are already a seed set.
+
+**First thing to verify.** Whether the 0.6.28 must-stop list and the 834
+advised commands can be frozen into one JSON set and run against the gate
+with no hook process.
+
+### Project rules from CLAUDE.md as gate context
+
+**What.** toolgate's roadmap item 11 (from Abide) lifts the explicit "never"
+and "only" lines from the project's CLAUDE.md and AGENTS.md and passes them
+to Jev as `project_constraints`.
+
+**Why.** Rules stated once in the project would count on every call without
+being copied into team policies.
+
+**First thing to verify.** Which of our seeded policies already duplicate
+CLAUDE.md lines, and whether extracting them adds signal or only noise to
+the state. Review Abide before designing this.
+
+### A `doctor` that proves the whole chain
+
+**What.** `toolgate doctor` checks that the key is present, picks the backend,
+gets one live verdict with its latency, and confirms the hook is installed
+and answers under the minimal environment of a Dock-launched app.
+
+**Why.** Several of our incidents (the 0.6.10 reinstall, plugin errors that
+only appear in memory) would have been one command to see.
+
+**First thing to verify.** What the panel already shows (Jev health, installed
+version) and what is still missing.
+
+---
+
 ## Everything below was done on 2026-09-24 and is no longer backlog
 
 The four findings from `MEJORAS-JEV-ADVISOR.md` were verified and then fixed
