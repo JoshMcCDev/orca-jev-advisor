@@ -315,16 +315,91 @@ question or policy.
 **First thing to verify.** Whether the gate log keeps every question's score,
 not only the deciding one.
 
-Reviewed with nothing to take for the gate or the steward:
-- [quicksilver](https://github.com/UditAkhourii/quicksilver) offloads bulk
-  classification to Jev. Only its benchmark method is of interest: it charges
-  the skill's own tokens and subtracts a control floor.
-- [jev-seo](https://github.com/AgriciDaniel/jev-seo) is a site audit. It A/B
-  tests question wording against a blind second judge
-  (`references/evaluation.md`), which fits the replay corpus once it exists.
-- [Jev_steer_or_queue](https://github.com/Larkspur-Wang/Jev_steer_or_queue)
-  classifies mid-turn messages. Its lessons, shadow by default and logging
-  `jev: null` on a failure, are covered above and since 0.6.21.
+## Candidate modules from similar tools (owner decision, 2026-10-11)
+
+The owner asked that every reviewed tool be kept as a candidate module, not
+dropped. Each one becomes an entry in the feature-module registry
+(`odd/tasks/feature-modules.md`) once that registry exists. Each one enters
+in shadow mode, is measured for a week, and only then may act. They are
+ranked by expected value to the owner.
+
+### 1. Verify the "done" (from jev-belay)
+
+**What.** A Stop hook. When the agent claims the work is done without having
+verified it (no test run, no live probe), the turn is blocked with the reason
+([valentynkit/jev-belay](https://github.com/valentynkit/jev-belay)). It puts
+the run facts in Jev's state before asking: that raised AUROC from 0.777 to
+0.976 (README, "Measured"). It ships as a blocker only if AUROC is at least 0.6
+and at least 0.08 over the baseline (`tools/measure.mjs:174`).
+
+**Why.** "It said it was done and it was not" is the failure the owner's
+Rule 7 exists for.
+
+**First thing to verify.** Which run facts our hooks already record per turn
+(gate log: commands, exit status; mod: tool calls), so the state is built
+from facts we hold, not from the transcript text.
+
+### 2. Browser steps judged by Jev (from jev-browser)
+
+**What.** An MCP server in which Jev picks the element to act on and judges
+whether a browser step reached its goal. Before an action with an effect
+outside the browser that is hard to undo, it stops with `needs_confirmation`
+([Ying-Kai-Liao/jev-browser](https://github.com/Ying-Kai-Liao/jev-browser),
+`src/session.mjs:285, 476-487, 535-537`).
+
+**Why.** Agents drive Chrome and the Orca browser for QA and client sites. A
+cheap judge per step, plus a brake on purchases, sends and deletes, fits the
+"stop only real harm" direction.
+
+**First thing to verify.** Whether this is a module of ours or a separate MCP
+server we configure. Also how it relates to the existing claude-in-chrome and
+`orca` browser tools, so it wraps them instead of competing with them.
+
+### 3. Project rules on every edit (from abide)
+
+**What.** It compiles CLAUDE.md and AGENTS.md into a rubric once, scoped by
+glob and invalidated by a hash, and checks edits and turns against it
+([coldteadotai/abide](https://github.com/coldteadotai/abide)). See "Project
+rules from CLAUDE.md as gate context" above for the precision caution:
+26% at edit level, 73% at turn level.
+
+**First thing to verify.** Run it in shadow at turn level only, and label a
+week of verdicts before it may speak to the agent.
+
+### 4. Messages written mid-turn (from Jev_steer_or_queue)
+
+**What.** When the person types while the agent works, Jev classifies the
+message: steer now, queue for after the turn, or interrupt
+([Larkspur-Wang/Jev_steer_or_queue](https://github.com/Larkspur-Wang/Jev_steer_or_queue)).
+It ships in shadow by default and logs `jev: null` on a failure.
+
+**First thing to verify.** Whether Claude Code's mod API exposes a message
+typed mid-turn before the turn ends (`claude-code.d.ts`), and how often the
+owner does it.
+
+### 5. Cheap bulk classification (from quicksilver)
+
+**What.** A skill that hands bulk filtering and classification (lists, logs,
+issues) to Jev instead of the large model
+([UditAkhourii/quicksilver](https://github.com/UditAkhourii/quicksilver)).
+Its benchmark charges the skill's own tokens and subtracts a control floor
+(`bench/README.md`).
+
+**First thing to verify.** Real tasks in the owner's transcripts where the
+model read a long list only to filter it, and the token cost of those turns.
+
+### 6. Site audit (from jev-seo)
+
+**What.** A site audit with Jev judgements, plus a wording A/B against a
+blind second judge (`references/evaluation.md`)
+([AgriciDaniel/jev-seo](https://github.com/AgriciDaniel/jev-seo)).
+
+**First thing to verify.** Whether the owner's client sites (Lune and
+WordPress) would use it often enough to justify a module rather than a
+standalone skill.
+
+compact-adviser is not a candidate module: it improves the steward (see "The
+steward's harm measure" above).
 
 ---
 

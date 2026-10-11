@@ -37,6 +37,7 @@ What "off" means depends on the kind of artifact:
 
 Rules:
 - **One registry.** A pure list in `src/core/feature_modules.ts` says, for each module, its id, hooks, mod features, worker tasks and default. The installer, the worker, the mod and the panel all read it. Adding a module is one entry.
+- **Three states per module: `off`, `shadow` and `active`.** Shadow runs the module and logs what it would do, with no effect on the turn; the pattern comes from jev-belay and Jev_steer_or_queue. A new module enters in shadow and becomes active only after a week of measurement. Where a module already has a measure mode, that mode is its shadow; a second shadow switch is not added.
 - **One switch per feature.** `off` is a new top state in front of each module's existing modes:
   - the router's `off`/`measure`/`active`;
   - the steward's `measure`/`active` and its tier switch;
@@ -60,6 +61,21 @@ Splitting into separate Orca plugins, or changing Orca. If Orca later gains mani
 - [ ] T4 mod and worker: each mod feature returns before any Jev call when its module is off. The worker registers no timer or handler for a module that is off. Tests: zero Jev calls and zero timers for an off module.
 - [ ] T5 panel: a Modules section at the top of the config page. Each module has a switch, one line on what it does, and what it costs from T0. The existing per-feature controls are hidden while their module is off. Strings in es and en. Turning a switch runs the installer through the worker's request/result channel, and the page shows the result. Screenshots at 1440, 768, 390 and 320 px in both themes, under `odd/qa/screens-<version>/`.
 - [ ] T6 docs, version, release, catalog, and a live check of the marketplace install: turn each module off and on, confirm `~/.claude/settings.json` and the mod copy follow, and confirm a disabled module produces no Jev call in the logs.
+
+### Next modules, after the registry ships
+Each one is a registry entry that enters in `shadow`. Its own task file is written when it starts. The details and the first thing to verify are in `odd/backlog.md`, under "Candidate modules from similar tools".
+- [ ] M1 Verify the "done" (jev-belay): a Stop hook that blocks an unverified "done".
+- [ ] M2 Gate MCP tools against the goal (jev-browser's irreversible question). This could extend the `gate` module instead of being a new one; decide in its task file.
+- [ ] M3 Browser steps judged by Jev (jev-browser).
+- [ ] M4 Project rules on every edit (abide), turn level, shadow only.
+- [ ] M5 Messages written mid-turn (Jev_steer_or_queue).
+- [ ] M6 Cheap bulk classification (quicksilver).
+- [ ] M7 Site audit (jev-seo).
+
+Improvements to existing modules, from the same review (backlog, "Ideas from similar tools"):
+- `gate`: the `authorized` mitigator from the task context; the write-then-run ledger.
+- `steward`: the harm measure; staying inert outside interactive sessions.
+- Base: the replay corpus with intervals; dead or noisy questions in `jev-health`; the doctor's hook check.
 
 ## Acceptance criteria
 - Strict TDD per task: RED observed, then GREEN. `npm run typecheck` reports 0, and `npm test` and `npm run test:panels` are green.
