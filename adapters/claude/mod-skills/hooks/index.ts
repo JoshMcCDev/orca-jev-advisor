@@ -293,7 +293,9 @@ export async function resolveFeatureModules($: EngineInterface, file: FeatureMod
       const paths = await resolveHomePaths($)
       file.path = paths === null ? null : `${paths.configDir}/${FEATURE_MODULES_FILE}`
     }
-    if (file.path === null || !(await $.fs.exists(file.path))) return DEFAULT_FEATURE_MODULES
+    if (file.path === null) return DEFAULT_FEATURE_MODULES
+    // One host round trip per hook call: a missing file is the read that
+    // throws, so no exists() check goes first.
     return parseFeatureModules(await $.fs.read(file.path))
   } catch {
     return DEFAULT_FEATURE_MODULES
