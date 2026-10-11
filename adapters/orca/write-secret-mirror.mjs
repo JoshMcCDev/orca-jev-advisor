@@ -72,6 +72,16 @@
  *          `active` when the file is missing or malformed
  *          (src/core/feature_modules.ts's parseFeatureModules), for the
  *          scheduler main.mjs starts at activation. Read-only.
+ *   feature-modules-save  reads `{ modules: { <id>: state } }` as JSON from
+ *          stdin (the panel's switch, relayed by main.mjs) and atomically
+ *          writes it, pretty-printed, to feature-modules.json. It is the one
+ *          writer of that file and it is strict, unlike the tolerant reader
+ *          above: src/core/feature_modules.ts's validateFeatureModulesInput
+ *          refuses anything but every known module with a state it offers
+ *          (`invalid-json` / `invalid-shape`), and a refusal writes nothing,
+ *          so a corrupt request can never reach the file the gate, the mod
+ *          and the worker read. Answers `{ok:true, value}` with the states
+ *          it wrote. Not secret.
  *   deny-tier-config-save  reads `{denyRmRf, denyDropTable,
  *          denyTerraformDestroy}` as JSON from stdin and atomically writes
  *          it, normalized through the same pure parser adapters/claude/
@@ -125,7 +135,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { normalizePlatform, resolveConfigDir } from '../../src/core/paths.ts'
 import { parseModSkillsConfig } from '../../src/core/mod_skills_config.ts'
-import { FEATURE_MODULES_FILE, parseFeatureModules } from '../../src/core/feature_modules.ts'
+import { FEATURE_MODULES_FILE, parseFeatureModules, validateFeatureModulesInput } from '../../src/core/feature_modules.ts'
 import { parseDenyTierConfig } from '../../src/core/deny_tier_config.ts'
 import { TEAM_OWNERS_MIRROR_FILE, parseTeamOwners } from '../../src/core/team_owners.ts'
 import { QUEUE_MODE_MIRROR_FILE, parseQueueMode } from '../../src/core/queue_mode.ts'
@@ -475,6 +485,18 @@ async function featureModulesRead () {
   return { ok: true, value: parseFeatureModules(content) }
 }
 
+/** The one writer of feature-modules.json (T5). Strict where the reader is
+ *  tolerant: a request that is not the full, valid map is refused and the
+ *  file stays as it was. */
+async function featureModulesSave (raw) {
+  const parsed = parseJsonPayload(raw)
+  if (!parsed.ok) return parsed
+  const checked = validateFeatureModulesInput(parsed.value)
+  if (!checked.ok) return { ok: false, reason: 'invalid-shape', detail: checked.detail }
+  await writeAtomic(`${JSON.stringify({ modules: checked.modules }, null, 2)}\n`, FEATURE_MODULES_PATH, null)
+  return { ok: true, value: checked.modules }
+}
+
 /** Normalizes the payload through the same pure parser gate-bash.ts reads
  *  back with, so what lands on disk is never a raw, unvalidated echo of
  *  whatever the panel sent -- a wrong-typed or missing field is written as
@@ -609,6 +631,8 @@ async function main () {
       result = await modSkillsConfigRead()
     } else if (mode === 'feature-modules-read') {
       result = await featureModulesRead()
+    } else if (mode === 'feature-modules-save') {
+      result = await featureModulesSave((await readStdin()).trim())
     } else if (mode === 'deny-tier-config-save') {
       result = await denyTierConfigSave((await readStdin()).trim())
     } else if (mode === 'deny-tier-config-read') {

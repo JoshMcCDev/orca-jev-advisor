@@ -26,6 +26,7 @@ import {
   moduleState,
   parseFeatureModules,
   switchMode,
+  validateFeatureModulesInput,
   workerJobsFor,
   workerJobIsPanelOnly,
   workerJobsOn,
@@ -283,5 +284,38 @@ test("a module offers shadow exactly when one of its existing modes has a measur
     const hasMeasure = module.modes.some((mode) => mode.shadowValue !== null);
     assert.equal(module.states.includes("shadow"), hasMeasure, module.id);
     assert.equal(module.states.includes(module.defaultState), true, module.id);
+  }
+});
+
+// T5: the writer path (the worker's feature-modules-save sidecar) refuses what
+// parseFeatureModules would silently turn into defaults, so a corrupt request
+// is reported instead of written.
+const VALID_INPUT = { modules: { gate: "off", "model-router": "shadow", steward: "active", "skill-selection": "shadow", board: "off" } };
+
+test("validateFeatureModulesInput accepts every module with a state it offers", () => {
+  const result = validateFeatureModulesInput(VALID_INPUT);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.deepEqual(result.modules, VALID_INPUT.modules);
+});
+
+test("validateFeatureModulesInput refuses anything that is not the full, valid map", () => {
+  const refused: readonly unknown[] = [
+    null,
+    "off",
+    [],
+    {},
+    { modules: null },
+    { modules: [] },
+    { modules: { ...VALID_INPUT.modules, gate: "shadow" } },
+    { modules: { ...VALID_INPUT.modules, board: "shadow" } },
+    { modules: { ...VALID_INPUT.modules, steward: "paused" } },
+    { modules: { ...VALID_INPUT.modules, steward: true } },
+    { modules: { ...VALID_INPUT.modules, unknown: "off" } },
+    { modules: { gate: "off" } },
+  ];
+  for (const input of refused) {
+    const result = validateFeatureModulesInput(input);
+    assert.equal(result.ok, false, JSON.stringify(input));
+    if (!result.ok) assert.equal(typeof result.detail, "string");
   }
 });

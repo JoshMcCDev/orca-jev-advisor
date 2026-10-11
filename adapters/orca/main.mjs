@@ -199,11 +199,16 @@ function spawnSidecar (argv, execOptions, stdin) {
   })
 }
 
-function runSecretMirrorScript (mode, stdin, extraArgs = []) {
+/** The `--permission` flags the secret-mirror sidecar runs under for `mode`: it reads the plugin root and the config dir, and only a mode that writes gets the one write grant, on the config dir (an atomic write needs room for its temp file there). Exported so a test can pin them. */
+function secretMirrorPermissionArgs (mode) {
   const permissionArgs = ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, `--allow-fs-read=${CONFIG_DIR}`]
   if (!SECRET_MIRROR_READ_ONLY_MODES.has(mode)) permissionArgs.push(`--allow-fs-write=${CONFIG_DIR}`)
+  return permissionArgs
+}
+
+function runSecretMirrorScript (mode, stdin, extraArgs = []) {
   return spawnSidecar(
-    [...permissionArgs, SECRET_MIRROR_SCRIPT, mode, ...extraArgs],
+    [...secretMirrorPermissionArgs(mode), SECRET_MIRROR_SCRIPT, mode, ...extraArgs],
     {
       timeout: SECRET_MIRROR_TIMEOUT_MS,
       maxBuffer: 64 * 1024,
@@ -1838,6 +1843,78 @@ async function attendClaudeIntegrationRescan (orca, memory, deps) {
 }
 
 // ---------------------------------------------------------------------------
+// Feature modules, T5 (odd/tasks/feature-modules.md): the panel's module
+// switch. The panel never writes feature-modules.json (the gate refuses every
+// other writer, and the config dir is outside its sandbox): it asks, and this
+// worker writes the file through write-secret-mirror.mjs's strict
+// `feature-modules-save`, runs the installer so the settings.json hooks follow
+// (under the 0.6.26 guard: a newer install is left alone and the panel is told
+// so), moves the scheduler at once instead of waiting for the next rescan, and
+// publishes the refreshed integration status (which carries each module's
+// `matchesState`) BEFORE the result, so the panel never reads the old state
+// after "Saved." This is base work, not a module job: the switch must work
+// with every module off.
+// ---------------------------------------------------------------------------
+
+const FEATURE_MODULES_REQUEST_KEY = 'featureModulesSaveRequest'
+const FEATURE_MODULES_RESULT_KEY = 'featureModulesSaveResult'
+
+/**
+ * Attends one pending `{ id, at, modules }` request. `options.save` replaces
+ * the sidecar, `options.runScript` the installer and `options.mirror` the
+ * secret-mirror stat in tests; `scheduler` is the module scheduler.
+ */
+async function attendFeatureModulesSaveRequest (orca, storageHost, scheduler, options = {}) {
+  const request = await storageHost.get(FEATURE_MODULES_REQUEST_KEY)
+  if (!isRecord(request) || typeof request.id !== 'string' || typeof request.at !== 'string') return
+
+  await storageHost.delete(FEATURE_MODULES_REQUEST_KEY).catch((error) =>
+    orca.log(`feature modules request cleanup failed: ${error.message}`))
+
+  const publishResult = (fields) => storageHost.set(FEATURE_MODULES_RESULT_KEY, {
+    id: request.id, at: new Date().toISOString(), ok: false, reason: null, detail: null, saved: false, skipped: false, modules: null, ...fields
+  }).catch((error) => orca.log(`feature modules result publish failed: ${error.message}`))
+
+  const age = Date.now() - Date.parse(request.at)
+  if (!(age >= 0) || age > SECRET_REQUEST_TTL_MS) {
+    await publishResult({ reason: 'expired', detail: 'the request is older than SECRET_REQUEST_TTL_MS and was never attended.' })
+    return
+  }
+  if (!isRecord(request.modules)) {
+    await publishResult({ reason: 'invalid-request', detail: 'a module switch carries { modules: { <id>: state } }.' })
+    return
+  }
+
+  const save = options.save ?? runSecretMirrorScript
+  const written = await save('feature-modules-save', JSON.stringify({ modules: request.modules }))
+  if (!written.ok) {
+    orca.log(`feature modules save refused: ${String(written.reason ?? 'unknown')} -- ${String(written.detail ?? '').slice(0, 160)}`)
+    await publishResult({ reason: written.reason ?? 'save-failed', detail: written.detail ?? null })
+    return
+  }
+  const modules = modulesFromRead(written) ?? request.modules
+
+  // The hooks follow the file, under the same guard activation uses (no force):
+  // a newer install is left alone, and `skipped` tells the panel so.
+  const installed = await installClaudeIntegration(orca, options)
+  const skipped = installed.ok === true && installed.skipped === true && installed.reason === 'newer-install-present'
+
+  // The worker's own jobs and the mod follow the file whatever the hooks did.
+  try {
+    await scheduler.apply(modules)
+  } catch (error) {
+    orca.log(`feature modules scheduler update failed: ${String(error?.message ?? error)}`)
+  }
+  await publishClaudeIntegrationStatus(orca, storageHost, options)
+
+  if (!installed.ok) {
+    await publishResult({ saved: true, modules, reason: 'install-failed', detail: installed.detail ?? installed.reason ?? null })
+    return
+  }
+  await publishResult({ ok: true, saved: true, skipped, modules, reason: skipped ? 'newer-install-present' : null, detail: skipped ? installed.detail ?? null : null })
+}
+
+// ---------------------------------------------------------------------------
 // Locale request/result/status -- same shape again: the panel's language
 // buttons cannot write ~/.config/orca-supervisor/locale themselves (same
 // permission sandbox), so they request a change and this worker's poll
@@ -3027,6 +3104,9 @@ export default function activate (orca) {
       .catch((error) => orca.log(`secret request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRequest(orca, storageHost))
       .catch((error) => orca.log(`claude integration request handling failed: ${error.message}`))
+      // Base work, outside the scheduler: the module switch must work with every module off.
+      .then(() => attendFeatureModulesSaveRequest(orca, storageHost, scheduler))
+      .catch((error) => orca.log(`feature modules request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRescan(orca, claudeRescanMemory, claudeRescanDeps))
       .catch((error) => orca.log(`claude integration rescan failed: ${error.message}`))
       .then(() => attendLocaleRequest(orca, storageHost))
@@ -3193,6 +3273,9 @@ export {
   attendClaudeIntegrationRequest,
   attendClaudeIntegrationRescan,
   attendDenyTierConfigRequest,
+  attendFeatureModulesSaveRequest,
+  FEATURE_MODULES_RESULT_KEY,
+  secretMirrorPermissionArgs,
   attendGateAuthorizationForgetRequest,
   attendTrustedProgramRequest,
   publishTrustedPrograms,

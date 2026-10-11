@@ -320,6 +320,33 @@ export function parseFeatureModules(content: string): FeatureModules {
   };
 }
 
+export type FeatureModulesInput =
+  | { readonly ok: true; readonly modules: FeatureModules }
+  | { readonly ok: false; readonly detail: string };
+
+/**
+ * The strict reader of a write request (the panel's switch, through the
+ * worker's feature-modules-save sidecar). parseFeatureModules is tolerant on
+ * purpose, since a bad file must read as today's behaviour; a bad request must
+ * not be written at all, so this refuses anything but every known module with
+ * a state it offers, and unknown ids. Never throws.
+ */
+export function validateFeatureModulesInput(value: unknown): FeatureModulesInput {
+  if (!isRecord(value) || !isRecord(value.modules)) return { ok: false, detail: "expected { modules: { <id>: state } }." };
+  const given = value.modules;
+  const unknown = Object.keys(given).filter((key) => !(MODULE_IDS as readonly string[]).includes(key));
+  if (unknown.length > 0) return { ok: false, detail: `unknown module: ${unknown.join(", ").slice(0, 40)}.` };
+  const modules: Record<string, ModuleState> = {};
+  for (const id of MODULE_IDS) {
+    const state = Object.hasOwn(given, id) ? given[id] : undefined;
+    if (typeof state !== "string" || !(registryEntry(id).states as readonly string[]).includes(state)) {
+      return { ok: false, detail: `${id} needs one of: ${registryEntry(id).states.join(", ")}.` };
+    }
+    modules[id] = state as ModuleState;
+  }
+  return { ok: true, modules: modules as FeatureModules };
+}
+
 export function moduleState(modules: FeatureModules, id: ModuleId): ModuleState {
   return modules[id];
 }

@@ -3,14 +3,16 @@
 // real fs), against a real temp config dir. It is the worker's one read of
 // `<configDir>/feature-modules.json` at activation (the worker's own sandbox
 // cannot read the config dir); the parsing is src/core/feature_modules.ts's,
-// covered on its own, so this only proves the I/O around it.
+// covered on its own, so this only proves the I/O around it. T5 adds
+// `feature-modules-save`, the one writer of that file (the panel asks, the
+// worker spawns this mode): atomic, and a corrupt request is refused.
 //
 // Same fixture discipline as the sibling write-secret-mirror tests: an
 // isolated mkdtemp HOME and an explicit ORCA_SUPERVISOR_CONFIG_DIR.
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,4 +50,68 @@ test('feature-modules-read: the states in the file come back', () => {
 
 test('feature-modules-read: a corrupt file reads as every module active', () => {
   assert.deepEqual(readModules('{ not json'), { ok: true, value: ALL_ACTIVE })
+})
+
+// ---------------------------------------------------------------------------
+// feature-modules-save (T5)
+// ---------------------------------------------------------------------------
+
+/** Runs `mode` against a throwaway config dir holding `existing` (when given), with `input` on stdin. */
+function runMode (mode, { input, existing } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'orca-jev-feature-modules-save-'))
+  temps.push(home)
+  const configDir = join(home, '.config', 'orca-supervisor')
+  const file = join(configDir, 'feature-modules.json')
+  if (existing !== undefined) {
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(file, existing)
+  }
+  const env = { ...process.env, HOME: home, ORCA_SUPERVISOR_CONFIG_DIR: configDir }
+  delete env.XDG_CONFIG_HOME
+  const result = JSON.parse(execFileSync(process.execPath, [SCRIPT_PATH, mode], { env, encoding: 'utf8', input }))
+  return { result, file, configDir, content: existsSync(file) ? readFileSync(file, 'utf8') : null }
+}
+
+const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off' }
+
+test('feature-modules-save: writes the chosen states, pretty-printed, and answers with them', () => {
+  const { result, content, configDir } = runMode('feature-modules-save', { input: JSON.stringify({ modules: CHOSEN }) })
+  assert.deepEqual(result, { ok: true, value: CHOSEN })
+  assert.deepEqual(JSON.parse(content), { modules: CHOSEN })
+  assert.match(content, /\n {2}"modules"/, 'pretty-printed like the other mirrors')
+  assert.deepEqual(readdirSync(configDir), ['feature-modules.json'], 'the temp file of the atomic write is gone')
+})
+
+test('feature-modules-save: replaces a previous file whole, and feature-modules-read then agrees', () => {
+  const { content } = runMode('feature-modules-save', {
+    existing: JSON.stringify({ modules: { gate: 'off' } }),
+    input: JSON.stringify({ modules: { ...ALL_ACTIVE, steward: 'off' } })
+  })
+  assert.deepEqual(JSON.parse(content), { modules: { ...ALL_ACTIVE, steward: 'off' } })
+  assert.deepEqual(readModules(content), { ok: true, value: { ...ALL_ACTIVE, steward: 'off' } })
+})
+
+for (const [name, input] of [
+  ['input that is not JSON', '{ not json'],
+  ['an empty request', ''],
+  ['a map missing a module', JSON.stringify({ modules: { gate: 'off' } })],
+  ['a state the module does not offer', JSON.stringify({ modules: { ...ALL_ACTIVE, gate: 'shadow' } })],
+  ['an unknown module', JSON.stringify({ modules: { ...ALL_ACTIVE, unknown: 'off' } })],
+  ['modules of the wrong type', JSON.stringify({ modules: 'off' })]
+]) {
+  test(`feature-modules-save: refuses ${name} and leaves the file as it was`, () => {
+    const before = JSON.stringify({ modules: { ...ALL_ACTIVE, board: 'off' } })
+    const { result, content, configDir } = runMode('feature-modules-save', { existing: before, input })
+    assert.equal(result.ok, false)
+    assert.match(result.reason, /^invalid-(json|shape)$/)
+    assert.equal(typeof result.detail, 'string')
+    assert.equal(content, before)
+    assert.deepEqual(readdirSync(configDir), ['feature-modules.json'], 'no half-written temp file')
+  })
+}
+
+test('feature-modules-save: a refused request creates no file where there was none', () => {
+  const { result, content } = runMode('feature-modules-save', { input: '{ not json' })
+  assert.equal(result.ok, false)
+  assert.equal(content, null)
 })
