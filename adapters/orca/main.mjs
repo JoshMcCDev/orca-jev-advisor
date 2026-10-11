@@ -75,6 +75,7 @@ import {
   publishModelsSeedNotice,
   refreshModelDocs,
   seedModelsIfEmpty,
+  upgradeLegacySimpleDefaultIfUntouched,
 } from './models-worker.mjs'
 
 // Every sidecar below (write-secret-mirror.mjs, install-claude-integration.mjs,
@@ -3028,6 +3029,10 @@ function buildModuleRunners (orca, storageHost) {
     'models-catalog': async () => {
       await seedModelsIfEmpty(orca, storageHost)
         .catch((error) => orca.log(`initial model seeding failed: ${error.message}`))
+      // 0.6.29: an install still on the old default simple-tier model moves
+      // to its successor before the mirror, so the hooks see it at once.
+      await upgradeLegacySimpleDefaultIfUntouched(orca, storageHost)
+        .catch((error) => orca.log(`legacy simple-tier upgrade failed: ${error.message}`))
       await mirrorModels(orca, storageHost, MODELS_WORKER_OPTIONS)
         .catch((error) => orca.log(`initial models mirror failed: ${error.message}`))
       await publishModelsSeedNotice(orca, storageHost, MODELS_WORKER_OPTIONS)

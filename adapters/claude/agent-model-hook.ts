@@ -51,6 +51,7 @@ import {
   type ComplexityReading,
 } from "../../src/core/model_decisions.ts";
 import { buildModelOutcomeRecord, type ModelDecisionRecord, type ModelFailOpenReason, type ModelMeasurementRecord } from "../../src/core/model_measurement.ts";
+import { engineSupports } from "../../src/core/engine_support.ts";
 import { parseModelsMirror } from "../../src/core/model_mirror.ts";
 import { JevRequestError, type JevResponse, type JsonValue, type Question } from "../../src/core/jev.ts";
 import { effectiveMode, switchMode, type ModuleState } from "../../src/core/feature_modules.ts";
@@ -74,6 +75,12 @@ export interface AgentModelHookDeps {
    * at measurement. Absent reads as `active`, the 0.6.28 behaviour.
    */
   readonly moduleState?: ModuleState;
+  /**
+   * 0.6.29 T8: the version of the engine running the session, as the mod
+   * recorded it (src/core/engine_support.ts); null or absent = unknown, which
+   * supports every model. A model it cannot run is left off the ladder.
+   */
+  readonly engineVersion?: string | null;
 }
 
 export interface AgentModelHookResult {
@@ -139,7 +146,7 @@ async function handlePreToolUse(payload: Record<string, unknown>, id: string, de
   }
 
   const mirror = parseModelsMirror(deps.mirror);
-  const ladder: readonly ModelEntry[] = availableLadder(mirror.models);
+  const ladder: readonly ModelEntry[] = availableLadder(mirror.models).filter((row) => engineSupports(row.id, deps.engineVersion));
   const legacy = effectiveMode(deps.moduleState ?? "active", switchMode(mirror.active));
   const mode: "measurement" | "active" = legacy === "active" && deps.routerActive !== true ? "active" : "measurement";
   const promptChars = input.prompt.length;
