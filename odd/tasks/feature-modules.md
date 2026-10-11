@@ -18,17 +18,23 @@ A module is a feature the owner can turn off so it costs nothing:
 - no Jev call;
 - no worker timer or event handler.
 
-The modules and what each one owns today:
+The modules and what each one owns today, verified against the code in T1. The registry in `src/core/feature_modules.ts` is the source of truth.
 
-| Module | settings.json hooks | Shared mod copy | Worker work |
-|---|---|---|---|
-| `gate` | Bash: PreToolUse, PostToolUse, PostToolUseFailure, PermissionDenied (`gate-bash`, `gate-outcome`); Edit\|Write\|MultiEdit\|NotebookEdit: PreToolUse (`gate-files`) | none | gate stats, gate authorizations status |
-| `model-router` | Agent: PreToolUse, PostToolUse, PostToolUseFailure (`agent-model`) | router tier judgement | model measurement |
-| `steward` | none | context steward | compaction measurement |
-| `skill-selection` | none | skill and tool selection (`active`, `activeTools`) | none |
-| `board` | none | none | `agent.status.changed`, `worktree.*` events, catalog refresh |
+| Module | settings.json hooks | Shared mod copy | Worker jobs | Existing modes (where stored) |
+|---|---|---|---|---|
+| `gate` | Bash: PreToolUse (`gate-bash.ts`); Bash: PostToolUse, PostToolUseFailure, PermissionDenied (`gate-outcome.ts`); Edit\|Write\|MultiEdit\|NotebookEdit: PreToolUse (`gate-files.mjs`) | none | 15 s: gate authorizations (own), measurements summary (shared with skill-selection). Activity summary (shared with model-router). Activation: deny-tier status, trusted programs, gate defaults. Poll: deny-tier, authorization-forget and trusted-program requests | 9 deny-tier switches (`<configDir>/deny-tier-config.json`), queue mode (`queue-mode.json`), trusted programs (`trusted-programs.json`). No measure mode, so no shadow |
+| `model-router` | Agent: PreToolUse, PostToolUse, PostToolUseFailure (`agent-model.ts`) | router tier (`prompt.submit` origin stamp, `turn.step`); subagent routing (`agent.spawn`, teammate `turn.step`, `tool.call`); subagent status band (no Jev); turn-usage log on every step (no Jev) | 15 s: model measurements. 10 min (quota timer): account quota, router status (shared with steward), model docs check. Consumption summary (shared with steward). Activity summary (shared with gate). Activation: models catalog seed, mirror and notice. Poll: router config and models requests | `routerMode` off/measure/active, `workKindMode` off/measure/active (account settings.json `pluginConfigs["orca-jev-mod-skills@skills-dir"].options`); legacy model switch measurement/active (Orca storage `modelsConfig.active`, mirrored to `models-catalog.json`); explicit models judge/keep (`explicit-models.json`) |
+| `steward` | none | context steward (`turn.start`, `turn.complete` timer) and its person-turn counter in `prompt.submit` | none of its own. Router status (its settings ride on each row) and consumption summary (its decisions) are shared with model-router. Poll: router config request (`steward-set`) | `stewardMode` off/measure/active, `stewardSoftMode` measure/active for the 400k tier (same `pluginConfigs` options) |
+| `skill-selection` | none | skill selection (`prompt.submit`, `prompt.attachment`, `skill.prompt`); tool selection (`prompt.submit`, `tool.call`) | measurements summary (shared with gate). Activation: mod-skills status. Poll: mod-skills config request | `active`, `activeTools` (`<configDir>/mod-skills-config.json`); off means measurement |
+| `board` | none | none | `agent.status.changed` (its 30 s `orca worktree list` / `orca repo list` cache runs inside this handler), `worktree.created` (no-op), `worktree.removed` | none, so no shadow |
 
-The table is a draft. T1 verifies every row against the code before the registry is written.
+Corrections to the T0 draft:
+- **Board.** "Catalog refresh" was not a board job. Catalog refresh, catalog proposals and the catalog/policies mirror feed the gate and `advisor.decide`, so they stay in the base.
+- **Skill-selection.** It does own worker work: the shared measurements summary, its status at activation, and its config request.
+- **Steward.** No "compaction measurement" job exists. Its decisions reach the panel through the shared consumption summary, and its settings through the shared router status. T0 listed router status as model-router only.
+- **Model-router.** The mod part is more than tier judgement. It also covers subagent routing, the subagent status band and the turn-usage log. The last two make no Jev call.
+- **Base, not a module:** the poll loop and heartbeat; key mirror; Claude integration install and rescan; locale; catalog/policies mirror (which also mirrors `queue-mode.json` and `explicit-models.json`); the `advisor.*` commands. Orca's own plugin enable/disable switch (`src/core/orca_enablement.ts`) sits above every module.
+- **Installer header.** It says "Seven hook entries", but `hookSpecs` installs eight (`gate-files.mjs` was added in 0.6.17). T3 fixes the comment.
 
 What "off" means depends on the kind of artifact:
 - **settings.json hooks:** the entries are uninstalled.
@@ -130,7 +136,30 @@ Splitting into separate Orca plugins, or changing Orca. If Orca later gains mani
       - That is 5.07 Jev calls per decision.
       - So the "two Jev calls per prompt with both switches off" under Rules could not be observed on this machine.
     - **Person prompts.** The router's start and stage points decided 1221 times, about one per person prompt (1217), which supports that count. The skills mod decided 1768 times. Its `prompt.submit` skips only empty and slash prompts and does not check the prompt's origin the way the router does, so it also decides on prompts that are not a person's own, such as notifications.
-- [ ] T1 core registry: `src/core/feature_modules.ts`. It holds the module list (verified against the code), `parseFeatureModules(content)` (never throws; missing or malformed input gives today's behaviour), and `moduleState(id)` combining `off` with the existing mode. Strict TDD: RED, then GREEN.
+- [x] T1 core registry: `src/core/feature_modules.ts`. It holds the module list (verified against the code), `parseFeatureModules(content)` (never throws; missing or malformed input gives today's behaviour), and `moduleState(id)` combining `off` with the existing mode. Strict TDD: RED, then GREEN.
+  - **Registry.** `FEATURE_MODULES` gives, per module:
+    - `id`, `states`, `defaultState`;
+    - `hooks`: event, matcher and script;
+    - `modFeatures`: id, engine hooks, and whether it calls Jev;
+    - `workerJobs`: id, function, triggers (activation, poll, one of the 4 intervals, or an Orca event) and sidecar;
+    - `modes`: each existing switch, its values, default, store and `shadowValue`.
+
+    The file is `FEATURE_MODULES_FILE = "feature-modules.json"` in the config dir, shaped `{ "modules": { "<id>": "off" | "shadow" | "active" } }`. The module is pure: no `node:` import, so the mod sandbox can load it.
+  - **Defaults.** Every module defaults to `active`, which reproduces 0.6.28. The gate and the board offer only `off`/`active`: they have no measure mode, and a module offers shadow only when one of its modes has a measure value (a test asserts this).
+  - **API.**
+    - `parseFeatureModules` falls back per field: malformed input, unknown ids, wrong types and unsupported states.
+    - `moduleState`.
+    - `effectiveMode(state, own)`: `off` always gives off; `shadow` caps `active` at `measure` and never turns on an own `off`; `active` gives the own mode.
+    - `switchMode(boolean)` maps the skills, tools and legacy model booleans to measure/active.
+    - `hooksFor`, `modFeaturesOn`, `workerJobsOn` (a shared job is listed once, and runs while any owner is on), `modCopyNeeded`.
+  - **Hook ownership.** The installer exports no list of its hooks, so the test holds a fixed list of the 8 that mirrors its header. It also parses the `hookSpecs` rows out of `install-claude-integration.mjs`'s source and checks them against that list, so a new hook with no owner fails.
+  - **Strict TDD.** RED: `src/core/feature_modules.test.ts` failed with `ERR_MODULE_NOT_FOUND` (the module was missing). GREEN: 23/23. `npm run typecheck` reports 0 errors, and `npm test` passes 3607/3607.
+  - **Findings for later tasks:**
+    - **T2.** Add `FEATURE_MODULES_FILE` to `GATE_OWN_CONFIG_FILES` (`src/core/gate_own_paths.ts`). With the gate off, `gate-files` is uninstalled and nothing guards the file. That is acceptable, because the gate can only be turned off from the panel while it is on.
+    - **T3.** `install()`, `uninstall()` and `status()` address `hookSpecs` by position (`specs[0..7]`, see its comments). Filtering it through `hooksFor` must not shift those indices. Match by event, matcher and script instead.
+    - **T4, turn-usage and subagent band.** The turn-usage log and the subagent status band make no Jev call but belong to `model-router`. With the router off, the Consumption tab's usage, the turn-usage half of Activity and the subagent band stop. The alternative is a base mod feature, but that keeps the mod copy installed with every mod module off, so the router owns them.
+    - **T4, other jobs.** The steward's person-turn counter runs in `prompt.submit` on every prompt. Activation jobs and poll request handlers also spawn sidecars, so "0 jobs" must cover them too. They are in the registry.
+    - **T5.** The router's and steward's own `off` overlap with module `off`, though they never disagree, since off wins either way. The panel should hide the own `off` while the module switch is shown. The gate and the board show only off/on.
 - [ ] T2 gate protection: the module state file joins the gate's own-files refusal (`adapters/claude/gate-files.ts`, and the Bash gate's own-file rules). Subprocess tests for Edit, Write, heredoc, `sed -i`, `cp`, `mv` and `rm`.
 - [ ] T3 installer: `install-claude-integration.mjs` installs only the hooks of the modules that are on, and uninstalls the hooks of the modules that are off. It stays idempotent and goes through the 0.6.26 never-go-back-a-version guard. The mod copy stays while any mod module is on. Verify whether a change to the mod copy needs a Claude Code reload; 0.6.24 showed that settings.json hooks do not. Write the answer here.
 - [ ] T4 mod and worker: each mod feature returns before any Jev call when its module is off. For the worker, the acceptance measure is 0 jobs and 0 sidecar spawns for an off module, per T0's finding that the 15 s and 10 min timers are shared; a timer is removed only when every module using it is off. Tests: zero Jev calls, zero jobs and zero sidecar spawns for an off module.
