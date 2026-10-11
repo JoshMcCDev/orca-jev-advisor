@@ -219,7 +219,7 @@ for the three setting mirrors and the queue below:
 
 | What | Where | Why |
 |---|---|---|
-| Seven hook entries — four on the command gate (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) plus three on model reclassification (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) | `settings.json` in every Claude Code config root, including Orca's own per-account ones | so the gate and the model hooks run in Orca's agent panes, not only outside them |
+| Eight hook entries — four on the command gate (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), three on model reclassification (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) and one file-tools guard (`PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit`) | `settings.json` in every Claude Code config root, including Orca's own per-account ones | so the gate and the model hooks run in Orca's agent panes, not only outside them |
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | the same files | required by the skill and tool advisories |
 | The API key, plain text, mode `600` | `~/.config/orca-supervisor/env` | the gate runs outside Orca and cannot reach encrypted plugin storage |
 | A copy of the skills mod | `skills/orca-jev-mod-skills` under every one of the same config roots | so Claude Code auto-loads it in each one |

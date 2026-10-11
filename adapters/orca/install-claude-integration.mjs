@@ -12,12 +12,12 @@
  *        node install-claude-integration.mjs router-mode-status
  *        node install-claude-integration.mjs router-mode-set <target> <mode>
  *
- * Seven hook entries are managed in total: four in each event's own
- * `Bash`-matcher group (the command gate), and three more in a separate
+ * Eight hook entries are managed in total: four in each event's own
+ * `Bash`-matcher group (the command gate), three in a separate
  * `Agent`-matcher group on the events the Agent tool actually fires
  * (Claude Code's Agent tool is not Bash, so it needs its own matcher
  * group, coexisting with -- never replacing -- the Bash one on the same
- * event):
+ * event), and one in the file tools' own matcher group (0.6.17):
  *
  *   PreToolUse         adapters/claude/gate-bash.ts     asks Jev before running       (matcher Bash)
  *   PostToolUse        adapters/claude/gate-outcome.ts  the command ran and succeeded -> approved (matcher Bash)
@@ -51,6 +51,14 @@
  *             root never replaces a newer install" below): that returns
  *             `skipped` / `newer-install-present` and writes nothing, unless
  *             `--force` (a person's own Install) is passed after pluginRoot.
+ *             Feature modules (src/core/feature_modules.ts): only the
+ *             entries of the modules that are not off are installed; the
+ *             entries of a module that is off are uninstalled the same
+ *             surgical way `uninstall` removes them. The module state is
+ *             read from <configDir>/feature-modules.json; a missing or
+ *             corrupt file means every module's default (all on), which
+ *             installs all eight. The mod copy is always installed, even
+ *             with every mod module off -- see `modCopyNeeded` in install().
  * uninstall   Surgical: removes only the hook entry that is ours (the
  *             script it runs, or the `statusMessage` an older version
  *             marked it with; see isOwnHook), from whichever matcher group (`Bash`
@@ -65,8 +73,9 @@
  *             hook -- a third party's own `Bash` OR `Agent` group included
  *             -- and anything the user changed in between, is left exactly
  *             as found.
- * status      Read-only: reports whether each of the seven is in place
- *             right now, for the config panel and advisor.doctor.
+ * status      Read-only: reports whether each of the eight is in place
+ *             right now, for the config panel and advisor.doctor, and per
+ *             feature module whether its hooks match its state (`modules`).
  * hooks-check Runs each installed hook (gate-bash, gate-outcome,
  *             agent-model, gate-files) as its settings.json entry writes
  *             it, with a no-op payload, and reports which ones failed and why.
@@ -139,6 +148,7 @@ import { WORK_KIND_MODES } from '../../src/core/work_kind.ts'
 import { ROUTER_TIERS, parseVaultEnv, resolveAccountTiers } from '../../src/core/model_router_accounts.ts'
 import { parseModelsMirror } from '../../src/core/model_mirror.ts'
 import { parseQuota } from '../../src/core/consumption.ts'
+import { FEATURE_MODULES, FEATURE_MODULES_FILE, MODULE_IDS, hooksFor, modCopyNeeded, parseFeatureModules } from '../../src/core/feature_modules.ts'
 
 // `~/.claude/...` is Claude Code's own convention, not ours to redefine --
 // it stays home-relative on every platform (Claude Code's own docs give no
@@ -198,6 +208,44 @@ async function resolveLocale () {
     }
   }
   return DEFAULT_LOCALE
+}
+
+/**
+ * Feature modules (odd/tasks/feature-modules.md T3): the module state from
+ * `<configDir>/feature-modules.json`, tried across every STATE_DIRS candidate
+ * like resolveLocale. A missing, unreadable or malformed file parses as the
+ * defaults (every module on), so an upgrade installs exactly what it did.
+ */
+async function readFeatureModules () {
+  for (const dir of STATE_DIRS) {
+    try {
+      return parseFeatureModules(await readFile(join(dir, FEATURE_MODULES_FILE), 'utf8'))
+    } catch {
+      continue
+    }
+  }
+  return parseFeatureModules('')
+}
+
+/** Whether a registry hook entry is the entry `spec` installs: same event, matcher group and script. */
+function specIsHook (spec, hook) {
+  return hook.event === spec.event && hook.matcher === spec.matcher && hook.script === spec.owner.script
+}
+
+/**
+ * Whether `spec` belongs installed under `modules`: it is one of the hooks of
+ * a module that is on. Matched by event, matcher and script, so hookSpecs'
+ * positional indices (specs[0..7]) keep their meaning.
+ */
+function specWanted (spec, modules) {
+  return hooksFor(modules).some((hook) => specIsHook(spec, hook))
+}
+
+/** Installs `spec` when its module is on, uninstalls it when its module is off; returns whether settings changed. */
+function applyHookSpec (settings, spec, modules, state) {
+  return specWanted(spec, modules)
+    ? installHookEntry(settings, spec.event, spec.matcher, spec.owner, spec.entry, state)
+    : uninstallHookEntry(settings, spec.event, spec.matcher, spec.owner, state)
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,6 +1252,7 @@ async function install (pluginRoot, { force = false } = {}) {
   const locale = await resolveLocale()
   const node = await resolveNode()
   const { specs } = hookSpecs(pluginRoot, locale, node)
+  const modules = await readFeatureModules()
   const stored = (await readInstallState()) ?? {}
   const states = targetStates(stored)
   const installedAt = stored.installedAt ?? new Date().toISOString()
@@ -1222,14 +1271,14 @@ async function install (pluginRoot, { force = false } = {}) {
       await backupSettingsOnce(backupPathFor(target), rawBefore)
 
       const { hookChanged, postChanged, deniedChanged, postFailureChanged, agentPreChanged, agentPostChanged, agentPostFailureChanged, fileGuardChanged, envChanged } = await mutateSettingsGuarded(settingsPath, (settings) => ({
-        hookChanged: installHookEntry(settings, specs[0].event, specs[0].matcher, specs[0].owner, specs[0].entry, state),
-        postChanged: installHookEntry(settings, specs[1].event, specs[1].matcher, specs[1].owner, specs[1].entry, state),
-        deniedChanged: installHookEntry(settings, specs[2].event, specs[2].matcher, specs[2].owner, specs[2].entry, state),
-        postFailureChanged: installHookEntry(settings, specs[3].event, specs[3].matcher, specs[3].owner, specs[3].entry, state),
-        agentPreChanged: installHookEntry(settings, specs[4].event, specs[4].matcher, specs[4].owner, specs[4].entry, state),
-        agentPostChanged: installHookEntry(settings, specs[5].event, specs[5].matcher, specs[5].owner, specs[5].entry, state),
-        agentPostFailureChanged: installHookEntry(settings, specs[6].event, specs[6].matcher, specs[6].owner, specs[6].entry, state),
-        fileGuardChanged: installHookEntry(settings, specs[7].event, specs[7].matcher, specs[7].owner, specs[7].entry, state),
+        hookChanged: applyHookSpec(settings, specs[0], modules, state),
+        postChanged: applyHookSpec(settings, specs[1], modules, state),
+        deniedChanged: applyHookSpec(settings, specs[2], modules, state),
+        postFailureChanged: applyHookSpec(settings, specs[3], modules, state),
+        agentPreChanged: applyHookSpec(settings, specs[4], modules, state),
+        agentPostChanged: applyHookSpec(settings, specs[5], modules, state),
+        agentPostFailureChanged: applyHookSpec(settings, specs[6], modules, state),
+        fileGuardChanged: applyHookSpec(settings, specs[7], modules, state),
         envChanged: installEnvVar(settings, state)
       }))
       states[target.id] = state
@@ -1239,6 +1288,12 @@ async function install (pluginRoot, { force = false } = {}) {
       // to restore this settings.json from.
       await writeInstallState({ version: 3, targets: states, installedAt })
 
+      // The mod copy is installed even when no mod module is on
+      // (modCopyNeeded false): the 0.6.26 guard above reads the installed
+      // version from this copy's marker and manifest, so removing it would
+      // let an older plugin root (an older marketplace copy, which also
+      // ignores feature-modules.json) reinstall every hook over this one.
+      // Each mod feature returns before any Jev call while its module is off.
       const modCopyPath = modCopyPathFor(target)
       const modResult = await installModCopy(pluginRoot, modCopyPath, modCopyMarkerPathFor(modCopyPath))
       perTarget.push({
@@ -1301,6 +1356,9 @@ async function install (pluginRoot, { force = false } = {}) {
       modCopy: perTarget.some((t) => t.ok && t.changes.modCopy)
     },
     modCopyWarning: perTarget.find((t) => t.ok && t.modCopyWarning)?.modCopyWarning ?? null,
+    // The module state this install followed, and whether any mod module is on.
+    modules,
+    modCopyNeeded: modCopyNeeded(modules),
     failures: failed,
     nodeCommandVerified: nodeVerified,
     node: node.info
@@ -1408,6 +1466,39 @@ function findMarkedHook (group, owner) {
   return group && Array.isArray(group.hooks) ? group.hooks.find((h) => isOwnHook(h, owner)) : undefined
 }
 
+/**
+ * Per module, for one target: its state and how many of its hook entries are
+ * in `settings` (`present` of `total`), each found by its spec (event, matcher
+ * and script) the way status finds every other entry.
+ */
+function moduleHookPresence (settings, specs, modules) {
+  const out = {}
+  for (const module of FEATURE_MODULES) {
+    const own = specs.filter((spec) => module.hooks.some((hook) => specIsHook(spec, hook)))
+    const present = own.filter((spec) => findMarkedHook(findGroup(settings, spec.event, spec.matcher), spec.owner) !== undefined).length
+    out[module.id] = { state: modules[module.id], present, total: own.length }
+  }
+  return out
+}
+
+/**
+ * Per module, over every target: `installed` when every target holds all its
+ * hooks, `removed` when none holds any (both are true for a module with no
+ * hooks), and `matchesState` when that is what its state asks for -- the
+ * panel's per-module line (feature-modules T5).
+ */
+function moduleHookSummary (perTarget, modules) {
+  const out = {}
+  for (const id of MODULE_IDS) {
+    const rows = perTarget.map((t) => t.modules[id])
+    const hookCount = rows[0]?.total ?? 0
+    const installed = rows.every((row) => row.present === row.total)
+    const removed = rows.every((row) => row.present === 0)
+    out[id] = { state: modules[id], hookCount, installed, removed, matchesState: modules[id] === 'off' ? removed : installed }
+  }
+  return out
+}
+
 async function status (pluginRoot) {
   // Same reasoning as uninstall() above: `specs[*].owner` already covers
   // every locale, so "installed" is answered correctly whether or not the
@@ -1415,6 +1506,7 @@ async function status (pluginRoot) {
   await tightenSettingsBackups()
   const { specs } = hookSpecs(pluginRoot)
   const [gateSpec, postSpec, deniedSpec, postFailureSpec, agentPreSpec, agentPostSpec, agentPostFailureSpec, fileGuardSpec] = specs
+  const modules = await readFeatureModules()
   const modSource = join(pluginRoot, 'adapters', 'claude', 'mod-skills')
   const discovery = await discoverTargets()
   // Best-effort: an unreadable pluginRoot (a missing package.json, a
@@ -1486,7 +1578,8 @@ async function status (pluginRoot) {
       // panel's skills-mod line (see odd/tasks/production-honesty-pass.md
       // P6) reads `exists`, not `installed`, because a stale-but-present
       // copy can still have produced real measurements worth reporting.
-      modCopy: { installed: modCopy.current, exists: modCopy.exists, hasManifest: modCopy.hasManifest }
+      modCopy: { installed: modCopy.current, exists: modCopy.exists, hasManifest: modCopy.hasManifest },
+      modules: moduleHookPresence(settings, specs, modules)
     })
   }
 
@@ -1537,8 +1630,11 @@ async function status (pluginRoot) {
     modCopy: {
       installed: perTarget.every((t) => t.modCopy.installed),
       exists: perTarget.some((t) => t.modCopy.exists),
-      hasManifest: perTarget.some((t) => t.modCopy.hasManifest)
+      hasManifest: perTarget.some((t) => t.modCopy.hasManifest),
+      // Whether any mod module is on. The copy stays installed either way (see install()).
+      needed: modCopyNeeded(modules)
     },
+    modules: moduleHookSummary(perTarget, modules),
     orcaUserData: { path: discovery.userData.path, source: discovery.userData.source, accountsDir: discovery.accountsDir, found: discovery.accountsFound, reason: discovery.reason },
     statePath: STATE_PATH
   }

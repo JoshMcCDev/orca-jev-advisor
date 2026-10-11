@@ -1844,3 +1844,209 @@ test('0.6.26 T3: installed-roots lists the package.json of every installed root,
   assert.deepEqual(snapshotTree(home), before)
   assert.deepEqual(run('installed-roots', makeHome()).packageJsons, [])
 })
+
+// ---------------------------------------------------------------------------
+// Feature modules T3 (odd/tasks/feature-modules.md): install puts in only the
+// hooks of the modules that are on and takes out those of the modules that
+// are off, reading <configDir>/feature-modules.json. No file, a corrupt one or
+// unknown values mean every module's default, which installs all eight.
+// ---------------------------------------------------------------------------
+
+function writeModules (home, content) {
+  const path = join(home, '.config', 'orca-supervisor', 'feature-modules.json')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, typeof content === 'string' ? content : JSON.stringify(content), 'utf8')
+}
+
+/** Every entry of ours, as `event matcher script`, sorted. */
+function ownHookKeys (settings) {
+  const keys = []
+  for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
+    for (const g of groups) {
+      for (const h of g.hooks ?? []) {
+        const first = Array.isArray(h.args) ? h.args[0] : ''
+        const match = typeof first === 'string' ? /\/adapters\/claude\/([^/]+)$/.exec(first) : null
+        if (match && first.startsWith(PLUGIN_ROOT)) keys.push(`${event} ${g.matcher} ${match[1]}`)
+      }
+    }
+  }
+  return keys.sort()
+}
+
+const ALL_EIGHT = [
+  'PermissionDenied Bash gate-outcome.ts',
+  'PostToolUse Agent agent-model.ts',
+  'PostToolUse Bash gate-outcome.ts',
+  'PostToolUseFailure Agent agent-model.ts',
+  'PostToolUseFailure Bash gate-outcome.ts',
+  'PreToolUse Agent agent-model.ts',
+  'PreToolUse Bash gate-bash.ts',
+  `PreToolUse ${FILE_TOOLS_MATCHER} gate-files.mjs`
+]
+const ROUTER_THREE = ['PostToolUse Agent agent-model.ts', 'PostToolUseFailure Agent agent-model.ts', 'PreToolUse Agent agent-model.ts']
+
+const FOREIGN_BASH = { type: 'command', command: 'echo', args: ['someone-else'] }
+const FOREIGN_STOP = { matcher: '', hooks: [{ type: 'command', command: 'echo', args: ['stop'] }] }
+function withForeignHooks (home) {
+  writeSettings(home, { model: 'opus', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [FOREIGN_BASH] }], Stop: [FOREIGN_STOP] } })
+}
+
+test('modules T3: with no module file every module is on, all eight hooks are installed and status says each module matches', () => {
+  const home = makeHome()
+  const result = run('install', home)
+  assert.equal(result.ok, true)
+  assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT)
+  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active' })
+  assert.equal(result.modCopyNeeded, true)
+
+  const status = run('status', home)
+  assert.equal(status.hook.installed, true)
+  assert.equal(status.outcomeHook.installed, true)
+  assert.equal(status.agentModelHook.installed, true)
+  assert.equal(status.fileGuardHook.installed, true)
+  assert.deepEqual(status.modules.gate, { state: 'active', hookCount: 5, installed: true, removed: false, matchesState: true })
+  assert.deepEqual(status.modules['model-router'], { state: 'active', hookCount: 3, installed: true, removed: false, matchesState: true })
+  assert.deepEqual(status.modules.board, { state: 'active', hookCount: 0, installed: true, removed: true, matchesState: true })
+  assert.deepEqual(status.targets[0].modules.gate, { state: 'active', present: 5, total: 5 })
+  assert.equal(status.modCopy.needed, true)
+})
+
+test('modules T3: an all-active file installs byte for byte what no file installs', () => {
+  const plain = makeHome()
+  run('install', plain)
+  const explicit = makeHome()
+  writeModules(explicit, { modules: { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active' } })
+  run('install', explicit)
+  assert.equal(readFileSync(settingsPathFor(explicit), 'utf8').replaceAll(explicit, '<home>'), readFileSync(settingsPathFor(plain), 'utf8').replaceAll(plain, '<home>'))
+})
+
+test('modules T3: a corrupt or unknown module file reads as the defaults and installs all eight', () => {
+  for (const content of ['{not json', '[]', JSON.stringify({ modules: { gate: 'bogus', 'no-such-module': 'off' } }), JSON.stringify({ modules: { gate: 'shadow' } })]) {
+    const home = makeHome()
+    writeModules(home, content)
+    const result = run('install', home)
+    assert.equal(result.ok, true, content)
+    assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT, content)
+    assert.equal(result.modules.gate, 'active', content)
+  }
+})
+
+test('modules T3: turning the gate off removes exactly its five hooks; the router\'s and every foreign hook stay', () => {
+  const home = makeHome()
+  withForeignHooks(home)
+  run('install', home)
+  assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT)
+
+  writeModules(home, { modules: { gate: 'off' } })
+  const result = run('install', home)
+  assert.equal(result.ok, true)
+  assert.equal(result.modules.gate, 'off')
+  assert.equal(result.changes.hook, true)
+  assert.equal(result.changes.outcomeHook, true)
+  assert.equal(result.changes.fileGuardHook, true)
+  assert.equal(result.changes.agentModelHook, false)
+
+  const settings = readSettings(home)
+  assert.deepEqual(ownHookKeys(settings), ROUTER_THREE)
+  assert.deepEqual(bashGroup(settings, 'PreToolUse').hooks, [FOREIGN_BASH], 'the foreign Bash hook and its pre-existing group stay')
+  assert.deepEqual(settings.hooks.Stop, [FOREIGN_STOP])
+  assert.equal(settings.model, 'opus')
+  assert.equal(group(settings, 'PreToolUse', FILE_TOOLS_MATCHER), undefined, 'the file-tools group install created goes with its only entry')
+  assert.equal(bashGroup(settings, 'PostToolUse'), undefined)
+  assert.equal(settings.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, '1')
+
+  const status = run('status', home)
+  assert.deepEqual(status.modules.gate, { state: 'off', hookCount: 5, installed: false, removed: true, matchesState: true })
+  assert.deepEqual(status.modules['model-router'], { state: 'active', hookCount: 3, installed: true, removed: false, matchesState: true })
+  assert.deepEqual(status.targets[0].modules.gate, { state: 'off', present: 0, total: 5 })
+  assert.equal(status.hook.installed, false, 'the existing fields keep reporting what is on disk')
+  assert.equal(status.agentModelHook.installed, true)
+})
+
+/** settings with every event's groups sorted by matcher and the events sorted by name: the order of matcher groups carries no meaning to Claude Code. */
+function normalizeGroupOrder (settings) {
+  const hooks = {}
+  for (const event of Object.keys(settings.hooks ?? {}).sort()) {
+    hooks[event] = [...settings.hooks[event]].sort((a, b) => String(a.matcher).localeCompare(String(b.matcher)))
+  }
+  return { ...settings, hooks }
+}
+
+test('modules T3: turning the gate back on restores exactly the hooks of the first install (only the order of matcher groups may differ)', () => {
+  const home = makeHome()
+  withForeignHooks(home)
+  run('install', home)
+  const firstInstall = readSettings(home)
+
+  writeModules(home, { modules: { gate: 'off' } })
+  run('install', home)
+  writeModules(home, { modules: { gate: 'active' } })
+  const result = run('install', home)
+  assert.equal(result.changes.hook, true)
+  assert.deepEqual(normalizeGroupOrder(readSettings(home)), normalizeGroupOrder(firstInstall))
+  assert.deepEqual(bashGroup(readSettings(home), 'PreToolUse').hooks[0], FOREIGN_BASH, 'the foreign hook keeps its place ahead of ours')
+  assert.equal(run('status', home).modules.gate.matchesState, true)
+})
+
+test('modules T3: install with a module off is idempotent -- a second run changes nothing', () => {
+  const home = makeHome()
+  withForeignHooks(home)
+  writeModules(home, { modules: { gate: 'off', 'model-router': 'off' } })
+  run('install', home)
+  const once = readFileSync(settingsPathFor(home), 'utf8')
+  assert.deepEqual(ownHookKeys(JSON.parse(once)), [])
+  const second = run('install', home)
+  assert.equal(readFileSync(settingsPathFor(home), 'utf8'), once)
+  assert.deepEqual(second.changes, { hook: false, outcomeHook: false, agentModelHook: false, fileGuardHook: false, env: false, modCopy: false })
+})
+
+test('modules T3: the router off removes its three Agent hooks and leaves the gate\'s five', () => {
+  const home = makeHome()
+  run('install', home)
+  writeModules(home, { modules: { 'model-router': 'off' } })
+  run('install', home)
+  assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT.filter((k) => !ROUTER_THREE.includes(k)))
+})
+
+test('modules T3: the mod copy stays installed while any mod module is on', () => {
+  const home = makeHome()
+  writeModules(home, { modules: { 'model-router': 'off', steward: 'off' } })
+  const result = run('install', home)
+  assert.equal(result.modCopyNeeded, true)
+  assert.equal(existsSync(join(modCopyPathFor(home), '.claude-plugin', 'plugin.json')), true)
+  assert.equal(run('status', home).modCopy.installed, true)
+})
+
+test('modules T3: with every mod module off the mod copy is kept anyway, so the never-go-back guard keeps its evidence, and status says it is not needed', () => {
+  const home = makeHome()
+  writeModules(home, { modules: { 'model-router': 'off', steward: 'off', 'skill-selection': 'off' } })
+  const result = run('install', home)
+  assert.equal(result.modCopyNeeded, false)
+  assert.equal(existsSync(join(modCopyPathFor(home), '.claude-plugin', 'plugin.json')), true)
+  const status = run('status', home)
+  assert.equal(status.modCopy.installed, true)
+  assert.equal(status.modCopy.needed, false)
+})
+
+test('modules T3: uninstall with a module off still removes everything and restores the original bytes', () => {
+  const home = makeHome()
+  withForeignHooks(home)
+  const original = readFileSync(settingsPathFor(home), 'utf8')
+  run('install', home)
+  writeModules(home, { modules: { gate: 'off' } })
+  run('install', home)
+  const result = run('uninstall', home)
+  assert.equal(result.ok, true)
+  assert.equal(readFileSync(settingsPathFor(home), 'utf8'), original)
+  assert.equal(existsSync(modCopyPathFor(home)), false)
+})
+
+test('modules T3: with a strictly newer install in place, a module change still writes nothing', () => {
+  const home = makeHome()
+  plantInstallFrom(home, join(home, 'checkouts', 'advisor-newer'), '99.0.0')
+  writeModules(home, { modules: { gate: 'off' } })
+  const before = snapshotTree(home)
+  const result = run('install', home)
+  assert.equal(result.reason, 'newer-install-present')
+  assert.deepEqual(snapshotTree(home), before)
+})
