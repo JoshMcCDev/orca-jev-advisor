@@ -209,3 +209,12 @@ test('a record lands in its own hour\'s file, not in the legacy single file', ()
   assert.equal(names.length, 1, JSON.stringify(names))
   assert.ok([`model-reclassifications-${before}.jsonl`, `model-reclassifications-${after}.jsonl`].includes(names[0]), names[0])
 })
+
+test('feature modules T4: with model-router off in feature-modules.json, the hook appends nothing', () => {
+  const home = makeHome()
+  const configDir = join(home, '.config', 'orca-supervisor')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'feature-modules.json'), JSON.stringify({ modules: { 'model-router': 'off' } }))
+  assert.equal(run(home, PRE_TOOL_USE_AGENT_PAYLOAD), '')
+  assert.deepEqual(logFiles(home), [])
+})

@@ -39,6 +39,7 @@ import { serializeModelRecord } from '../../src/core/model_measurement.ts'
 import { modelMeasurementFileName } from '../../src/core/measurement_files.ts'
 import type { ModelMeasurementRecord } from '../../src/core/model_measurement.ts'
 import { MODELS_MIRROR_FILE } from '../../src/core/model_mirror.ts'
+import { FEATURE_MODULES_FILE, moduleState, parseFeatureModules, type ModuleState } from '../../src/core/feature_modules.ts'
 import { routerModeFromSettings } from '../../src/core/model_router_mode.ts'
 import { normalizePlatform, resolveCacheDir, resolveConfigDir } from '../../src/core/paths.ts'
 import { handleAgentModelHook } from './agent-model-hook.ts'
@@ -110,6 +111,18 @@ function readRouterActive(): boolean {
   } catch {
     return false
   }
+}
+
+/** The model-router module's state (feature-modules.json in the plugin
+ *  config directory). Missing or unreadable gives the defaults (active). */
+function readRouterModuleState(): ModuleState {
+  let content = ''
+  try {
+    content = readFileSync(join(CONFIG_DIR, FEATURE_MODULES_FILE), 'utf8')
+  } catch {
+    // Missing file: the defaults.
+  }
+  return moduleState(parseFeatureModules(content), 'model-router')
 }
 
 /** Best-effort read of the worker's catalog mirror; missing or unreadable
@@ -191,6 +204,7 @@ async function main(): Promise<void> {
   const apiKey = await resolveApiKey()
   const mirror = readMirror()
   const routerActive = readRouterActive()
+  const routerModule = readRouterModuleState()
 
   const result = await handleAgentModelHook(payload, {
     mirror,
@@ -199,6 +213,7 @@ async function main(): Promise<void> {
     now: () => new Date(),
     clockMs: () => Date.now(),
     routerActive,
+    moduleState: routerModule,
   })
 
   if (result.record !== null) appendRecord(result.record)
