@@ -120,3 +120,16 @@ test('an Edit or Write of the plugin\'s Orca storage is refused; another plugin\
   }
   assert.equal(conventional({ tool_name: 'Write', tool_input: { file_path: join(userData, 'plugins-data', 'ab2web.wa-inbox', 'storage.json'), content: '{}' } }), '')
 })
+
+test('feature modules T2: an Edit or Write of the module state file is refused', () => {
+  const home = makeHome()
+  const modules = join(home, '.config', 'orca-supervisor', 'feature-modules.json')
+  for (const [tool_name, tool_input] of [
+    ['Edit', { file_path: modules, old_string: 'active', new_string: 'off' }],
+    ['Write', { file_path: modules, content: '{"modules":{"gate":"off"}}' }]
+  ]) {
+    const payload = denied(run(home, { tool_name, tool_input }))
+    assert.equal(payload.hookSpecificOutput.permissionDecision, 'deny', tool_name)
+    assert.match(payload.hookSpecificOutput.permissionDecisionReason, /^REFUSED: edits the gate's own rules \(~\/\.config\/orca-supervisor\/feature-modules\.json\)/, tool_name)
+  }
+})

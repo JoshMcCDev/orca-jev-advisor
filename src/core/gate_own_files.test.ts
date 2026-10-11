@@ -171,3 +171,20 @@ test("commandWritesGateOwnFile: the macOS storage path, with its space, quoted o
   assert.equal(commandWritesGateOwnFile('cp /tmp/s.json "$HOME/Library/Application Support/orca/plugins-data/ab2web.orca-jev-advisor/storage.json"', PROJECT, HOME, own), storage);
   assert.equal(commandWritesGateOwnFile("echo '{}' > ~/Library/Application\\ Support/orca/plugins-data/ab2web.orca-jev-advisor/storage.json", PROJECT, HOME, own), storage);
 });
+
+test("feature modules T2: the module state file is one of the gate's own files, for every write form", async () => {
+  const { FEATURE_MODULES_FILE } = await import("./feature_modules.ts");
+  const file = `${CONFIG}/${FEATURE_MODULES_FILE}`;
+  assert.ok(GATE_OWN_CONFIG_FILES.includes(FEATURE_MODULES_FILE));
+  assert.equal(gateOwnFileAt(file, OWN), file);
+  for (const command of [
+    `echo '{"modules":{"gate":"off"}}' > ~/.config/orca-supervisor/${FEATURE_MODULES_FILE}`,
+    `cat > ~/.config/orca-supervisor/${FEATURE_MODULES_FILE} <<'EOF'\n{}\nEOF`,
+    `sed -i '' 's/active/off/' ~/.config/orca-supervisor/${FEATURE_MODULES_FILE}`,
+    `cp /tmp/m.json ~/.config/orca-supervisor/${FEATURE_MODULES_FILE}`,
+    `mv /tmp/m.json ~/.config/orca-supervisor/${FEATURE_MODULES_FILE}`,
+    `rm ~/.config/orca-supervisor/${FEATURE_MODULES_FILE}`,
+  ]) {
+    assert.equal(writes(command), file, command);
+  }
+});

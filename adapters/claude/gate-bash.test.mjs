@@ -4160,3 +4160,21 @@ test("T7 fix: a session in a plugin workspace reads the tools' directory from a 
   assert.equal(payload.hookSpecificOutput.permissionDecision, 'allow')
   assert.equal(lastGateRecord(home).stopReason, 'trusted')
 })
+
+test("feature modules T2: a heredoc, sed -i, cp, mv or rm of the module state file is refused locally", () => {
+  const home = makeHome()
+  for (const command of [
+    "cat > ~/.config/orca-supervisor/feature-modules.json <<'EOF'\n{\"modules\":{\"gate\":\"off\"}}\nEOF",
+    'sed -i "" "s/active/off/" "$HOME/.config/orca-supervisor/feature-modules.json"',
+    'cp /tmp/m.json ~/.config/orca-supervisor/feature-modules.json',
+    'mv /tmp/m.json ~/.config/orca-supervisor/feature-modules.json',
+    'rm ~/.config/orca-supervisor/feature-modules.json'
+  ]) {
+    const payload = JSON.parse(run(home, command))
+    assert.equal(payload.hookSpecificOutput.permissionDecision, 'deny', command)
+    assert.match(payload.hookSpecificOutput.permissionDecisionReason, /^REFUSED: edits the gate's own rules \(~\/\.config\/orca-supervisor\/feature-modules\.json\)/, command)
+  }
+  const records = gateLogRecords(home)
+  assert.equal(records.length, 5)
+  assert.ok(records.every((r) => r.source === 'local-rule' && r.verdict === 'deny'))
+})

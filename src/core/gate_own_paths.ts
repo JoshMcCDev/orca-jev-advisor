@@ -21,6 +21,7 @@ export const GATE_OWN_CONFIG_FILES: readonly string[] = [
   "quota.json",
   "mod-skills-config.json",
   "mod-skills-sampling-config.json",
+  "feature-modules.json",
   "env",
 ];
 
