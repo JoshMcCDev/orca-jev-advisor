@@ -195,6 +195,13 @@ to Jev as `project_constraints`.
 **Why.** Rules stated once in the project would count on every call without
 being copied into team policies.
 
+**Caution from Abide** (coldteadotai/abide, which does exactly this for edits).
+In their replay benchmark, edit-level precision was 26% and turn-level
+precision was 73% (`benchmarks/replay/README.md`). The design that held up
+compiles the instruction files into a rubric once, scopes each rule by glob,
+and detects staleness with a hash. Only verdicts of 0.8 or more reach the
+agent; verdicts from 0.5 to 0.8 are notes for the person.
+
 **First thing to verify.** Which of our seeded policies already duplicate
 CLAUDE.md lines, and whether extracting them adds signal or only noise to
 the state. Review Abide before designing this.
@@ -218,6 +225,106 @@ installed copy was the wrong one.
 **First thing to verify.** Whether `cmdDoctor` would have caught the 0.6.10
 reinstall. If it would not, the gap is checking the installed hook's version
 and getting a real answer from it.
+
+### The steward's harm measure: what the person asked next
+
+**What.** [compact-adviser](https://github.com/kunchenguid/compact-adviser),
+the direct competitor to our context steward, labels each checkpoint by the
+user's next request: `context_need` is `none`, `tail`, `artifact` or `older`.
+Only `older` means compacting would have hurt
+(`packages/pi-extension/eval/README.md`). Their decision is a composed score,
+P(finished) × (0.5 + 0.5 × P(hands_on)), with a floor that slides from 0.90 to
+0.50 as context fills (`packages/claude-mod/lib/judge.ts:240-299`). Ours is an
+argmax confidence of 0.7 or more plus fixed tiers
+(`src/core/context_steward.ts`, `decideSteward`).
+
+**Why.** 0.6.27 measures what a compaction saves, but nothing measures what a
+wrong one costs. Without that, the threshold cannot be tuned in either
+direction.
+
+**First thing to verify.** Whether our steward decision log plus the
+transcripts are enough to label `context_need` for the 50 compactions of the
+0.6.27 week. Consider the sliding floor only after that.
+
+### The steward stays out of non-interactive sessions
+
+**What.** compact-adviser goes inert when the session is not interactive
+(`register.ts:854`, `isInteractive`). Our steward never checks it: the field
+is declared in `adapters/claude/mod-skills/claude-code.d.ts` and used nowhere.
+
+**First thing to verify.** Whether the mod loads under `claude -p` at all. If
+it does, this is a one-line guard with a test.
+
+### Gate MCP tools, judged against the goal
+
+**What.** [jev-browser](https://github.com/Ying-Kai-Liao/jev-browser) asks
+whether the next action toward `task.goal` has an effect outside the browser
+that is hard to undo. Above 0.6 it stops with `needs_confirmation`, unless
+an explicit `allow_irreversible` flag authorizes it
+(`src/session.mjs:285, 484-487, 535-537`). Our hooks match Bash, Agent and the
+edit tools only (`adapters/orca/install-claude-integration.mjs:22-29`), so a
+Slack send, a Plane delete or a Lune page delete through MCP is never judged.
+
+**Why.** These are the actions with effects outside the machine: messages to
+other people, and deletes in shared systems. That is what the owner wants
+stopped.
+
+**First thing to verify.** How many `mcp__*` calls the last week of
+transcripts holds, and which of them are writes. A read-only MCP call should
+never cost a Jev call. This shares the goal-in-state work with the `authorized`
+idea above, so design the two together.
+
+### Shadow mode for a new gate layer
+
+**What.** [jev-belay](https://github.com/valentynkit/jev-belay) runs its full
+pipeline and lets the turn end. The would-have-blocked line goes only to the
+person (`belay.mjs:749-769`). Jev_steer_or_queue ships in shadow by default.
+
+**Why.** A new skip layer like the ones in 0.6.28 could run live for a week,
+and be measured on real work, before it decides anything.
+
+**First thing to verify.** Where the gate log already records enough to
+compare "what shadow would do" with "what happened", so shadow is only a
+switch and a log field.
+
+### A replay corpus, intervals and a pass rule
+
+**What.** Abide replays past transcripts through its judge
+(`lib/replay.ts`), and jev-belay extracts a labelled corpus. Before shipping
+as a blocker, belay requires AUROC of at least 0.6 and at least 0.08 over the
+baseline (`tools/measure.mjs:174`), and prints a bootstrap interval next to
+every figure. Belay also measured the value of facts: giving Jev the run
+facts raised AUROC from 0.777 to 0.976. That is the strongest evidence yet
+for the write-then-run ledger above.
+
+**Why.** It is the substrate the frozen challenge sets and the `authorized`
+check both need. Our measurements report bare figures with no interval.
+
+**First thing to verify.** Whether `scratchpad/mine_advise.py` (0.6.28) can
+become a committed replay script that runs the gate in-process over a frozen
+corpus.
+
+### Dead and noisy questions in `jev-health`
+
+**What.** Abide calls a rule dead when its median is at least 0.25 and its max
+stays under 0.7, and noisy when it fires on 60% or more of real items
+(`packages/cli/src/lib/calibration.ts:4-35`). We have `jev-health usage` and
+`flips` (`src/core/jev_health_usage.ts`), but no such verdict per gate
+question or policy.
+
+**First thing to verify.** Whether the gate log keeps every question's score,
+not only the deciding one.
+
+Reviewed with nothing to take for the gate or the steward:
+- [quicksilver](https://github.com/UditAkhourii/quicksilver) offloads bulk
+  classification to Jev. Only its benchmark method is of interest: it charges
+  the skill's own tokens and subtracts a control floor.
+- [jev-seo](https://github.com/AgriciDaniel/jev-seo) is a site audit. It A/B
+  tests question wording against a blind second judge
+  (`references/evaluation.md`), which fits the replay corpus once it exists.
+- [Jev_steer_or_queue](https://github.com/Larkspur-Wang/Jev_steer_or_queue)
+  classifies mid-turn messages. Its lessons, shadow by default and logging
+  `jev: null` on a failure, are covered above and since 0.6.21.
 
 ---
 
