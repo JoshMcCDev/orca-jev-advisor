@@ -135,7 +135,8 @@ const ROUTER_OPTIONS = "account settings.json pluginConfigs[\"orca-jev-mod-skill
 // Jobs more than one module owns: each owner lists the same entry, and the
 // job runs while any of them is on (workerJobsOn).
 const MEASUREMENTS_SUMMARY: WorkerJob = { id: "measurements-summary", fn: "publishMeasurementsSummary", triggers: ["activation", "interval-15s"], sidecar: "read-measurements.mjs" };
-const ROUTER_STATUS: WorkerJob = { id: "router-status", fn: "publishModelRouterStatus", triggers: ["activation", "interval-account-quota-10min"], sidecar: "install-claude-integration.mjs" };
+// Also refreshed on a panel request (attendModelRouterStatusRefresh), which spawns the same sidecar.
+const ROUTER_STATUS: WorkerJob = { id: "router-status", fn: "publishModelRouterStatus", triggers: ["activation", "poll", "interval-account-quota-10min"], sidecar: "install-claude-integration.mjs" };
 const ROUTER_CONFIG_REQUEST: WorkerJob = { id: "router-config-request", fn: "attendModelRouterConfigRequest", triggers: ["poll"], sidecar: "install-claude-integration.mjs" };
 const CONSUMPTION_SUMMARY: WorkerJob = { id: "consumption-summary", fn: "publishConsumptionSummary", triggers: ["activation", "interval-consumption-10min"], sidecar: "read-consumption.mjs" };
 const ACTIVITY_SUMMARY: WorkerJob = { id: "activity-summary", fn: "publishActivitySummary", triggers: ["activation", "interval-activity-10min"], sidecar: "read-activity.mjs" };
@@ -339,6 +340,17 @@ export function modFeaturesOn(modules: FeatureModules): readonly ModFeatureId[] 
 /** The worker jobs that should run, each once: a shared job runs while any of its owners is on. */
 export function workerJobsOn(modules: FeatureModules): readonly WorkerJobId[] {
   return [...new Set(modulesOn(modules).flatMap((module) => module.workerJobs.map((job) => job.id)))];
+}
+
+/** The jobs that run on `trigger`, whichever module owns them. A timer or an event subscription is shared by all of them. */
+export function workerJobsFor(trigger: WorkerTrigger): readonly WorkerJobId[] {
+  return [...new Set(FEATURE_MODULES.flatMap((module) => module.workerJobs.filter((job) => job.triggers.includes(trigger)).map((job) => job.id)))];
+}
+
+/** Whether `trigger` has anything left to do: at least one of its jobs is on. A timer is cleared only when this is false, that is when every module using it is off. */
+export function workerTriggerOn(modules: FeatureModules, trigger: WorkerTrigger): boolean {
+  const on = new Set(workerJobsOn(modules));
+  return workerJobsFor(trigger).some((id) => on.has(id));
 }
 
 /** Whether the mod copy under ~/.claude/skills must stay installed: any of its features is on. */

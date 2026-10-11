@@ -26,9 +26,11 @@ import {
   moduleState,
   parseFeatureModules,
   switchMode,
+  workerJobsFor,
   workerJobsOn,
+  workerTriggerOn,
 } from "./feature_modules.ts";
-import type { FeatureMode, FeatureModules, HookEntry, ModuleId, ModuleState } from "./feature_modules.ts";
+import type { FeatureMode, FeatureModules, HookEntry, ModuleId, ModuleState, WorkerTrigger } from "./feature_modules.ts";
 
 /** The eight entries install-claude-integration.mjs installs today (its header and hookSpecs). */
 const INSTALLED_HOOKS: readonly HookEntry[] = [
@@ -189,6 +191,32 @@ test("workerJobsOn: a shared job runs while any owner is on, and is listed once"
   const boardOff = workerJobsOn(withStates({ board: "off" }));
   for (const id of ["board-agent-status", "board-worktree-created", "board-worktree-removed"] as const) assert.equal(boardOff.includes(id), false, id);
   assert.deepEqual(workerJobsOn(withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off" })), []);
+});
+
+test("workerJobsFor: the jobs behind each trigger, whichever module owns them (T0's shared timers)", () => {
+  assert.deepEqual([...workerJobsFor("interval-15s")].sort(), ["gate-authorizations", "measurements-summary", "model-measurements"]);
+  assert.deepEqual([...workerJobsFor("interval-account-quota-10min")].sort(), ["account-quota", "model-docs-check", "router-status"]);
+  assert.deepEqual(workerJobsFor("interval-consumption-10min"), ["consumption-summary"]);
+  assert.deepEqual(workerJobsFor("interval-activity-10min"), ["activity-summary"]);
+  assert.deepEqual([...workerJobsFor("agent.status.changed")], ["board-agent-status"]);
+  assert.equal(new Set(workerJobsFor("poll")).size, workerJobsFor("poll").length, "listed once");
+  // The router status is also refreshed on a panel request, which spawns a sidecar: it is a poll job.
+  assert.equal(workerJobsFor("poll").includes("router-status"), true);
+});
+
+test("workerTriggerOn: a timer is wanted until every module using it is off", () => {
+  const fifteenSeconds: WorkerTrigger = "interval-15s";
+  assert.equal(workerTriggerOn(DEFAULT_FEATURE_MODULES, fifteenSeconds), true);
+  // Gate, model-router and skill-selection use it: any one keeps it.
+  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off" }), fifteenSeconds), true);
+  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off" }), fifteenSeconds), false);
+  // The steward's jobs are not on the 15 s timer, so only the shared 10 min ones keep it.
+  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off", board: "off" }), "interval-consumption-10min"), true);
+  assert.equal(workerTriggerOn(withStates({ "model-router": "off", steward: "off" }), "interval-consumption-10min"), false);
+  assert.equal(workerTriggerOn(withStates({ "model-router": "off", gate: "off" }), "interval-activity-10min"), false);
+  assert.equal(workerTriggerOn(withStates({ board: "off" }), "agent.status.changed"), false);
+  assert.equal(workerTriggerOn(withStates({ "model-router": "off", steward: "off" }), "interval-account-quota-10min"), false);
+  assert.equal(workerTriggerOn(withStates({ "model-router": "off" }), "interval-account-quota-10min"), true, "the steward still reads the router status");
 });
 
 test("every hook the installer installs today is owned by exactly one module", () => {

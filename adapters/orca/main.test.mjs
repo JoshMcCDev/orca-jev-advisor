@@ -12,6 +12,7 @@ import { after, test } from 'node:test'
 
 import { DEFAULT_DENY_TIER_SWITCHES, DENY_TOGGLE_KEYS } from '../../src/core/deny_tier_config.ts'
 import { GATE_CONSEQUENCE_CEILING } from '../../src/core/decisions.ts'
+import { FEATURE_MODULES } from '../../src/core/feature_modules.ts'
 import { POLICY_SEED_MARKER_KEY, parseSeedPolicies, parseSeedVersion } from '../../src/core/policy_seed.ts'
 import { decidePolicySeedNotice } from '../../src/core/policy_seed_notice.ts'
 import { getPolicies } from '../../src/core/store.ts'
@@ -58,6 +59,7 @@ const {
   attendPolicySeedNoticeRefresh,
   attendSecretRequest,
   boardProjectName,
+  buildModuleRunners,
   CATALOG_PROPOSAL_ACCEPT_RESULT_KEY,
   CATALOG_PROPOSALS_STATUS_KEY,
   CATALOG_REFRESH_RESULT_KEY,
@@ -83,6 +85,7 @@ const {
   migrateLegacyPolicyKinds,
   mirrorAccountQuota,
   mirrorCatalogAndPolicies,
+  MODULE_PERIODS,
   onAgentStatusChanged,
   MODEL_ROUTER_CONFIG_RESULT_KEY,
   MODEL_ROUTER_STATUS_KEY,
@@ -2512,4 +2515,22 @@ test('publishTrustedPrograms publishes the stored list, validated', async () => 
   const storageHost = fakeStorageHost({ trustedPrograms: ['acme-notify', 'rm'] })
   await publishTrustedPrograms(fakeOrca(), storageHost)
   assert.deepEqual((await storageHost.get(TRUSTED_PROGRAMS_STATUS_KEY)).programs, ['acme-notify'])
+})
+
+// ---------------------------------------------------------------------------
+// Feature modules (odd/tasks/feature-modules.md, T4): the scheduler is only as
+// complete as the table of what each registry job runs.
+// ---------------------------------------------------------------------------
+
+test('buildModuleRunners: a runner for every registry job that runs at activation or on an interval, a handler for every Orca event, and a period for every interval', () => {
+  const { runners, eventHandlers } = buildModuleRunners(fakeOrca(), fakeStorageHost())
+  const jobs = FEATURE_MODULES.flatMap((module) => module.workerJobs)
+  const triggers = new Set(jobs.flatMap((job) => job.triggers))
+  const expectedRunners = new Set(jobs.filter((job) => job.triggers.some((t) => t === 'activation' || t.startsWith('interval-'))).map((job) => job.id))
+  assert.deepEqual(new Set(Object.keys(runners)), expectedRunners)
+  const events = [...triggers].filter((t) => t.includes('.'))
+  assert.deepEqual(new Set(Object.keys(eventHandlers)), new Set(events))
+  const intervals = [...triggers].filter((t) => t.startsWith('interval-'))
+  assert.deepEqual(new Set(Object.keys(MODULE_PERIODS)), new Set(intervals))
+  for (const period of Object.values(MODULE_PERIODS)) assert.ok(period > 0)
 })
