@@ -18,7 +18,8 @@
     "check": "npm run preflight && npm run test:panels",
     "test:panels": "node --test scripts/panels.spec.mjs",
     "ab-benchmark": "node --experimental-strip-types adapters/cli/ab_benchmark_cli.ts",
-    "jev-health": "node --experimental-strip-types adapters/cli/jev_health_cli.ts"
+    "jev-health": "node --experimental-strip-types adapters/cli/jev_health_cli.ts",
+    "measure-module-cost": "node --experimental-strip-types scripts/measure-module-cost.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.19.0",
