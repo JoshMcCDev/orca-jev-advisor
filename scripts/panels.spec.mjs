@@ -205,6 +205,10 @@ function hostBridge (storage) {
         value = { ok: true, reason: null, name: String(window.__written.trustedProgramRequest.name).trim().toLowerCase(), ...storage.__trustedProgramResult, id: window.__written.trustedProgramRequest.id }
       } else if (key === 'trustedProgramsStatus' && window.__written.trustedProgramRequest && storage.__trustedProgramsAfter) {
         value = { programs: storage.__trustedProgramsAfter, checkedAt: new Date().toISOString() }
+      } else if (key === 'featureModulesSaveResult' && window.__written.featureModulesSaveRequest) {
+        // feature-modules T5: the worker answers the module switch with the id the panel minted;
+        // `storage.__featureModulesResult` overrides ok/skipped/reason (a skipped install, a refusal).
+        value = { ok: true, saved: true, skipped: false, reason: null, detail: null, modules: null, ...storage.__featureModulesResult, id: window.__written.featureModulesSaveRequest.id }
       } else if (key === 'modelsSeedResult' && window.__written.modelsSeedRequest) {
         // odd/tasks/model-reclassification.md T7: models-worker.mjs answers
         // one request/result channel for both apply and dismiss (unlike the
@@ -4321,4 +4325,274 @@ test('every trusted.* key in one language catalog exists in the other', { skip: 
   } finally {
     await browser.close()
   }
+})
+
+// ---------------------------------------------------------------------------
+// config.html -- the Modules section (feature-modules T5). First on the
+// General tab. One card per module with its switch, what it does, what it
+// costs and whether the Claude Code hooks match the choice; the switch is a
+// request the worker attends, and a module that is off hides the settings
+// that belong to it. The fixtures are screenshot-panels.mjs's own (ready: all
+// active; modules-mixed: gate off, router shadow; modules-skipped: a newer
+// install kept the gate's hooks), derived from the installer's real
+// status().modules shape (fixture_shape.test.mjs).
+// ---------------------------------------------------------------------------
+
+const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board']
+const MODULES_SKIP = { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }
+
+/** The ready fixture with the installer's per-module state replaced for `states`. */
+function withModuleStates (states, extra = {}) {
+  const base = SCENARIOS.ready.claudeIntegrationStatus
+  const modules = Object.fromEntries(Object.entries(base.modules).map(([id, info]) => {
+    const state = states[id] ?? info.state
+    return [id, { ...info, state, installed: state !== 'off' || info.hookCount === 0, removed: state === 'off' || info.hookCount === 0, matchesState: true }]
+  }))
+  return { ...SCENARIOS.ready, ...extra, claudeIntegrationStatus: { ...base, modules } }
+}
+
+async function moduleCards (page) {
+  return page.evaluate(() => Array.from(document.querySelectorAll('#modules-rows .module-row')).map((card) => {
+    const group = card.querySelector('.module-states')
+    const buttons = Array.from(group.querySelectorAll('button'))
+    return {
+      id: card.getAttribute('data-module-row'),
+      name: card.querySelector('.module-name').textContent,
+      states: buttons.map((b) => b.dataset.value),
+      pressed: buttons.filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.dataset.value),
+      labels: buttons.map((b) => b.textContent),
+      disabled: buttons.map((b) => b.disabled),
+      text: card.innerText
+    }
+  }))
+}
+
+test('Modules: the first section of General lists the five modules with what they do and cost, all active by default', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+  try {
+    const first = await page.evaluate(() => document.querySelector('#panel-general section').id)
+    assert.equal(first, 'modules-section')
+    const cards = await moduleCards(page)
+    assert.deepEqual(cards.map((c) => c.id), MODULE_IDS)
+    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board'])
+    // The registry decides the states: no shadow where the module has no measure mode of its own.
+    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active']])
+    assert.deepEqual(cards[1].labels, ['Off', 'Shadow', 'Active'])
+    const gate = cards[0].text
+    assert.match(gate, /Checks every Bash command and file edit/)
+    assert.match(gate, /about 9\.3 Jev calls per prompt, and 1\.9 hook processes per Bash command or file edit/)
+    assert.match(gate, /about 236 node processes an hour with a panel open, none with no panel open/)
+    assert.match(cards[1].text, /about 240 node processes an hour\./, 'a figure that does not change with the panel is one figure')
+    assert.match(cards[3].text, /Background: nothing of its own\./)
+    assert.match(cards[4].text, /no Jev calls and no hooks/)
+    assert.match(gate, /Hooks installed \(5\), as you chose\./)
+    assert.match(cards[2].text, /follows the switch directly/, 'a module with no hooks of its own says so')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: pressing a state sends the whole map to the worker, and the answer is shown on that card', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS.ready)
+  try {
+    await page.click('[data-module-states="gate"] button[data-value="off"]')
+    await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+    assert.equal(typeof request.id, 'string')
+    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active' })
+    await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="gate"]').textContent), undefined, { timeout: 25000 })
+    assert.equal(await page.evaluate(() => document.querySelector('[data-module-said="steward"]').textContent), '', 'only the pressed card answers')
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: a state the card already shows sends nothing', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS.ready)
+  try {
+    await page.click('[data-module-states="steward"] button[data-value="active"]')
+    await page.waitForTimeout(1500)
+    assert.equal(await page.evaluate(() => window.__written.featureModulesSaveRequest ?? null), null)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: an install left alone by a newer one is named on the card and in the answer', MODULES_SKIP, async () => {
+  const storage = { ...SCENARIOS['modules-skipped'], __featureModulesResult: { skipped: true, reason: 'newer-install-present' } }
+  const { browser, page } = await openPanel(storage)
+  try {
+    const gate = (await moduleCards(page))[0]
+    assert.match(gate.text, /Skipped: a newer install \(version 0\.7\.1\) keeps its own hooks\. Press "Set up" to replace it\./)
+    assert.deepEqual(gate.pressed, ['off'])
+    await page.click('[data-module-states="skill-selection"] button[data-value="shadow"]')
+    await page.waitForFunction(() => /newer install keeps its hooks/.test(document.querySelector('[data-module-said="skill-selection"]').textContent), undefined, { timeout: 25000 })
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: hooks that have not caught up with the choice read as pending, not as skipped, when no newer install is in the way', MODULES_SKIP, async () => {
+  const pending = withModuleStates({ gate: 'off' })
+  pending.claudeIntegrationStatus.modules.gate = { ...pending.claudeIntegrationStatus.modules.gate, installed: true, removed: false, matchesState: false }
+  const { browser, page } = await openPanel(pending)
+  try {
+    assert.match((await moduleCards(page))[0].text, /Pending: the hooks have not caught up with this choice yet\./)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: a refused or failed switch says so in words and reads the real state back', MODULES_SKIP, async () => {
+  const storage = { ...SCENARIOS.ready, __featureModulesResult: { ok: false, saved: true, reason: 'install-failed' } }
+  const { browser, page } = await openPanel(storage)
+  try {
+    await page.click('[data-module-states="board"] button[data-value="off"]')
+    await page.waitForFunction(() => /could not be updated/.test(document.querySelector('[data-module-said="board"]').textContent), undefined, { timeout: 25000 })
+    assert.equal(await page.evaluate(() => document.querySelector('[data-module-said="board"]').className), 'said bad')
+    // The buttons are usable again once the answer is in.
+    await page.waitForFunction(() => !document.querySelector('[data-module-states="board"] button').disabled, undefined, { timeout: 25000 })
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: with the gate off its settings are hidden, a note says why, and its removed hooks read as chosen', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel(SCENARIOS['modules-mixed'])
+  try {
+    const cards = await moduleCards(page)
+    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active']])
+    assert.match(cards[0].text, /Hooks removed from Claude Code, as you chose\./)
+    assert.match(cards[0].text, /With the gate off, nothing checks Bash commands or file edits/)
+    const lines = await page.evaluate(() => document.getElementById('claude-integration-status').innerText)
+    assert.match(lines, /Bash hook: removed on purpose \(the Gate module is off\)\./)
+    assert.match(lines, /Edit guard \(the gate's own rules\): removed on purpose/)
+    assert.doesNotMatch(lines, /Bash hook: not installed/)
+    assert.match(lines, /Agent model hooks: installed/, 'the router keeps its hooks while it is in shadow')
+
+    await page.click('#tab-rules')
+    const rules = await page.evaluate(() => ({
+      sections: ['deny-tier-section', 'gate-authorizations-section', 'trusted-programs-section'].map((id) => document.getElementById(id).offsetParent !== null),
+      note: document.querySelector('#panel-rules [data-module-note="gate"]').innerText
+    }))
+    assert.deepEqual(rules.sections, [false, false, false])
+    assert.match(rules.note, /The Gate module is off, so its settings are hidden\. Switch it on in General, under Modules\./)
+
+    await page.click('#tab-policies')
+    assert.equal(await page.evaluate(() => document.getElementById('queue-mode-section').offsetParent), null, 'queue mode is a gate setting')
+    assert.notEqual(await page.evaluate(() => document.getElementById('policies-section').offsetParent), null, 'the policies feed advisor.decide too and stay')
+
+    // Shadow keeps the settings and says what is capped.
+    await page.click('#tab-models')
+    const models = await page.evaluate(() => ({
+      router: document.getElementById('model-router-section').offsetParent !== null,
+      catalog: document.getElementById('models-section').offsetParent !== null,
+      note: document.querySelector('#panel-models [data-module-note="model-router"]').innerText
+    }))
+    assert.equal(models.router, true)
+    assert.equal(models.catalog, true)
+    assert.match(models.note, /The Model router module is in shadow: it measures and logs what it would do, and changes nothing in your turns\./)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: skill selection off hides its tab content, and the steward off hides only its own rows', MODULES_SKIP, async () => {
+  const storage = { ...withModuleStates({ 'skill-selection': 'off', steward: 'off' }), modelRouterStatus: MODEL_ROUTER_STATUS_EFFORT }
+  const { browser, page } = await openPanel(storage)
+  try {
+    await page.click('#tab-modskills')
+    assert.equal(await page.evaluate(() => document.getElementById('mod-skills-section').offsetParent), null)
+    assert.match(await page.evaluate(() => document.querySelector('[data-module-note="skill-selection"]').innerText), /Skill and tool selection module is off/)
+    await page.click('#tab-models')
+    const router = await page.evaluate(() => ({
+      stewardRows: Array.from(document.querySelectorAll('[data-steward-target]')).filter((row) => row.offsetParent !== null).length,
+      routerRows: document.querySelectorAll('#model-router-rows .mode-buttons[data-model-router-target]').length,
+      stewardHint: Array.from(document.querySelectorAll('#model-router-section p[data-module="steward"]')).some((p) => p.offsetParent !== null),
+      note: document.querySelector('#model-router-section [data-module-note="steward"]').innerText
+    }))
+    assert.equal(router.stewardRows, 0)
+    assert.equal(router.routerRows, 2)
+    assert.equal(router.stewardHint, false)
+    assert.match(router.note, /Context steward module is off/)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the model router and the steward lose their own Off button, unless a target still holds it', MODULES_SKIP, async () => {
+  const status = {
+    targets: [
+      { target: 'home', mode: 'measure', steward: { mode: 'measure', threshold: 120000 } },
+      { target: '11112222-3333-4444-5555-666677778888', mode: 'off', steward: { mode: 'off', threshold: 150000 } }
+    ],
+    checkedAt: new Date().toISOString()
+  }
+  const { browser, page } = await openPanel({ ...SCENARIOS.ready, modelRouterStatus: status })
+  try {
+    await page.click('#tab-models')
+    const offButtons = await page.evaluate(() => {
+      const shown = (group) => Array.from(group.querySelectorAll('button')).filter((b) => b.offsetParent !== null).map((b) => b.textContent)
+      return {
+        routerHome: shown(document.querySelector('#model-router-rows .mode-buttons[data-model-router-target="home"]')),
+        stewardHome: shown(document.querySelector('[data-steward-target="home"] .mode-buttons')),
+        routerHeld: shown(document.querySelector('#model-router-rows .mode-buttons[data-model-router-target="11112222-3333-4444-5555-666677778888"]')),
+        stewardHeld: shown(document.querySelector('[data-steward-target="11112222-3333-4444-5555-666677778888"] .mode-buttons'))
+      }
+    })
+    assert.deepEqual(offButtons.routerHome, ['Measure', 'Active'])
+    assert.deepEqual(offButtons.stewardHome, ['Measure', 'Active'])
+    assert.deepEqual(offButtons.routerHeld, ['Off', 'Measure', 'Active'])
+    assert.deepEqual(offButtons.stewardHeld, ['Off', 'Measure', 'Active'])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the section reads in Spanish, with no raw key and no neighbouring controls touching', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS['modules-mixed'], 'es', 'dark', { width: 390, height: 1200 })
+  try {
+    const cards = await moduleCards(page)
+    assert.equal(await page.evaluate(() => document.querySelector('#modules-section h2').textContent), 'Módulos')
+    assert.deepEqual(cards[1].labels, ['Apagado', 'Sombra', 'Activo'])
+    assert.match(cards[0].text, /Hooks quitados de Claude Code, como elegiste\./)
+    assert.match(cards[0].text, /unas 9,3 llamadas a Jev por prompt/)
+    assert.doesNotMatch(await page.evaluate(() => document.getElementById('modules-section').innerText), /(?:^|\s)(?:modules|integration)\.[a-z]/, 'a raw key was painted')
+    assert.match(await page.evaluate(() => document.getElementById('claude-integration-status').innerText), /Hook de Bash: quitado a propósito/)
+    assert.deepEqual(await touchingControls(page), [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: nothing scrolls sideways at 320px, with every module on and with a mixed choice', MODULES_SKIP, async () => {
+  for (const scenario of ['ready', 'modules-skipped']) {
+    const { browser, page } = await openPanel(SCENARIOS[scenario], 'en', 'light', { width: 320, height: 900 })
+    try {
+      for (const tab of ['general', 'models', 'rules']) {
+        await page.click(`#tab-${tab}`)
+        const overflow = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }))
+        assert.ok(overflow.scroll <= overflow.client, `${scenario}/${tab}: ${overflow.scroll}px in ${overflow.client}px`)
+      }
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('every modules.* key and the module hook lines exist in both languages, accented in Spanish and free of " -- "', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const html = await readFile(CONFIG_PANEL, 'utf8')
+  const keys = (block) => new Map(Array.from(block.matchAll(/^\s+'((?:modules\.[A-Za-z0-9_.-]+)|(?:integration\.[A-Za-z]*ModuleOff))':\s*(['"])(.*)\2,?\s*$/gm)).map((m) => [m[1], m[3]]))
+  const es = keys(html.slice(html.indexOf('es: {'), html.indexOf('en: {')))
+  const en = keys(html.slice(html.indexOf('en: {')))
+  assert.ok(es.size > 40, `expected the modules keys, found ${es.size}`)
+  assert.deepEqual([...es.keys()].sort(), [...en.keys()].sort())
+  for (const [key, value] of [...es, ...en]) assert.ok(!value.includes(' -- '), key)
+  for (const key of ['modules.heading', 'modules.intro', 'modules.noteOff', 'modules.install.pending']) {
+    assert.match(es.get(key), /[áéíóúñ«]/, `${key} reads as Spanish with its accents`)
+  }
+  assert.doesNotMatch([...es.values()].join(' '), /\b(tenés|podés|elegí|pulsá|revisá)\b/i, 'tú, never voseo')
 })

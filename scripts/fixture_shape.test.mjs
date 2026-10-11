@@ -220,3 +220,38 @@ test('ready.trustedProgramsStatus has the keys the real worker publishes, and tw
   assert.equal(fixture.programs.length, 2)
   rmSync(paths, { recursive: true, force: true })
 })
+
+// feature-modules T5: the Modules section reads status().modules, the
+// installer's per-module summary. The fixtures are held to what the real
+// installer reports (a throwaway HOME, nothing installed, with and without a
+// module file), so a renamed field fails here instead of photographing a
+// section nobody will ever see.
+test('the fixtures\' integration status carries the modules the real installer reports', SKIP_NO_PLAYWRIGHT, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'orca-fixture-shape-modules-'))
+  try {
+    const configDir = join(home, '.config', 'orca-supervisor')
+    const status = async () => {
+      const env = { ...process.env, HOME: home, USERPROFILE: home, ORCA_SUPERVISOR_CONFIG_DIR: configDir, NODE_TEST_CONTEXT: undefined }
+      delete env.ORCA_USER_DATA_PATH
+      delete env.XDG_CONFIG_HOME
+      const { stdout } = await execFileAsync(process.execPath, ['--experimental-strip-types', '--no-warnings', join(ROOT, 'adapters', 'orca', 'install-claude-integration.mjs'), 'status', ROOT], { env, cwd: ROOT })
+      return JSON.parse(stdout)
+    }
+    const defaults = await status()
+    assert.equal(defaults.ok, true)
+    for (const name of ['ready', 'modules-mixed', 'modules-skipped']) {
+      const fixture = SCENARIOS[name].claudeIntegrationStatus.modules
+      assert.deepEqual(keyPaths(fixture).sort(), keyPaths(defaults.modules).sort(), name)
+    }
+    assert.deepEqual(Object.keys(READY.claudeIntegrationStatus.modules), Object.keys(defaults.modules))
+    // Hook counts are the installer's own, not typed twice with a chance to drift.
+    for (const [id, info] of Object.entries(defaults.modules)) assert.equal(READY.claudeIntegrationStatus.modules[id].hookCount, info.hookCount, id)
+    // The gate chosen off with nothing installed: the fixture's off row is exactly that.
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, 'feature-modules.json'), JSON.stringify({ modules: { gate: 'off' } }))
+    const gateOff = await status()
+    assert.deepEqual(SCENARIOS['modules-mixed'].claudeIntegrationStatus.modules.gate, gateOff.modules.gate)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})

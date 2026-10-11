@@ -44,7 +44,7 @@ const KEYS = ['explicitModels.heading', 'explicitModels.label', 'explicitModels.
 
 test('config.html: the explicit models choice is a labelled select with both choices, inside the Models tab', () => {
   const models = tabPanelMarkup('models')
-  assert.match(models, /<section id="explicit-models-section">/)
+  assert.match(models, /<section id="explicit-models-section" data-module="model-router">/)
   assert.match(models, /<label id="explicit-models-label" data-i18n="explicitModels\.label"><\/label>/)
   assert.match(models, /<div id="explicit-models" class="mode-buttons" role="group" aria-labelledby="explicit-models-label">/)
   assert.match(models, /<button type="button" data-value="judge" data-i18n="explicitModels\.judge"><\/button>/)

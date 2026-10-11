@@ -31,7 +31,7 @@ const KEYS = [
 
 test('config.html: the remembered authorizations section sits in the Rules tab, after the deny tier', () => {
   const rules = tabPanelMarkup('rules')
-  assert.match(rules, /<section id="gate-authorizations-section">/)
+  assert.match(rules, /<section id="gate-authorizations-section" data-module="gate">/)
   assert.ok(rules.indexOf('id="deny-tier-section"') < rules.indexOf('id="gate-authorizations-section"'))
   assert.match(rules, /<div id="gate-auth-rows"><\/div>/)
   assert.match(rules, /id="gate-auth-empty"/)

@@ -59,7 +59,7 @@ test('config.html: the Models section owns its own <script> block, separate from
 // ---------------------------------------------------------------------------
 
 test('config.html: the models-section exists', () => {
-  assert.match(configHtml, /<section id="models-section">/)
+  assert.match(configHtml, /<section id="models-section" data-module="model-router">/)
 })
 
 const EXPECTED_IDS = [
@@ -143,7 +143,8 @@ function usedI18nKeys (html, prefix) {
 }
 
 function catalogBlock (html, locale) {
-  const re = new RegExp(`${locale}:\\s*\\{([\\s\\S]*?)\\n {8}\\}`)
+  // Anchored to the start of a line: an unanchored `en: {` also matched the end of a Spanish word before a template brace, so the `en` block read was really the tail of `es`.
+  const re = new RegExp(`\\n\\s+${locale}:\\s*\\{([\\s\\S]*?)\\n {8}\\}`)
   const match = html.match(re)
   assert.ok(match, `CATALOG.${locale} block not found`)
   return match[1]
