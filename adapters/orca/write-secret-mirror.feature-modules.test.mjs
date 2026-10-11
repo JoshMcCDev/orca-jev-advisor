@@ -37,19 +37,20 @@ function readModules (content) {
   return JSON.parse(execFileSync(process.execPath, [SCRIPT_PATH, 'feature-modules-read'], { env, encoding: 'utf8' }))
 }
 
-const ALL_ACTIVE = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active' }
+// Every module that existed before 0.8.0 defaults to active; verify-done, new, to shadow.
+const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow' }
 
-test('feature-modules-read: a missing file reads as every module active', () => {
-  assert.deepEqual(readModules(undefined), { ok: true, value: ALL_ACTIVE })
+test('feature-modules-read: a missing file reads as the defaults', () => {
+  assert.deepEqual(readModules(undefined), { ok: true, value: DEFAULTS })
 })
 
 test('feature-modules-read: the states in the file come back', () => {
   const result = readModules(JSON.stringify({ modules: { gate: 'off', 'model-router': 'shadow', board: 'off' } }))
-  assert.deepEqual(result, { ok: true, value: { ...ALL_ACTIVE, gate: 'off', 'model-router': 'shadow', board: 'off' } })
+  assert.deepEqual(result, { ok: true, value: { ...DEFAULTS, gate: 'off', 'model-router': 'shadow', board: 'off' } })
 })
 
-test('feature-modules-read: a corrupt file reads as every module active', () => {
-  assert.deepEqual(readModules('{ not json'), { ok: true, value: ALL_ACTIVE })
+test('feature-modules-read: a corrupt file reads as the defaults', () => {
+  assert.deepEqual(readModules('{ not json'), { ok: true, value: DEFAULTS })
 })
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ function runMode (mode, { input, existing } = {}) {
   return { result, file, configDir, content: existsSync(file) ? readFileSync(file, 'utf8') : null }
 }
 
-const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off' }
+const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off' }
 
 test('feature-modules-save: writes the chosen states, pretty-printed, and answers with them', () => {
   const { result, content, configDir } = runMode('feature-modules-save', { input: JSON.stringify({ modules: CHOSEN }) })
@@ -85,22 +86,23 @@ test('feature-modules-save: writes the chosen states, pretty-printed, and answer
 test('feature-modules-save: replaces a previous file whole, and feature-modules-read then agrees', () => {
   const { content } = runMode('feature-modules-save', {
     existing: JSON.stringify({ modules: { gate: 'off' } }),
-    input: JSON.stringify({ modules: { ...ALL_ACTIVE, steward: 'off' } })
+    input: JSON.stringify({ modules: { ...DEFAULTS, steward: 'off' } })
   })
-  assert.deepEqual(JSON.parse(content), { modules: { ...ALL_ACTIVE, steward: 'off' } })
-  assert.deepEqual(readModules(content), { ok: true, value: { ...ALL_ACTIVE, steward: 'off' } })
+  assert.deepEqual(JSON.parse(content), { modules: { ...DEFAULTS, steward: 'off' } })
+  assert.deepEqual(readModules(content), { ok: true, value: { ...DEFAULTS, steward: 'off' } })
 })
 
 for (const [name, input] of [
   ['input that is not JSON', '{ not json'],
   ['an empty request', ''],
   ['a map missing a module', JSON.stringify({ modules: { gate: 'off' } })],
-  ['a state the module does not offer', JSON.stringify({ modules: { ...ALL_ACTIVE, gate: 'shadow' } })],
-  ['an unknown module', JSON.stringify({ modules: { ...ALL_ACTIVE, unknown: 'off' } })],
+  ['a state the module does not offer', JSON.stringify({ modules: { ...DEFAULTS, gate: 'shadow' } })],
+  ['active for a module that only measures', JSON.stringify({ modules: { ...DEFAULTS, 'verify-done': 'active' } })],
+  ['an unknown module', JSON.stringify({ modules: { ...DEFAULTS, unknown: 'off' } })],
   ['modules of the wrong type', JSON.stringify({ modules: 'off' })]
 ]) {
   test(`feature-modules-save: refuses ${name} and leaves the file as it was`, () => {
-    const before = JSON.stringify({ modules: { ...ALL_ACTIVE, board: 'off' } })
+    const before = JSON.stringify({ modules: { ...DEFAULTS, board: 'off' } })
     const { result, content, configDir } = runMode('feature-modules-save', { existing: before, input })
     assert.equal(result.ok, false)
     assert.match(result.reason, /^invalid-(json|shape)$/)
@@ -114,4 +116,36 @@ test('feature-modules-save: a refused request creates no file where there was no
   const { result, content } = runMode('feature-modules-save', { input: '{ not json' })
   assert.equal(result.ok, false)
   assert.equal(content, null)
+})
+
+// ---------------------------------------------------------------------------
+// 0.8.0 V4: the real panel and the real writer agree. The panel keeps its own
+// module list (config.html MODULE_ROWS) and sends the whole map on every
+// switch; the sidecar refuses a map missing a module. A fake worker in
+// scripts/panels.spec.mjs cannot see that gap, so the map the panel builds,
+// for every state its cards offer, goes through this real sidecar here.
+// ---------------------------------------------------------------------------
+
+/** config.html's MODULE_ROWS, read from its source: each card's id and the states it offers. */
+function panelModuleRows () {
+  const html = readFileSync(join(__dirname, 'panels', 'config.html'), 'utf8')
+  return [...html.matchAll(/\{ id: '([\w-]+)', states: \[([^\]]*)\], cost:/g)].map((match) => ({ id: match[1], states: [...match[2].matchAll(/'([\w-]+)'/g)].map((state) => state[1]) }))
+}
+
+test('the panel offers a card for every registered module, with exactly the states the registry allows', async () => {
+  const { FEATURE_MODULES } = await import('../../src/core/feature_modules.ts')
+  assert.deepEqual(panelModuleRows(), FEATURE_MODULES.map((module) => ({ id: module.id, states: [...module.states] })))
+})
+
+test('feature-modules-save: the map the panel sends, for every state its cards offer, is accepted by the real sidecar', () => {
+  const rows = panelModuleRows()
+  // What the panel holds when nothing was chosen yet: each card at the state the status reports, the defaults.
+  const shown = Object.fromEntries(rows.map((row) => [row.id, DEFAULTS[row.id]]))
+  for (const row of rows) {
+    for (const state of row.states) {
+      const next = { ...shown, [row.id]: state }
+      const { result } = runMode('feature-modules-save', { input: JSON.stringify({ modules: next }) })
+      assert.deepEqual(result, { ok: true, value: next }, `${row.id} ${state}`)
+    }
+  }
 })
