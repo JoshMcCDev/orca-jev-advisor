@@ -57,10 +57,13 @@ export function percentile(values: readonly number[], p: number): number | null 
 /**
  * gate-bash.ts: a `jev` row asked Jev once (the policy and risk questions
  * share one call); `none` + `unreachable` is a call that failed. Cache and
- * local-rule rows asked nothing.
+ * local-rule rows asked nothing. An identical retry (`advice-retry`) is
+ * recorded as `jev` too, but main() passes it before any Jev call, with no
+ * latency (tryAdviceRetryPass); only one that carries a latency followed a call.
  */
 export function gateJevCalls(row: unknown): JevCallCount {
   if (!isRecord(row)) return NONE;
+  if (row["source"] === "jev" && row["stopReason"] === "advice-retry" && numberOrNull(row["latencyMs"]) === null) return NONE;
   if (row["source"] === "jev") return { calls: 1, failures: 0, latencyMs: latencies(row["latencyMs"]) };
   if (row["source"] === "none" && row["stopReason"] === "unreachable") return { calls: 1, failures: 1, latencyMs: latencies(row["latencyMs"]) };
   return NONE;
@@ -108,11 +111,16 @@ export function routerJevCalls(row: unknown): JevCallCount {
   return NONE;
 }
 
-/** model-reclassifications (agent-model.ts): a decision row is one call; a non-null failOpen is its failure. Outcome rows asked nothing. */
+/** The fail-open reasons (model_measurement.ts) that come after a request to Jev was sent; the others give up before any call. */
+const MODEL_FAIL_OPEN_AFTER_CALL: readonly string[] = ["jev-unreachable", "auth-rejected", "unparseable-answer"];
+
+/** model-reclassifications (agent-model.ts): a `jev` decision row is one call; a `none` row is one failed call only when it failed after asking. Outcome rows asked nothing. */
 export function modelDecisionJevCalls(row: unknown): JevCallCount {
   if (!isRecord(row) || row["type"] !== "model-decision") return NONE;
+  if (row["source"] === "jev") return { calls: 1, failures: 0, latencyMs: latencies(row["latencyMs"]) };
   const failOpen = row["failOpen"];
-  return { calls: 1, failures: failOpen === null || failOpen === undefined ? 0 : 1, latencyMs: latencies(row["latencyMs"]) };
+  if (typeof failOpen === "string" && MODEL_FAIL_OPEN_AFTER_CALL.includes(failOpen)) return { calls: 1, failures: 1, latencyMs: latencies(row["latencyMs"]) };
+  return NONE;
 }
 
 /** context-steward-decisions: the steward logs only turns it asked Jev about, one call each; a null verdict is a failed call. */

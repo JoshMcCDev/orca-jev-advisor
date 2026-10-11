@@ -6,9 +6,9 @@
 //
 // Usage (also `npm run measure-module-cost -- <args>`):
 //
-//   node --experimental-strip-types scripts/measure-module-cost.mjs [--days N | --since ISO] [--transcripts DIR] [--audit-dir DIR]
+//   node --experimental-strip-types scripts/measure-module-cost.mjs [--days N | --since ISO] [--until ISO] [--transcripts DIR] [--audit-dir DIR]
 //
-// `--since` pins the window start (it ends now); it wins over `--days`.
+// `--since` pins the window start and wins over `--days`; `--until` pins its end (default: now).
 //
 // Sources:
 //   - the plugin's cache dir (src/core/paths.ts): gate decisions, mod-skills
@@ -37,13 +37,14 @@ const PLUGIN_ACTOR = 'plugin:ab2web.orca-jev-advisor'
 const HOUR_IN_NAME = /(\d{4}-\d{2}-\d{2}T\d{2})\.jsonl$/
 
 function parseArgs (argv) {
-  const args = { days: 7, sinceMs: null, transcripts: null, auditDir: null }
+  const args = { days: 7, sinceMs: null, untilMs: null, transcripts: null, auditDir: null }
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i]
     const value = argv[i + 1]
     if (value === undefined) throw new Error(`missing value for ${flag}`)
     if (flag === '--days') args.days = Number(value)
     else if (flag === '--since') args.sinceMs = Date.parse(value)
+    else if (flag === '--until') args.untilMs = Date.parse(value)
     else if (flag === '--transcripts') args.transcripts = value
     else if (flag === '--audit-dir') args.auditDir = value
     else throw new Error(`unknown argument: ${flag}`)
@@ -51,6 +52,7 @@ function parseArgs (argv) {
   }
   if (!Number.isFinite(args.days) || args.days <= 0) throw new Error('--days must be a positive number')
   if (args.sinceMs !== null && !Number.isFinite(args.sinceMs)) throw new Error('--since must be an ISO instant')
+  if (args.untilMs !== null && !Number.isFinite(args.untilMs)) throw new Error('--until must be an ISO instant')
   return args
 }
 
@@ -115,7 +117,7 @@ function main () {
   const args = parseArgs(process.argv.slice(2))
   const platform = normalizePlatform(process.platform)
   const home = homedir()
-  const untilMs = Date.now()
+  const untilMs = args.untilMs ?? Date.now()
   const sinceMs = args.sinceMs ?? untilMs - args.days * 24 * 60 * 60 * 1000
   const window = { sinceMs, untilMs }
 

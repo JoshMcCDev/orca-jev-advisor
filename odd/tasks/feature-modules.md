@@ -54,60 +54,82 @@ Rules:
 Splitting into separate Orca plugins, or changing Orca. If Orca later gains manifest dependencies and shared secrets, each module can be extracted as its own plugin; that would be a new feature.
 
 ## Checklist
-- [x] T0 measure: per module, from the gate log, the mod logs and the last 7 days of transcripts: hook spawns per tool call and their latency, Jev calls per prompt and per turn, and worker wakeups per hour. The result is the baseline for the acceptance criteria. Script `scripts/measure-module-cost.mjs` (`npm run measure-module-cost -- --since 2026-10-04T22:00:00Z`); the rules live in `src/core/module_cost.ts` (14 unit tests). Strict TDD: RED (module missing), then GREEN 14/14.
-  - **Window:** 2026-10-04T22:00Z to 2026-10-11T05:51Z, 6.3 days. That is the last 7 days minus the hours of the stale 0.6.10 install, when the gate and mod logs were not written. The gate log shows plugin 0.6.25 to 0.6.28.
-  - **Totals from the transcripts:** 1223 person prompts on the main thread, 1460 completed turns and 25756 tool calls. Deduplicated by uuid and tool-use id, subagents included.
+- [x] T0 measure: per module, from the gate log, the mod logs and the last 7 days of transcripts: hook spawns per tool call and their latency, Jev calls per prompt and per turn, and worker wakeups per hour. The result is the baseline for the acceptance criteria. Commits 21d050a, then a follow-up commit (advice-retry and fail-open rules, `--until`).
+  - **Tooling.** The script is `scripts/measure-module-cost.mjs`, run as `npm run measure-module-cost -- --since 2026-10-04T22:00:00Z --until 2026-10-11T05:00:00Z`. The counting rules live in `src/core/module_cost.ts`, with 15 unit tests.
+  - **Strict TDD.** RED: the module was missing. GREEN: 14/14. The follow-up was RED on 2 of 15, then GREEN 15/15.
+  - **Window.** 2026-10-04T22:00Z to 2026-10-11T05:00Z, 6.3 days. That is the last 7 days minus the hours of the stale 0.6.10 install, when the gate and mod logs were not written. The gate log shows plugin 0.6.25 to 0.6.28.
+  - **Transcript totals** (deduplicated by uuid and tool-use id, subagents included):
+    - 1217 person prompts on the main thread;
+    - 1455 completed turns;
+    - 25630 tool calls.
   - **Sources:**
-    - the plugin cache dir: `gate-decisions-*`, `mod-skills-measurements-*`, `mod-tools-measurements-*`, `model-router-decisions-*`, `model-reclassifications-*`, `context-steward-decisions-*`;
+    - the plugin cache dir: `gate-decisions-*`, `mod-skills-measurements-*`, `mod-tools-measurements-*`, `model-router-decisions-*`, `model-reclassifications-*` and `context-steward-decisions-*`;
     - the Claude transcripts;
-    - the 5 settings.json files Claude Code reads: home plus 4 Orca accounts, all with the same 8 hooks of ours;
-    - Orca's plugin audit log (`plugins-data/audit.log*`).
+    - the 5 settings.json files Claude Code reads (home and 4 Orca accounts), all with the same 8 hooks of ours;
+    - Orca's plugin audit log, `plugins-data/audit.log*`.
 
   | Module | Hook spawns (derived) | per matching tool call | Hook ms p50 / p90 (observed) | Jev calls (observed) | per prompt | per turn | Jev ms p50 / p90 (observed) | Jev failures (observed) |
   |---|---|---|---|---|---|---|---|---|
-  | gate | 41101 | 1.93 | 596 / 720 (n=11307) | 12275 | 10.04 | 8.41 | 383 / 441 (n=11335) | 49: 44 unreachable, 5 hook timeouts |
-  | model-router | 164 | 2 | not recorded | 1388: router 1306 (start 732, stage 495, subagent 79) + agent-model 82 | 1.13 | 0.95 | 381 / 444, agent-model only (n=82); the router logs none | 11 |
-  | steward | 0 | - | - | 578 | 0.47 | 0.40 | not logged | 1 |
-  | skill-selection | 0 | - | - | 8992: skills 3468 + tools 5524 | 7.35 | 6.16 | 327 / 593 (n=6576) | 41 |
+  | gate | 40899 | 1.93 | 597 / 720 (n=11271) | 11342 | 9.32 | 7.80 | 383 / 441 (n=11298) | 49: 44 unreachable, 5 hook timeouts |
+  | model-router | 160 | 2 | not recorded | 1378: router 1298 (start 731, stage 490, subagent 77) plus agent-model 80 | 1.13 | 0.95 | 383 / 444, agent-model only (n=80); the router logs none | 11 |
+  | steward | 0 | - | - | 573 | 0.47 | 0.39 | not logged | 1 |
+  | skill-selection | 0 | - | - | 8959: skills 3454, tools 5505 | 7.36 | 6.16 | 327 / 593 (n=6550) | 41 |
   | board | 0 | - | - | 0 | 0 | 0 | - | 0 |
 
-  - **How the hook figures were made:**
-    - Spawns are derived: tool calls from the transcripts times the installed matchers. Pre counts every call, Post every success, PostFailure every error. PermissionDenied is not observable and counts 0.
-    - Hook latency is observed only for the gate's PreToolUse:Bash, and only on the runs where Claude Code recorded it (the runs that printed something). The other hooks print nothing, so no transcript times them.
+  - **Hook spawns.**
+    - Derived: the transcripts' tool calls times the matchers installed today. Pre counts every call, Post every success, PostFailure every error. PermissionDenied is not observable and counts 0.
+    - These derived spawns read today's settings.json across the whole window, so once T3 uninstalls a hook they show 0 by construction. The independent proof for T6 is the observed count of our hook records (`orca-jev-advisor:` hook_success/hook_cancelled) in the transcripts: 11271 timed PreToolUse:Bash runs and 5 cancelled in this window.
+  - **Hook latency.**
+    - Observed only for the gate's PreToolUse:Bash, on the runs Claude Code recorded: the ones that printed something, 11271 of the Bash calls.
+    - The other hooks print nothing, so no transcript times them.
     - The mod (model-router, steward and skill-selection) runs inside Claude Code and spawns no process.
-  - **How the Jev figures were counted:** one count per log row, with the rule each writer follows.
-    - gate: a `jev` row is one call; `none`/`unreachable` is one failed call.
-    - skills: wide is one call, plus fit when it ran.
-    - tools: one wide call per batch of 255 (the roster held 114 to 643 tools), plus fit.
-    - router: a row with a confidence, or `jev-failed`.
-    - agent-model: one call per `model-decision`.
-    - steward: one call per row.
-  - **Worker:** cadences are derived from `adapters/orca/main.mjs`. Rates are observed in the audit log as `storage.set` writes with outcome `ok`, from 2026-10-10T01:49Z to 2026-10-11T05:51Z (28 h, the whole log after rotation). The worker never idled in those 28 h.
-    - **The 15 s timer** runs 3 jobs, and each spawns one node sidecar:
-      - measurements summary: shared by gate and skill-selection, 239.8/h;
-      - model measurements: model-router, 233.5/h;
-      - gate authorizations: gate, 235.8/h.
+  - **Jev calls.** One count per log row, using the rule that row's writer follows:
+    - **gate:** a `jev` row is one call. An `advice-retry` row with no latency is none: `tryAdviceRetryPass` passes it before any Jev call, and there were 896 of them. A `none`/`unreachable` row is one failed call.
+    - **skills:** the wide stage is one call, plus one for fit when it ran.
+    - **tools:** one wide call per batch of 255 (the roster held 114 to 643 tools), plus fit.
+    - **router:** a row with a confidence, or one marked `jev-failed`.
+    - **agent-model:** a `jev` decision, or a `none` decision that failed after asking.
+    - **steward:** one call per row.
+  - **Worker cadences.** Derived from `adapters/orca/main.mjs`. Rates are observed in the audit log as `storage.set` with outcome `ok`, from 2026-10-10T01:49Z to 2026-10-11T04:59Z. That is 27.2 h, the whole log after rotation.
+    - The worker never idled in that time.
+    - The worker has 3 intervals plus the poll loop. Each interval runs jobs for several modules.
+  - **The 15 s interval** runs 3 jobs:
 
-      That is about 709 node processes an hour.
-    - **The 10 min timers** each run 6/h:
-      - account quota mirror: model-router. Derived only, because it has no audit key. It runs 1 sidecar plus `orca account list`.
-      - router status: model-router, 5.9/h.
-      - model docs check: model-router, once a day.
-      - consumption summary: shared by model-router and steward, 1 sidecar.
-      - activity summary: shared by gate and model-router, 1 sidecar.
-    - **Board:** the `agent.status.changed` handler wrote the board 164.4 times an hour. Its 30 s `orca` CLI cache was refreshed 19.1 times an hour. Each refresh runs `orca worktree list` and `orca repo list`, so about 38 CLI spawns an hour; that figure is derived. `worktree.created` is a no-op handler. `worktree.removed` writes nothing the audit log shows.
-    - **Base, not a module:** the request poll and heartbeat ran 234.7 times an hour.
-    - **Own timers per module:**
-      - gate: 1, plus 2 shared;
-      - model-router: 4, plus 2 shared;
-      - steward: none, 1 shared;
-      - skill-selection: none, 1 shared;
-      - board: 3 event handlers.
+    | Job | Module | Observed |
+    |---|---|---|
+    | measurements summary | shared by gate and skill-selection | 239.8/h |
+    | model measurements | model-router | 233.5/h |
+    | gate authorizations | gate | 235.8/h |
+
+    Each run spawns one node sidecar; that part is derived from the code, and model measurements spawns on every call. This comes to about 709 node processes an hour (observed runs times derived spawns).
+  - **The 10 min interval** runs 3 jobs:
+    - account quota mirror: model-router. Derived only, since it has no audit key; it spawns 1 sidecar plus `orca account list`.
+    - router status: model-router, 5.9/h.
+    - model docs check: model-router, gated to once a day.
+  - **Two more 10 min intervals**, one job each:
+    - consumption summary: shared by model-router and steward, 6/h, 1 sidecar.
+    - activity summary: shared by gate and model-router, 6/h, 1 sidecar.
+  - **Board.**
+    - The `agent.status.changed` handler wrote the board 160 times an hour.
+    - Its 30 s `orca` CLI cache was refreshed 18.8 times an hour. Each refresh runs `orca worktree list` and `orca repo list`, so about 38 CLI spawns an hour (derived).
+    - `worktree.created` is a no-op handler.
+    - `worktree.removed` writes nothing the audit log shows.
+  - **Base, not a module:** the request poll and heartbeat ran 234.7 times an hour.
+  - **Jobs per module:**
+    - gate: 1 own job and 2 shared;
+    - model-router: 4 own and 2 shared;
+    - steward: 1 shared;
+    - skill-selection: 1 shared;
+    - board: 3 event handlers.
+  - **Finding for T4.** No module owns a timer: the 15 s and 10 min intervals are each shared by several modules. "0 worker timers for an off module" can only hold if T4 either gives each module its own timer, or measures an off module as 0 jobs and 0 sidecar spawns while the shared timer still wakes.
   - **Findings:**
-    - Every Agent spawn costs 2 Jev calls, one from the agent-model hook and one from the router's subagent point: 82 + 79 for 82 Agent calls. It also costs 2 hook processes.
-    - `gate-files` makes no Jev call, although its status message says Jev checks the edit.
-    - Both mod switches ran `active` all window: 1775 skills and 1773 tools decisions, with 0 measurement rows. That is 5.07 Jev calls per decision, so the "two Jev calls per prompt with both switches off" under Rules was not observable on this machine.
-    - The mod made more decisions (1775) than this count of person prompts (1223). It also decides on prompts that count leaves out, such as notifications and wrapped prompts.
+    - **Agent spawns.** Every Agent spawn costs 2 Jev calls: one from the agent-model hook and one from the router's subagent point (80 and 77 for 80 Agent calls). It also costs 2 hook processes.
+    - **gate-files.** It makes no Jev call, although its status message says Jev checks the edit.
+    - **Mod switches.**
+      - Both mod switches ran `active` all window: 1768 skills and 1766 tools decisions, with 0 measurement rows.
+      - That is 5.07 Jev calls per decision.
+      - So the "two Jev calls per prompt with both switches off" under Rules could not be observed on this machine.
+    - **Person prompts.** The router's start and stage points decided 1221 times, about one per person prompt (1217), which supports that count. The skills mod decided 1768 times. Its `prompt.submit` skips only empty and slash prompts and does not check the prompt's origin the way the router does, so it also decides on prompts that are not a person's own, such as notifications.
 - [ ] T1 core registry: `src/core/feature_modules.ts`. It holds the module list (verified against the code), `parseFeatureModules(content)` (never throws; missing or malformed input gives today's behaviour), and `moduleState(id)` combining `off` with the existing mode. Strict TDD: RED, then GREEN.
 - [ ] T2 gate protection: the module state file joins the gate's own-files refusal (`adapters/claude/gate-files.ts`, and the Bash gate's own-file rules). Subprocess tests for Edit, Write, heredoc, `sed -i`, `cp`, `mv` and `rm`.
 - [ ] T3 installer: `install-claude-integration.mjs` installs only the hooks of the modules that are on, and uninstalls the hooks of the modules that are off. It stays idempotent and goes through the 0.6.26 never-go-back-a-version guard. The mod copy stays while any mod module is on. Verify whether a change to the mod copy needs a Claude Code reload; 0.6.24 showed that settings.json hooks do not. Write the answer here.

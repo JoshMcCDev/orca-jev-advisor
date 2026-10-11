@@ -46,6 +46,11 @@ test("gate: a jev row is one call, an unreachable row is one failed call, cache 
   assert.deepEqual(gateJevCalls("not a row"), { calls: 0, failures: 0, latencyMs: [] });
 });
 
+test("gate: an identical retry passed before any Jev call (no latency) is no call; one after a call is", () => {
+  assert.deepEqual(gateJevCalls({ type: "gate-decision", at: AT, source: "jev", stopReason: "advice-retry", latencyMs: null }), { calls: 0, failures: 0, latencyMs: [] });
+  assert.deepEqual(gateJevCalls({ type: "gate-decision", at: AT, source: "jev", stopReason: "advice-retry", latencyMs: 410 }), { calls: 1, failures: 0, latencyMs: [410] });
+});
+
 test("skills: wide is one call, fit one more when it ran; a null result after a latency is a failure", () => {
   assert.deepEqual(skillJevCalls({ type: "decision", at: AT, wide: { gate: 0.7 }, fit: null, latencyMs: { wide: 400, fit: null } }), { calls: 1, failures: 0, latencyMs: [400] });
   assert.deepEqual(skillJevCalls({ type: "decision", at: AT, wide: { gate: 0.7 }, fit: { winner: "x" }, latencyMs: { wide: 400, fit: 250 } }), { calls: 2, failures: 0, latencyMs: [400, 250] });
@@ -69,8 +74,10 @@ test("router: a row with a confidence or jev-failed is a call; an engine turn (n
 });
 
 test("model reclassification: a decision row is one call, an outcome row none", () => {
-  assert.deepEqual(modelDecisionJevCalls({ type: "model-decision", at: AT, failOpen: null, latencyMs: 800 }), { calls: 1, failures: 0, latencyMs: [800] });
-  assert.deepEqual(modelDecisionJevCalls({ type: "model-decision", at: AT, failOpen: "timeout", latencyMs: 6000 }), { calls: 1, failures: 1, latencyMs: [6000] });
+  assert.deepEqual(modelDecisionJevCalls({ type: "model-decision", at: AT, source: "jev", failOpen: null, latencyMs: 800 }), { calls: 1, failures: 0, latencyMs: [800] });
+  assert.deepEqual(modelDecisionJevCalls({ type: "model-decision", at: AT, source: "none", failOpen: "jev-unreachable", latencyMs: 6000 }), { calls: 1, failures: 1, latencyMs: [6000] });
+  assert.deepEqual(modelDecisionJevCalls({ type: "model-decision", at: AT, source: "none", failOpen: "no-key", latencyMs: 0 }), { calls: 0, failures: 0, latencyMs: [] });
+  assert.deepEqual(modelDecisionJevCalls({ type: "model-decision", at: AT, source: "none", failOpen: "empty-ladder", latencyMs: 0 }), { calls: 0, failures: 0, latencyMs: [] });
   assert.deepEqual(modelDecisionJevCalls({ type: "model-outcome", at: AT, status: "async_launched" }), { calls: 0, failures: 0, latencyMs: [] });
 });
 
@@ -193,7 +200,7 @@ test("report: per module totals, per prompt and per turn ratios, and a markdown 
       skills: [{ type: "decision", at: AT, mode: "active", wide: {}, fit: null, latencyMs: { wide: 400, fit: null } }],
       tools: [{ type: "decision", at: AT, mode: "active", candidateCount: 10, wide: {}, fit: {}, latencyMs: { wide: 300, fit: 100 } }],
       router: [{ at: AT, point: "start", confidence: 0.9, reason: "same" }],
-      models: [{ type: "model-decision", at: AT, failOpen: null, latencyMs: 700 }],
+      models: [{ type: "model-decision", at: AT, source: "jev", failOpen: null, latencyMs: 700 }],
       steward: [{ at: AT, verdict: "mid-task" }],
     },
     audit: { times: new Map([["board", [Date.parse(AT), Date.parse(AT) + 3_600_000]], ["measurementsSummary", [Date.parse(AT)]]]), firstMs: Date.parse(AT), lastMs: Date.parse(AT) + 3_600_000 },
