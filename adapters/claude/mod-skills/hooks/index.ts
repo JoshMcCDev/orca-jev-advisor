@@ -125,6 +125,8 @@ import { MOD_SKILLS_CATALOG } from '../../../../src/core/i18n_mod_skills.ts'
 import type { ModSkillsKey } from '../../../../src/core/i18n_mod_skills.ts'
 import { TOOLS_CATALOG } from '../../../../src/core/i18n_tools.ts'
 import type { ToolsKey } from '../../../../src/core/i18n_tools.ts'
+import { DEFAULT_FEATURE_MODULES, FEATURE_MODULES_FILE, effectiveMode, moduleState, parseFeatureModules, switchMode } from '../../../../src/core/feature_modules.ts'
+import type { FeatureModules, ModuleState } from '../../../../src/core/feature_modules.ts'
 import { DEFAULT_MOD_SKILLS_SWITCHES, parseModSkillsConfig } from '../../../../src/core/mod_skills_config.ts'
 import type { ModSkillsSwitches } from '../../../../src/core/mod_skills_config.ts'
 import { DEFAULT_MOD_SKILLS_SAMPLING_CONFIG, parseModSkillsSamplingConfig } from '../../../../src/core/mod_skills_sampling.ts'
@@ -262,6 +264,38 @@ export async function resolveModSkillsSwitches($: EngineInterface): Promise<ModS
     return parseModSkillsConfig(await $.fs.read(path))
   } catch {
     return DEFAULT_MOD_SKILLS_SWITCHES
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Feature modules (odd/tasks/feature-modules.md, src/core/feature_modules.ts):
+// which of this mod's features the owner has switched off or put in shadow,
+// read from `<configDir>/feature-modules.json`. A mod copy is never removed
+// by a module switch and a change to its files needs a Claude Code restart,
+// so this is read on EVERY hook call that has a feature to gate, never once
+// at load: a switch then takes effect on the next prompt, step or tool call.
+// The path is worked out once per `register` (the environment does not change
+// in a session); each call after that is one `$.fs.exists` and, when the file
+// is there, one `$.fs.read` of a few dozen bytes. Best-effort like the other
+// config reads: a missing, unreachable or malformed file is every module
+// `active`, which is exactly the behaviour before the file existed.
+// ---------------------------------------------------------------------------
+
+/** The module file's path, worked out on the first read of a `register` call: undefined until then, null when no home directory is known. */
+interface FeatureModulesFile {
+  path: string | null | undefined;
+}
+
+export async function resolveFeatureModules($: EngineInterface, file: FeatureModulesFile): Promise<FeatureModules> {
+  try {
+    if (file.path === undefined) {
+      const paths = await resolveHomePaths($)
+      file.path = paths === null ? null : `${paths.configDir}/${FEATURE_MODULES_FILE}`
+    }
+    if (file.path === null || !(await $.fs.exists(file.path))) return DEFAULT_FEATURE_MODULES
+    return parseFeatureModules(await $.fs.read(file.path))
+  } catch {
+    return DEFAULT_FEATURE_MODULES
   }
 }
 
@@ -1492,10 +1526,12 @@ interface AgentRoute {
  * guards, the quota band, the explicit-model rule and the definition's
  * effort floor. Throws on a failure; each caller fails open its own way.
  */
-async function decideAgentRoute($: EngineInterface, task: AgentRouteTask, mode: RouterMode, options: PluginOptions, project: string | null, onTiers: (tiers: ResolvedTiers) => void = () => {}): Promise<AgentRoute> {
+async function decideAgentRoute($: EngineInterface, task: AgentRouteTask, mode: RouterMode, routerState: ModuleState, options: PluginOptions, project: string | null, onTiers: (tiers: ResolvedTiers) => void = () => {}): Promise<AgentRoute> {
   const modelFixed = task.fixedModel !== null
   const account = await resolveAccountId($)
-  const { tiers, band, quotaSource, tierEffort, personTiers, workKindMode } = await resolveRouterAccount($, account)
+  const { tiers, band, quotaSource, tierEffort, personTiers, workKindMode: ownWorkKindMode } = await resolveRouterAccount($, account)
+  // The router module in shadow measures the work kind too: an active switch runs as measure.
+  const workKindMode = effectiveMode(routerState, ownWorkKindMode)
   // The account's own model labels, for the caller's row even if what follows fails.
   onTiers(tiers)
   const text = `${task.description}\n${task.prompt}`
@@ -1530,7 +1566,7 @@ async function decideAgentRoute($: EngineInterface, task: AgentRouteTask, mode: 
   return { pending, why: subagentWhy({ decision, applied, explicit: modelFixed }), wouldUse, tiers }
 }
 
-async function routeSubagent($: EngineInterface, e: Frozen<AgentSpawnInput>, next: Next<'agent.spawn'>, mode: RouterMode, options: PluginOptions, subagentEffortTarget: Map<string, SubagentEffortTarget>, project: string | null, runningSubagents: Map<string, RunningSubagent>): Promise<AgentSpawnResult> {
+async function routeSubagent($: EngineInterface, e: Frozen<AgentSpawnInput>, next: Next<'agent.spawn'>, mode: RouterMode, routerState: ModuleState, options: PluginOptions, subagentEffortTarget: Map<string, SubagentEffortTarget>, project: string | null, runningSubagents: Map<string, RunningSubagent>): Promise<AgentSpawnResult> {
   // 0.6.8 T6: every started subagent is remembered with the model it runs
   // and why, for the status line -- in every mode, a fork and a failure
   // included. Visibility only: this never changes what is spawned.
@@ -1560,7 +1596,7 @@ async function routeSubagent($: EngineInterface, e: Frozen<AgentSpawnInput>, nex
     const definition = await readAgentDefinition($, e.subagentType, cwd)
     const fixedModel = explicitModelGiven ? (e.model as string) : definition.model
     if (fixedModel !== null) why = 'explicit'
-    const route = await decideAgentRoute($, { description: e.description, prompt: e.prompt, parentModel: e.parentModel, fixedModel, declared: definition.effort, cwd }, mode, options, project, (tiers) => {
+    const route = await decideAgentRoute($, { description: e.description, prompt: e.prompt, parentModel: e.parentModel, fixedModel, declared: definition.effort, cwd }, mode, routerState, options, project, (tiers) => {
       labelTiers = tiers
     })
     pending = route.pending
@@ -1595,7 +1631,7 @@ interface TeammateRouting {
  * its model. Only an agent the host lists as a teammate, and only one no
  * spawn recorded. Throws on a failure; the caller fails open.
  */
-async function routeTeammate($: EngineInterface, e: Frozen<TurnStepInput>, mode: RouterMode, options: PluginOptions, project: string | null, teammates: TeammateRouting, targets: Map<string, SubagentEffortTarget>, running: RunningSet): Promise<void> {
+async function routeTeammate($: EngineInterface, e: Frozen<TurnStepInput>, mode: RouterMode, routerState: ModuleState, options: PluginOptions, project: string | null, teammates: TeammateRouting, targets: Map<string, SubagentEffortTarget>, running: RunningSet): Promise<void> {
   const agentId = e.agentId
   if (mode === 'off' || agentId === undefined || targets.has(agentId) || teammates.judged.has(agentId)) return
   teammates.judged.add(agentId)
@@ -1615,7 +1651,7 @@ async function routeTeammate($: EngineInterface, e: Frozen<TurnStepInput>, mode:
   const cwd = await $.session.cwd()
   const definition = await readAgentDefinition($, task.subagentType ?? TEAMMATE_TYPE, cwd)
   const fixedModel = task.model ?? definition.model
-  const route = await decideAgentRoute($, { description: task.description, prompt: task.prompt, parentModel: e.model, fixedModel, declared: definition.effort, cwd }, mode, options, project)
+  const route = await decideAgentRoute($, { description: task.description, prompt: task.prompt, parentModel: e.model, fixedModel, declared: definition.effort, cwd }, mode, routerState, options, project)
   const { applied, decision } = route.pending
   targets.set(agentId, { ...route.pending, logged: false, point: 'teammate', model: applied ? decision.model : null, teammateTask: 'matched' })
   const routed = mode === 'active' && decision.reason !== 'jev-failed'
@@ -1884,10 +1920,14 @@ function baseName(path: string): string {
 }
 
 /** The timer `turn.complete` schedules: gate, Jev, decision; then a log (measure, or nothing to do) or a compaction (active). Never throws. */
-async function stewardAfterTurn($: EngineInterface, options: PluginOptions, host: StewardHost): Promise<void> {
+async function stewardAfterTurn($: EngineInterface, options: PluginOptions, host: StewardHost, modulesFile: FeatureModulesFile): Promise<void> {
   try {
+    // Read again here: the switch may have moved in the delay since turn.complete scheduled this.
+    const moduleStewardState = moduleState(await resolveFeatureModules($, modulesFile), 'steward')
+    if (moduleStewardState === 'off') return
     const settings = stewardFromSettings(await readVaultSettings($))
-    const mode: StewardMode = settings.mode
+    // Shadow caps both the mode and the soft tier at measure.
+    const mode: StewardMode = effectiveMode(moduleStewardState, settings.mode)
     if (mode === 'off') return
     const usage = await $.session.usage()
     const state = await readStewardState($)
@@ -1899,7 +1939,7 @@ async function stewardAfterTurn($: EngineInterface, options: PluginOptions, host
     if (!gate.ask || contextTokens === null) return
     const messages = await $.session.messages()
     const jev = await askStewardJudgment($, options, messages, contextTokens, turnsSinceCompaction)
-    const softActive = settings.softMode === 'active'
+    const softActive = effectiveMode(moduleStewardState, switchMode(settings.softMode === 'active')) === 'active'
     const decision = decideSteward({ jev, hardLimit: gate.hardLimit, softLimit: gate.softLimit, softActive })
     // The soft tier ships measured: while its switch is on measure, a turn it
     // would have compacted is decided as before and logged as `wouldFire`.
@@ -2044,6 +2084,8 @@ export function register(on: On, options: PluginOptions): void {
   const optionActiveTools = typeof options.activeTools === 'boolean' ? (options.activeTools as boolean) : null
   const modSkillsSwitchesCache: ModSkillsSwitchesCache = { value: null }
   const routerMode = parseRouterMode(options.routerMode)
+  // Where the feature module file lives, worked out on the first hook call that reads it (resolveFeatureModules).
+  const modulesFile: FeatureModulesFile = { path: undefined }
 
   const budgetMs = number('budgetMs', DEFAULT_BUDGET_MS)
   const gateThreshold = number('gateThreshold', DEFAULT_GATE_THRESHOLD)
@@ -2151,13 +2193,19 @@ export function register(on: On, options: PluginOptions): void {
     // Best-effort and never blocking: a write failure only means the
     // router falls back to today's behaviour (a missing stamp reads as a
     // person's own prompt, see routeMainStep).
-    try {
-      const origin: RouterPromptOrigin = { kind: e.origin.kind }
-      await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerPromptOrigin' }, origin)
-    } catch {
-      // See above.
+    // Feature modules: read on this call, so a switch needs no reload. An
+    // `off` module does none of its work below -- no state write, no Jev call.
+    const modules = await resolveFeatureModules($, modulesFile)
+    const skillState = moduleState(modules, 'skill-selection')
+    if (moduleState(modules, 'model-router') !== 'off') {
+      try {
+        const origin: RouterPromptOrigin = { kind: e.origin.kind }
+        await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerPromptOrigin' }, origin)
+      } catch {
+        // See above.
+      }
     }
-    await countPersonTurn($, e.origin.kind, e.text)
+    if (moduleState(modules, 'steward') !== 'off') await countPersonTurn($, e.origin.kind, e.text)
 
     const prompt = e.text.trim()
     // Reset every turn, before anything below can set it: whatever exits
@@ -2205,13 +2253,16 @@ export function register(on: On, options: PluginOptions): void {
     // record, listing delivered), and active mode is unaffected -- neither
     // closure's active-mode branch consults `sampled` at all.
     let sampled = false
-    try {
-      const samplingConfig = await resolveModSkillsSamplingConfig($)
-      const today = new Date(await $.clock.now()).toISOString().slice(0, 10)
-      const promptsSampledToday = Math.max(await measurementDecisionsToday($, today), await toolMeasurementDecisionsToday($, today))
-      sampled = shouldSamplePrompt(samplingConfig, promptsSampledToday, Math.random())
-    } catch {
-      sampled = false
+    // With skill and tool selection off there is nothing to sample for: no config or log is read.
+    if (skillState !== 'off') {
+      try {
+        const samplingConfig = await resolveModSkillsSamplingConfig($)
+        const today = new Date(await $.clock.now()).toISOString().slice(0, 10)
+        const promptsSampledToday = Math.max(await measurementDecisionsToday($, today), await toolMeasurementDecisionsToday($, today))
+        sampled = shouldSamplePrompt(samplingConfig, promptsSampledToday, Math.random())
+      } catch {
+        sampled = false
+      }
     }
 
     // Skill selection and tool selection each run in their own isolated
@@ -2223,7 +2274,10 @@ export function register(on: On, options: PluginOptions): void {
     // too -- absent whenever the branch never reached a decision).
     const skillOutcome = await (async (): Promise<{ block: string | null; status: string | null }> => {
       try {
-        const activeMode = await resolveActiveMode($, optionActive, modSkillsSwitchesCache)
+        // The module's state in front of the switch: off is before anything
+        // else, shadow runs the active switch as measurement.
+        if (skillState === 'off') return { block: null, status: null }
+        const activeMode = effectiveMode(skillState, switchMode(await resolveActiveMode($, optionActive, modSkillsSwitchesCache))) === 'active'
 
         // An unsampled measurement-mode prompt does nothing at all: no Jev
         // call, no record, exactly like today's missing-API-key branch
@@ -2385,7 +2439,8 @@ export function register(on: On, options: PluginOptions): void {
 
     const toolOutcome = await (async (): Promise<{ block: string | null; status: string | null }> => {
       try {
-        const activeToolMode = await resolveActiveToolMode($, optionActiveTools, modSkillsSwitchesCache)
+        if (skillState === 'off') return { block: null, status: null }
+        const activeToolMode = effectiveMode(skillState, switchMode(await resolveActiveToolMode($, optionActiveTools, modSkillsSwitchesCache))) === 'active'
 
         // JEVADV-4: the same shared roll the skill closure consults above,
         // not a second independent one -- see its own comment for why. An
@@ -2523,19 +2578,26 @@ export function register(on: On, options: PluginOptions): void {
     if (pendingMeasurementId !== null) {
       const id = pendingMeasurementId
       pendingMeasurementId = null
-      // 0.6.19 M8 (JEVADV-73): observing is best-effort. A clock read that
-      // fails costs this one observation, never the skill's own load.
-      try {
-        const at = new Date(await $.clock.now()).toISOString()
-        await appendMeasurement($, at, serializeRecord(buildObservationRecord(id, e.skill, at)))
-      } catch {
-        // Nothing recorded; the event still goes on below.
+      // A module switched off since the decision records nothing more.
+      if (moduleState(await resolveFeatureModules($, modulesFile), 'skill-selection') !== 'off') {
+        // 0.6.19 M8 (JEVADV-73): observing is best-effort. A clock read that
+        // fails costs this one observation, never the skill's own load.
+        try {
+          const at = new Date(await $.clock.now()).toISOString()
+          await appendMeasurement($, at, serializeRecord(buildObservationRecord(id, e.skill, at)))
+        } catch {
+          // Nothing recorded; the event still goes on below.
+        }
       }
     }
     return next(e)
   })
 
   on('turn.step', async function* ($, e, next) {
+    // The router module off: this step is nobody's business here -- no routing, no teammate judgement, no usage line.
+    const routerState = moduleState(await resolveFeatureModules($, modulesFile), 'model-router')
+    if (routerState === 'off') return yield* next(e)
+    const stepMode = effectiveMode(routerState, routerMode)
     const showRouterStatus = (text: string): void => {
       routerStatusText = text
       $.ui.status(statusLine() ?? text)
@@ -2550,16 +2612,18 @@ export function register(on: On, options: PluginOptions): void {
       answeredBy === undefined ? noteSubagentEffort($, runningSubagents, agentId, effort, source) : observeUnseenAgent($, runningSubagents, agentId, answeredBy, effort, source)
     if (e.agentId !== undefined) {
       try {
-        await routeTeammate($, e, routerMode, options, project, teammateRouting, subagentEffortTarget, runningSubagents)
+        await routeTeammate($, e, stepMode, routerState, options, project, teammateRouting, subagentEffortTarget, runningSubagents)
       } catch {
         // A teammate the router could not judge runs as it came.
       }
     }
-    return yield* handleTurnStep($, e, next, routerMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }))
+    return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }))
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const result = await routeSubagent($, e, next, routerMode, options, subagentEffortTarget, modSkillsProjectName(orcaContextCache), runningSubagents.agents)
+    const routerState = moduleState(await resolveFeatureModules($, modulesFile), 'model-router')
+    if (routerState === 'off') return next(e)
+    const result = await routeSubagent($, e, next, effectiveMode(routerState, routerMode), routerState, options, subagentEffortTarget, modSkillsProjectName(orcaContextCache), runningSubagents.agents)
     if ('agentId' in result && result.agentId !== undefined) {
       // 0.6.23 T1: its first place, looked up after the spawn, never holding it.
       const agentId = result.agentId
@@ -2582,6 +2646,7 @@ export function register(on: On, options: PluginOptions): void {
   // whenever a plugin beneath already drew one: never a second band over it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'model-router') === 'off') return next(e)
     const beneath = await next(e)
     if (beneath.type !== 'engine') return beneath
     try {
@@ -2610,6 +2675,7 @@ export function register(on: On, options: PluginOptions): void {
   // the running set kept in `$.state` (and any agent the host runs that
   // nothing recorded) is shown at once, not at the next spawn.
   on('session.start', async ($, e, next) => {
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'model-router') === 'off') return next(e)
     try {
       await snapshotBeforeLoad($, runningSubagents)
       agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
@@ -2622,10 +2688,11 @@ export function register(on: On, options: PluginOptions): void {
   })
 
   on('turn.complete', async ($, e, next) => {
+    const modules = await resolveFeatureModules($, modulesFile)
     // 0.6.8 T6: a subagent's own answer ends it; the status line drops it.
     // 0.6.20 T2: a teammate's turn does not end the teammate; its row goes
     // when the host stops running it (runningSubagentsStatus, the band).
-    if (e.agentId !== undefined && runningSubagents.agents.get(e.agentId)?.type !== TEAMMATE_TYPE && runningSubagents.agents.delete(e.agentId)) {
+    if (moduleState(modules, 'model-router') !== 'off' && e.agentId !== undefined && runningSubagents.agents.get(e.agentId)?.type !== TEAMMATE_TYPE && runningSubagents.agents.delete(e.agentId)) {
       try {
         agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
         $.ui.status(statusLine() ?? undefined)
@@ -2635,7 +2702,7 @@ export function register(on: On, options: PluginOptions): void {
     }
     if (e.agentId === undefined) {
       activeTurnId = null
-      if (e.reason === 'answer') {
+      if (e.reason === 'answer' && moduleState(modules, 'steward') !== 'off') {
         const host: StewardHost = {
           runningTurn: () => activeTurnId,
           show: (text) => {
@@ -2644,7 +2711,7 @@ export function register(on: On, options: PluginOptions): void {
           },
         }
         try {
-          $.clock.after(STEWARD_DELAY_MS, () => stewardAfterTurn($, options, host))
+          $.clock.after(STEWARD_DELAY_MS, () => stewardAfterTurn($, options, host, modulesFile))
         } catch {
           // No timer, no steward: the turn ends as it would have.
         }
@@ -2665,35 +2732,42 @@ export function register(on: On, options: PluginOptions): void {
   // make many, immediately) would almost always swallow the correlation
   // before the main loop's own first tool call ever happened.
   on('tool.call', async ($, e, next) => {
+    const modules = await resolveFeatureModules($, modulesFile)
+    const routerOn = moduleState(modules, 'model-router') !== 'off'
     // 0.6.20 T3: the lead's Agent call that makes a teammate carries its task; keep it for the teammate's first step.
-    if (e.agentId === undefined && e.tool === 'Agent' && isTeammateCall(e)) {
+    if (routerOn && e.agentId === undefined && e.tool === 'Agent' && isTeammateCall(e)) {
       teammateRouting.tasks = rememberTeammateTask(teammateRouting.tasks, { name: e.name, subagentType: e.subagent_type ?? null, description: e.description, prompt: e.prompt, model: e.model ?? null })
     }
     // 0.6.23 T1 (JEVADV-102): an Agent call that asks for a worktree marks its spawn's place pending; an
     // agent's own write or `cd` moves its row. Only queued here: the git lookup runs after, off this call.
-    try {
-      if (e.tool === 'Agent' && e.isolation === 'worktree') places.isolated = [...places.isolated.filter((id) => id !== e.tool_use_id), e.tool_use_id].slice(-PLACE_AGENTS_MAX)
-      const agentId = e.agentId
-      if (agentId !== undefined && PLACE_TOOLS.has(e.tool)) {
-        const args = e as unknown as Readonly<Record<string, unknown>>
-        queuePlace(places, () => placeFromCall($, runningSubagents, places, agentId, e.tool, args))
+    if (routerOn) {
+      try {
+        if (e.tool === 'Agent' && e.isolation === 'worktree') places.isolated = [...places.isolated.filter((id) => id !== e.tool_use_id), e.tool_use_id].slice(-PLACE_AGENTS_MAX)
+        const agentId = e.agentId
+        if (agentId !== undefined && PLACE_TOOLS.has(e.tool)) {
+          const args = e as unknown as Readonly<Record<string, unknown>>
+          queuePlace(places, () => placeFromCall($, runningSubagents, places, agentId, e.tool, args))
+        }
+      } catch {
+        // Where an agent works is never a reason to touch the call.
       }
-    } catch {
-      // Where an agent works is never a reason to touch the call.
     }
     if (pendingToolMeasurementId !== null && e.agentId === undefined) {
       const id = pendingToolMeasurementId
       pendingToolMeasurementId = null
-      try {
-        const at = new Date(await $.clock.now()).toISOString()
-        await appendToolMeasurement($, at, serializeToolRecord(buildToolObservationRecord(id, e.tool, at)))
-      } catch {
-        // Measurement is best-effort and must never block or fail a call.
+      // A module switched off since the decision records nothing more.
+      if (moduleState(modules, 'skill-selection') !== 'off') {
+        try {
+          const at = new Date(await $.clock.now()).toISOString()
+          await appendToolMeasurement($, at, serializeToolRecord(buildToolObservationRecord(id, e.tool, at)))
+        } catch {
+          // Measurement is best-effort and must never block or fail a call.
+        }
       }
     }
     const result = await next(e)
     // 0.6.16 T4: a failed main-loop call marks its step for the measure-only hold rule.
-    if (e.agentId === undefined && phaseHolder.turn !== null) {
+    if (routerOn && e.agentId === undefined && phaseHolder.turn !== null) {
       try {
         // The tool's arguments are on the event itself (`e.command` for Bash); there is no `e.input`.
         if (toolFailed(e.tool, e, result)) phaseHolder.turn = withLastFailed(phaseHolder.turn)
