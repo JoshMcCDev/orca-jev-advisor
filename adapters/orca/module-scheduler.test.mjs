@@ -2,12 +2,15 @@
 // a module that is off runs 0 jobs and spawns 0 sidecars (activation jobs,
 // timer ticks, poll requests, event handlers); a timer is cleared only when
 // every module using it is off; a state change is picked up with no restart.
-// Everything here is a fake runner, timer and event bus: nothing is spawned.
+// T4b: the jobs whose output only a panel reads (workerJobIsPanelOnly) run
+// once at activation and then only while a panel is open; the others keep
+// their cadence. Everything here is a fake runner, timer, clock and event
+// bus: nothing is spawned and no real time passes.
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
-import { DEFAULT_FEATURE_MODULES, FEATURE_MODULES, workerJobsFor } from '../../src/core/feature_modules.ts'
+import { DEFAULT_FEATURE_MODULES, FEATURE_MODULES, workerJobIsPanelOnly, workerJobsFor } from '../../src/core/feature_modules.ts'
 import { createModuleScheduler, followStatus, modulesFromRead, modulesFromStatus } from './module-scheduler.mjs'
 
 const ALL_OFF = { gate: 'off', 'model-router': 'off', steward: 'off', 'skill-selection': 'off', board: 'off' }
@@ -30,10 +33,11 @@ function harness (initial = DEFAULT_FEATURE_MODULES) {
   const eventHandlers = {}
   for (const trigger of EVENT_TRIGGERS) eventHandlers[trigger] = async () => { calls.push(trigger) }
 
+  const clock = { t: 0 }
   const timers = { live: new Map(), cleared: [], next: 1 }
   const timerApi = {
     setInterval: (fn, ms) => {
-      const handle = { id: timers.next++, fn, ms, unref () {} }
+      const handle = { id: timers.next++, fn, ms, nextAt: clock.t + ms, unref () {} }
       timers.live.set(handle.id, handle)
       return handle
     },
@@ -56,6 +60,7 @@ function harness (initial = DEFAULT_FEATURE_MODULES) {
     periods: PERIODS,
     subscribe,
     timers: timerApi,
+    now: () => clock.t,
     log: (message) => logs.push(message)
   })
   const liveTimerMs = () => [...timers.live.values()].map((t) => t.ms).sort((a, b) => a - b)
@@ -63,7 +68,21 @@ function harness (initial = DEFAULT_FEATURE_MODULES) {
     for (const handle of [...timers.live.values()]) if (handle.ms === ms) handle.fn()
     await settle()
   }
-  return { scheduler, calls, logs, timers, subscriptions, liveTimerMs, tick }
+  /** Moves the fake clock forward, firing every live timer at each of its due instants, in time order. */
+  const advance = async (ms) => {
+    const target = clock.t + ms
+    for (;;) {
+      const due = [...timers.live.values()].filter((handle) => handle.nextAt <= target).sort((a, b) => a.nextAt - b.nextAt)[0]
+      if (due === undefined) break
+      clock.t = due.nextAt
+      due.nextAt += due.ms
+      due.fn()
+      await settle()
+    }
+    clock.t = target
+  }
+  const count = (id) => calls.filter((call) => call === id).length
+  return { scheduler, calls, logs, timers, subscriptions, liveTimerMs, tick, advance, count, clock }
 }
 
 function settle () {
@@ -72,11 +91,11 @@ function settle () {
 
 const everyActivationJob = () => [...new Set(FEATURE_MODULES.flatMap((module) => module.workerJobs.filter((job) => job.triggers.includes('activation')).map((job) => job.id)))]
 
-test('all modules active: every activation job runs once, all 4 timers and 3 event subscriptions exist', async () => {
+test('all modules active, no panel open: every activation job runs once; only the 2 timers with a decision input and the 3 event subscriptions exist', async () => {
   const h = harness()
   await h.scheduler.start()
   assert.deepEqual([...h.calls].sort(), everyActivationJob().sort())
-  assert.equal(h.timers.live.size, 4)
+  assert.deepEqual(h.liveTimerMs(), [PERIODS['interval-15s'], PERIODS['interval-account-quota-10min']])
   assert.deepEqual([...h.subscriptions.made].sort(), [...EVENT_TRIGGERS].sort())
 })
 
@@ -106,6 +125,7 @@ test('an off module runs none of its own jobs; a shared job still runs while ano
 test('a timer tick runs only the jobs that are on', async () => {
   const h = harness(states({ gate: 'off' }))
   await h.scheduler.start()
+  await h.scheduler.setPanelOpen(true)
   h.calls.length = 0
   await h.tick(PERIODS['interval-15s'])
   assert.deepEqual([...h.calls].sort(), ['measurements-summary', 'model-measurements'])
@@ -114,6 +134,7 @@ test('a timer tick runs only the jobs that are on', async () => {
 test('a timer is cleared only when every module using it is off', async () => {
   const h = harness()
   await h.scheduler.start()
+  await h.scheduler.setPanelOpen(true)
   assert.equal(h.liveTimerMs().includes(PERIODS['interval-15s']), true)
 
   await h.scheduler.apply(states({ gate: 'off' }))
@@ -130,6 +151,7 @@ test('a timer is cleared only when every module using it is off', async () => {
 test('the shared 10 min timers follow their owners: consumption needs router or steward, activity needs gate or router', async () => {
   const h = harness()
   await h.scheduler.start()
+  await h.scheduler.setPanelOpen(true)
   await h.scheduler.apply(states({ 'model-router': 'off', steward: 'off' }))
   assert.equal(h.liveTimerMs().includes(PERIODS['interval-consumption-10min']), false)
   assert.equal(h.liveTimerMs().includes(PERIODS['interval-activity-10min']), true, 'the gate still uses it')
@@ -205,6 +227,143 @@ test('close clears every timer and unregisters every handler, and a later change
   await h.scheduler.apply(states({ board: 'active' }))
   assert.equal(h.timers.live.size, 0)
   assert.equal(h.subscriptions.live.size, 0)
+})
+
+const HOUR = 3_600_000
+const PANEL_ONLY = ['measurements-summary', 'gate-authorizations', 'router-status', 'consumption-summary', 'activity-summary']
+
+test('T4b classification: the interval jobs a panel reads are marked, the decision inputs are not', () => {
+  for (const id of PANEL_ONLY) assert.equal(workerJobIsPanelOnly(id), true, id)
+  for (const id of ['model-measurements', 'account-quota', 'model-docs-check']) assert.equal(workerJobIsPanelOnly(id), false, id)
+})
+
+test('no panel open: after activation, an hour of simulated time runs no panel-only job and spawns no sidecar for one', async () => {
+  const h = harness()
+  await h.scheduler.start()
+  const afterActivation = h.calls.length
+  await h.advance(HOUR)
+  for (const id of PANEL_ONLY) assert.equal(h.count(id), 1, `${id} ran at activation and never again`)
+  // What is left is the decision inputs, at their own cadence: 240 model-measurements ticks, 6 account-quota and docs-check ticks.
+  assert.equal(h.count('model-measurements'), 1 + 240)
+  assert.equal(h.count('account-quota'), 1 + 6)
+  assert.equal(h.calls.length - afterActivation, 240 + 6 + 6)
+})
+
+test('no panel open and no decision input on (model-router off): every timer is gone, an hour passes with zero ticks', async () => {
+  const h = harness(states({ 'model-router': 'off' }))
+  await h.scheduler.start()
+  assert.equal(h.timers.live.size, 0, 'nothing is left to wake the worker for')
+  const afterActivation = h.calls.length
+  await h.advance(HOUR)
+  assert.equal(h.calls.length, afterActivation)
+})
+
+test('a panel opens: the stale panel-only jobs refresh at once, then at their own period', async () => {
+  const h = harness()
+  await h.scheduler.start()
+  await h.advance(40_000)
+  h.calls.length = 0
+  await h.scheduler.setPanelOpen(true)
+  assert.deepEqual([...h.calls].sort(), ['gate-authorizations', 'measurements-summary'], 'the 15 s ones were last read 40 s ago; the 10 min ones are still fresh')
+  h.calls.length = 0
+  await h.advance(45_000)
+  assert.equal(h.count('measurements-summary'), 3)
+  assert.equal(h.count('gate-authorizations'), 3)
+  assert.equal(h.count('model-measurements'), 3)
+  assert.equal(h.count('consumption-summary'), 0, 'not due yet')
+})
+
+test('a panel opening after a long time refreshes the 10 min jobs too, then keeps their period', async () => {
+  const h = harness()
+  await h.scheduler.start()
+  await h.advance(HOUR)
+  h.calls.length = 0
+  await h.scheduler.setPanelOpen(true)
+  assert.deepEqual([...h.calls].sort(), [...PANEL_ONLY].sort())
+  assert.equal(h.liveTimerMs().includes(PERIODS['interval-consumption-10min']), true)
+  h.calls.length = 0
+  await h.advance(PERIODS['interval-activity-10min'])
+  assert.equal(h.count('consumption-summary'), 1)
+  assert.equal(h.count('activity-summary'), 1)
+  assert.equal(h.count('router-status'), 1)
+})
+
+test('a panel that was already open at activation does not repeat the activation read', async () => {
+  const h = harness()
+  await h.scheduler.setPanelOpen(true)
+  await h.scheduler.start()
+  assert.equal(h.count('measurements-summary'), 1)
+  await h.scheduler.setPanelOpen(true)
+  assert.equal(h.count('measurements-summary'), 1, 'a second open signal changes nothing')
+})
+
+test('the panel goes away: panel-only ticks stop, the decision inputs keep their cadence, and the timers with nothing left are cleared', async () => {
+  const h = harness()
+  await h.scheduler.start()
+  await h.scheduler.setPanelOpen(true)
+  await h.advance(30_000)
+  await h.scheduler.setPanelOpen(false)
+  assert.equal(h.liveTimerMs().includes(PERIODS['interval-consumption-10min']), false)
+  assert.equal(h.liveTimerMs().includes(PERIODS['interval-activity-10min']), false)
+  assert.equal(h.liveTimerMs().includes(PERIODS['interval-15s']), true, 'model-measurements still needs it')
+  h.calls.length = 0
+  await h.advance(HOUR)
+  for (const id of PANEL_ONLY) assert.equal(h.count(id), 0, id)
+  assert.equal(h.count('model-measurements'), 240)
+  assert.equal(h.count('account-quota'), 6)
+
+  const routerOff = harness(states({ 'model-router': 'off' }))
+  await routerOff.scheduler.start()
+  await routerOff.scheduler.setPanelOpen(true)
+  assert.equal(routerOff.timers.live.size > 0, true)
+  await routerOff.scheduler.setPanelOpen(false)
+  assert.equal(routerOff.timers.live.size, 0, 'only panel-only jobs were left: the worker has nothing to wake for')
+})
+
+test('the decision inputs run on the same schedule with or without a panel', async () => {
+  const closed = harness()
+  await closed.scheduler.start()
+  await closed.advance(HOUR)
+  const open = harness()
+  await open.scheduler.start()
+  await open.scheduler.setPanelOpen(true)
+  await open.advance(HOUR)
+  for (const id of ['model-measurements', 'account-quota', 'model-docs-check']) assert.equal(open.count(id), closed.count(id), id)
+})
+
+test('a panel opening never starts a job of a module that is off', async () => {
+  const h = harness(states({ gate: 'off', 'model-router': 'off' }))
+  await h.scheduler.start()
+  await h.scheduler.setPanelOpen(true)
+  await h.advance(HOUR)
+  assert.equal(h.count('gate-authorizations'), 0)
+  assert.equal(h.count('model-measurements'), 0)
+  assert.equal(h.count('router-status'), 1 + 6, 'the steward still owns it: activation, then one per 10 min while the panel is open')
+  assert.equal(h.count('account-quota'), 0)
+})
+
+test('a module switched on while a panel is open gets its timers and its activation jobs; a module turned off loses them', async () => {
+  const h = harness(states({ gate: 'off' }))
+  await h.scheduler.start()
+  await h.scheduler.setPanelOpen(true)
+  assert.equal(h.count('gate-authorizations'), 0)
+  await h.scheduler.apply(states({ gate: 'active' }))
+  assert.equal(h.count('gate-authorizations'), 1, 'activation job of the module just turned on')
+  await h.advance(30_000)
+  assert.equal(h.count('gate-authorizations'), 3)
+  await h.scheduler.apply(states({ gate: 'off' }))
+  await h.advance(30_000)
+  assert.equal(h.count('gate-authorizations'), 3)
+})
+
+test('close ends everything and a late panel signal starts nothing', async () => {
+  const h = harness()
+  await h.scheduler.start()
+  h.scheduler.close()
+  h.calls.length = 0
+  await h.scheduler.setPanelOpen(true)
+  assert.equal(h.timers.live.size, 0)
+  assert.deepEqual(h.calls, [])
 })
 
 test('every interval trigger of the registry has a period and every event trigger a handler slot', () => {

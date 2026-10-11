@@ -108,6 +108,13 @@ export interface WorkerJob {
   readonly fn: string;
   readonly triggers: readonly WorkerTrigger[];
   readonly sidecar: string | null;
+  /**
+   * T4b: what the job writes is read only by a panel (nothing in the worker,
+   * the gate or the router decides from it). It still runs once at
+   * activation, but its interval ticks run only while a panel is open. A job
+   * that feeds a decision, or that spawns nothing, is not marked.
+   */
+  readonly panelOnly?: true;
 }
 
 /** An existing per-feature switch the module's state sits in front of, and where it is stored. `shadowValue` is the value that is the module's shadow, null when the switch has no measure value. */
@@ -132,14 +139,25 @@ export interface FeatureModule {
 const FILE_TOOLS_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
 const ROUTER_OPTIONS = "account settings.json pluginConfigs[\"orca-jev-mod-skills@skills-dir\"].options";
 
+// panelOnly (T4b) classification, from who reads each interval job's output:
+//   panel only    measurements-summary, gate-authorizations, router-status,
+//                 consumption-summary, activity-summary (storage keys only
+//                 config.html and board.html read).
+//   decision      model-measurements: when the readiness verdict flips it
+//                 re-mirrors the catalog whose `ready` flag the Agent hook
+//                 reads (models-worker.mjs publishModelMeasurements);
+//                 account-quota: writes quota.json, which the router mod
+//                 reads for quota pressure (mod-skills hooks/index.ts).
+//   no process    model-docs-check: a daily fetch inside the worker, no
+//                 sidecar, so gating it would save nothing.
 // Jobs more than one module owns: each owner lists the same entry, and the
 // job runs while any of them is on (workerJobsOn).
-const MEASUREMENTS_SUMMARY: WorkerJob = { id: "measurements-summary", fn: "publishMeasurementsSummary", triggers: ["activation", "interval-15s"], sidecar: "read-measurements.mjs" };
+const MEASUREMENTS_SUMMARY: WorkerJob = { id: "measurements-summary", fn: "publishMeasurementsSummary", triggers: ["activation", "interval-15s"], sidecar: "read-measurements.mjs", panelOnly: true };
 // Also refreshed on a panel request (attendModelRouterStatusRefresh), which spawns the same sidecar.
-const ROUTER_STATUS: WorkerJob = { id: "router-status", fn: "publishModelRouterStatus", triggers: ["activation", "poll", "interval-account-quota-10min"], sidecar: "install-claude-integration.mjs" };
+const ROUTER_STATUS: WorkerJob = { id: "router-status", fn: "publishModelRouterStatus", triggers: ["activation", "poll", "interval-account-quota-10min"], sidecar: "install-claude-integration.mjs", panelOnly: true };
 const ROUTER_CONFIG_REQUEST: WorkerJob = { id: "router-config-request", fn: "attendModelRouterConfigRequest", triggers: ["poll"], sidecar: "install-claude-integration.mjs" };
-const CONSUMPTION_SUMMARY: WorkerJob = { id: "consumption-summary", fn: "publishConsumptionSummary", triggers: ["activation", "interval-consumption-10min"], sidecar: "read-consumption.mjs" };
-const ACTIVITY_SUMMARY: WorkerJob = { id: "activity-summary", fn: "publishActivitySummary", triggers: ["activation", "interval-activity-10min"], sidecar: "read-activity.mjs" };
+const CONSUMPTION_SUMMARY: WorkerJob = { id: "consumption-summary", fn: "publishConsumptionSummary", triggers: ["activation", "interval-consumption-10min"], sidecar: "read-consumption.mjs", panelOnly: true };
+const ACTIVITY_SUMMARY: WorkerJob = { id: "activity-summary", fn: "publishActivitySummary", triggers: ["activation", "interval-activity-10min"], sidecar: "read-activity.mjs", panelOnly: true };
 
 export const FEATURE_MODULES: readonly FeatureModule[] = [
   {
@@ -156,7 +174,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     modFeatures: [],
     workerJobs: [
       MEASUREMENTS_SUMMARY,
-      { id: "gate-authorizations", fn: "publishGateAuthorizations", triggers: ["activation", "interval-15s"], sidecar: "gate-authorizations.mjs" },
+      { id: "gate-authorizations", fn: "publishGateAuthorizations", triggers: ["activation", "interval-15s"], sidecar: "gate-authorizations.mjs", panelOnly: true },
       ACTIVITY_SUMMARY,
       { id: "deny-tier-status", fn: "publishDenyTierStatus", triggers: ["activation"], sidecar: "write-secret-mirror.mjs" },
       { id: "trusted-programs-status", fn: "publishTrustedPrograms", triggers: ["activation"], sidecar: null },
@@ -351,6 +369,22 @@ export function workerJobsFor(trigger: WorkerTrigger): readonly WorkerJobId[] {
 export function workerTriggerOn(modules: FeatureModules, trigger: WorkerTrigger): boolean {
   const on = new Set(workerJobsOn(modules));
   return workerJobsFor(trigger).some((id) => on.has(id));
+}
+
+/** Whether the job's interval ticks run only while a panel is open (see WorkerJob.panelOnly). */
+export function workerJobIsPanelOnly(id: WorkerJobId): boolean {
+  return FEATURE_MODULES.some((module) => module.workerJobs.some((job) => job.id === id && job.panelOnly === true));
+}
+
+/**
+ * Whether `trigger` needs its timer or subscription right now: at least one
+ * of its jobs is on, and either it is not panel-only or a panel is open. A
+ * timer of panel-only jobs is cleared when the last panel goes away, so the
+ * worker has nothing left to wake for.
+ */
+export function workerTriggerWanted(modules: FeatureModules, trigger: WorkerTrigger, panelOpen: boolean): boolean {
+  const on = new Set(workerJobsOn(modules));
+  return workerJobsFor(trigger).some((id) => on.has(id) && (panelOpen || !workerJobIsPanelOnly(id)));
 }
 
 /** Whether the mod copy under ~/.claude/skills must stay installed: any of its features is on. */

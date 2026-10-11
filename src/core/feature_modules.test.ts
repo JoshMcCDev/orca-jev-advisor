@@ -27,8 +27,10 @@ import {
   parseFeatureModules,
   switchMode,
   workerJobsFor,
+  workerJobIsPanelOnly,
   workerJobsOn,
   workerTriggerOn,
+  workerTriggerWanted,
 } from "./feature_modules.ts";
 import type { FeatureMode, FeatureModules, HookEntry, ModuleId, ModuleState, WorkerTrigger } from "./feature_modules.ts";
 
@@ -217,6 +219,41 @@ test("workerTriggerOn: a timer is wanted until every module using it is off", ()
   assert.equal(workerTriggerOn(withStates({ board: "off" }), "agent.status.changed"), false);
   assert.equal(workerTriggerOn(withStates({ "model-router": "off", steward: "off" }), "interval-account-quota-10min"), false);
   assert.equal(workerTriggerOn(withStates({ "model-router": "off" }), "interval-account-quota-10min"), true, "the steward still reads the router status");
+});
+
+test("workerJobIsPanelOnly: exactly the interval jobs whose output only a panel reads (T4b classification)", () => {
+  const panelOnly = FEATURE_MODULES.flatMap((module) => module.workerJobs)
+    .filter((job) => workerJobIsPanelOnly(job.id))
+    .map((job) => job.id);
+  assert.deepEqual([...new Set(panelOnly)].sort(), ["activity-summary", "consumption-summary", "gate-authorizations", "measurements-summary", "router-status"]);
+  // Decision inputs keep their cadence: model-measurements re-mirrors the `ready` flag the Agent hook reads, account-quota writes the quota.json the router reads.
+  for (const id of ["model-measurements", "account-quota"] as const) assert.equal(workerJobIsPanelOnly(id), false, id);
+  // The daily docs check spawns nothing, so gating it saves nothing.
+  assert.equal(workerJobIsPanelOnly("model-docs-check"), false);
+  // Only interval jobs are gated: a panel-only job is never an event handler.
+  for (const job of FEATURE_MODULES.flatMap((module) => module.workerJobs)) {
+    if (workerJobIsPanelOnly(job.id)) assert.equal(job.triggers.some((trigger) => trigger.startsWith("interval-")), true, job.id);
+  }
+});
+
+test("workerTriggerWanted: a timer of panel-only jobs exists only while a panel is open; one with a decision input always does", () => {
+  // Every job on these two timers only feeds a panel.
+  for (const trigger of ["interval-consumption-10min", "interval-activity-10min"] as const) {
+    assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, trigger, false), false, trigger);
+    assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, trigger, true), true, trigger);
+  }
+  // model-measurements (15 s) and account-quota (10 min) are decision inputs: their timers stay while model-router is on.
+  assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, "interval-15s", false), true);
+  assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, "interval-account-quota-10min", false), true);
+  // With model-router off the 15 s timer holds only panel-only jobs.
+  const routerOff = withStates({ "model-router": "off" });
+  assert.equal(workerTriggerWanted(routerOff, "interval-15s", false), false);
+  assert.equal(workerTriggerWanted(routerOff, "interval-15s", true), true);
+  // Off still wins: nothing is wanted when every owner is off, panel open or not.
+  const allOff = withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off" });
+  assert.equal(workerTriggerWanted(allOff, "interval-15s", true), false);
+  // Event handlers do not depend on a panel.
+  assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, "agent.status.changed", false), true);
 });
 
 test("every hook the installer installs today is owned by exactly one module", () => {

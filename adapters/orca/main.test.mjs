@@ -52,6 +52,11 @@ const {
   attendLocaleRequest,
   attendModelRouterConfigRequest,
   attendModelRouterStatusRefresh,
+  attendPanelSignals,
+  BOARD_PANEL_FRESH_MS,
+  BOARD_PANEL_SEEN_KEY,
+  PANEL_SEEN_FRESH_MS,
+  PANEL_SEEN_KEY,
   shareRecentAccountList,
   attendModSkillsConfigRequest,
   attendPolicySeedDismissRequest,
@@ -2533,4 +2538,63 @@ test('buildModuleRunners: a runner for every registry job that runs at activatio
   const intervals = [...triggers].filter((t) => t.startsWith('interval-'))
   assert.deepEqual(new Set(Object.keys(MODULE_PERIODS)), new Set(intervals))
   for (const period of Object.values(MODULE_PERIODS)) assert.ok(period > 0)
+})
+
+// ---------------------------------------------------------------------------
+// T4b: the panels' own "I am open" signals decide whether the panel-only
+// refreshes run (module-scheduler.mjs setPanelOpen). The poll reads both
+// keys each turn; the grace is a little over two of each panel's own signal
+// periods (config every 2 s, board every 8 s): 5 s and 17 s.
+// ---------------------------------------------------------------------------
+
+function fakeScheduler () {
+  const seen = []
+  return { seen, setPanelOpen: async (open) => { seen.push(open) } }
+}
+
+const NOW = Date.parse('2026-10-11T12:00:00.000Z')
+const secondsAgo = (seconds) => ({ at: new Date(NOW - seconds * 1000).toISOString() })
+
+test('attendPanelSignals: no signal at all means no panel is open', async () => {
+  const scheduler = fakeScheduler()
+  const fresh = await attendPanelSignals(fakeOrca(), fakeStorageHost(), scheduler, NOW)
+  assert.deepEqual(scheduler.seen, [false])
+  assert.equal(fresh, false)
+})
+
+test('attendPanelSignals: the config panel signals every 2 s; it counts as open for 5 s after the last signal and quickens the poll', async () => {
+  assert.equal(PANEL_SEEN_FRESH_MS >= 2 * 2000, true, 'at least two of its own signal periods')
+  const open = fakeScheduler()
+  assert.equal(await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(4) }), open, NOW), true)
+  assert.deepEqual(open.seen, [true])
+  const closed = fakeScheduler()
+  assert.equal(await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(6) }), closed, NOW), false)
+  assert.deepEqual(closed.seen, [false])
+})
+
+test('attendPanelSignals: the board signals every 8 s; it counts as open for 17 s, but its poll stays slow (the board sends no requests)', async () => {
+  assert.equal(BOARD_PANEL_FRESH_MS >= 2 * 8000, true, 'at least two of its own signal periods')
+  const open = fakeScheduler()
+  assert.equal(await attendPanelSignals(fakeOrca(), fakeStorageHost({ [BOARD_PANEL_SEEN_KEY]: secondsAgo(12) }), open, NOW), false)
+  assert.deepEqual(open.seen, [true])
+  const closed = fakeScheduler()
+  await attendPanelSignals(fakeOrca(), fakeStorageHost({ [BOARD_PANEL_SEEN_KEY]: secondsAgo(17) }), closed, NOW)
+  assert.deepEqual(closed.seen, [false])
+})
+
+test('attendPanelSignals: either panel is enough, and garbage or an unreadable key counts as closed', async () => {
+  const scheduler = fakeScheduler()
+  await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(60), [BOARD_PANEL_SEEN_KEY]: secondsAgo(1) }), scheduler, NOW)
+  await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: 'x', [BOARD_PANEL_SEEN_KEY]: { at: 'not a date' } }), scheduler, NOW)
+  const failing = { ...fakeStorageHost(), get: async () => { throw new Error('host down') } }
+  await attendPanelSignals(fakeOrca(), failing, scheduler, NOW)
+  assert.deepEqual(scheduler.seen, [true, false, false])
+})
+
+test('attendPanelSignals: a refresh that fails is logged, never thrown, and does not hold the poll back', async () => {
+  const orca = fakeOrca()
+  const scheduler = { setPanelOpen: () => Promise.reject(new Error('sidecar exploded')) }
+  assert.equal(await attendPanelSignals(orca, fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(1) }), scheduler, NOW), true)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.match(orca._logs.join('\n'), /panel refresh failed: sidecar exploded/)
 })

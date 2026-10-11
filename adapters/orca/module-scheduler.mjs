@@ -14,7 +14,14 @@
  *     shared by several modules, per T0);
  *   - a state change (`apply`) takes effect with no restart: timers and
  *     handlers are created or removed, and the activation jobs of a module
- *     just turned on run once.
+ *     just turned on run once;
+ *   - T4b: a job whose output only a panel reads (workerJobIsPanelOnly)
+ *     runs once at activation and then only while a panel is open
+ *     (`setPanelOpen`). Its interval ticks are skipped without a panel, and
+ *     a timer with nothing but such jobs is cleared, so the worker has
+ *     nothing to wake for. When a panel opens, each such job whose last run
+ *     is older than its period runs at once. Jobs that feed a decision
+ *     (the router's readiness mirror, the account quota) keep their cadence.
  *
  * The state reaches the worker two ways, neither of them a per-tick file
  * read (the worker's sandbox cannot read the config dir, so a file read is a
@@ -28,7 +35,7 @@
  * timers are injected, so the tests count calls instead of spawning.
  */
 
-import { MODULE_IDS, parseFeatureModules, workerJobsFor, workerJobsOn, workerTriggerOn } from '../../src/core/feature_modules.ts'
+import { MODULE_IDS, parseFeatureModules, workerJobIsPanelOnly, workerJobsFor, workerJobsOn, workerTriggerWanted } from '../../src/core/feature_modules.ts'
 
 function isRecord (value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -82,10 +89,13 @@ export function followStatus (scheduler, readStatus) {
  * @param {(name: string, callback: (payload: unknown) => void) => unknown} deps.subscribe  `orca.events.on`; may return an unsubscribe function.
  * @param {{ setInterval: Function, clearInterval: Function }} [deps.timers]
  * @param {(message: string) => void} deps.log
+ * @param {() => number} [deps.now]  The clock that dates each job's last run (milliseconds).
  * @param {Record<string, string>} [deps.after]  A job that starts only after another one of the same batch (the docs check needs the seeded catalog).
  */
-export function createModuleScheduler ({ initial, runners, eventHandlers, periods, subscribe, timers = { setInterval, clearInterval }, log, after = {} }) {
+export function createModuleScheduler ({ initial, runners, eventHandlers, periods, subscribe, timers = { setInterval, clearInterval }, now = Date.now, log, after = {} }) {
   let modules = initial
+  let panelOpen = false
+  const lastRun = new Map()
   let on = new Set(workerJobsOn(modules))
   let started = false
   let closed = false
@@ -93,6 +103,7 @@ export function createModuleScheduler ({ initial, runners, eventHandlers, period
   async function runOne (id) {
     const runner = runners[id]
     if (!on.has(id) || runner === undefined) return
+    lastRun.set(id, now())
     try {
       await runner()
     } catch (error) {
@@ -121,7 +132,7 @@ export function createModuleScheduler ({ initial, runners, eventHandlers, period
       stop: null,
       start: () => {
         const handle = timers.setInterval(() => {
-          for (const id of workerJobsFor(trigger)) void runOne(id)
+          for (const id of workerJobsFor(trigger)) if (panelOpen || !workerJobIsPanelOnly(id)) void runOne(id)
         }, periods[trigger])
         if (typeof handle?.unref === 'function') handle.unref()
         return () => timers.clearInterval(handle)
@@ -131,7 +142,7 @@ export function createModuleScheduler ({ initial, runners, eventHandlers, period
       trigger,
       stop: null,
       start: () => stopOf(subscribe(trigger, (payload) => {
-        if (!workerTriggerOn(modules, trigger)) return
+        if (!workerTriggerWanted(modules, trigger, panelOpen)) return
         Promise.resolve(eventHandlers[trigger](payload)).catch((error) => log(`${trigger} handler failed: ${String(error?.message ?? error)}`))
       }))
     }))
@@ -140,13 +151,26 @@ export function createModuleScheduler ({ initial, runners, eventHandlers, period
   /** Creates what a trigger needs while one of its jobs is on, and removes it when none is. */
   function sync () {
     for (const group of groups) {
-      const wanted = !closed && workerTriggerOn(modules, group.trigger)
+      const wanted = !closed && workerTriggerWanted(modules, group.trigger, panelOpen)
       if (wanted && group.stop === null) group.stop = group.start()
       else if (!wanted && group.stop !== null) {
         group.stop()
         group.stop = null
       }
     }
+  }
+
+  /** The panel-only jobs that are on, have an interval and were last run more than a period ago (or never). */
+  function stalePanelJobs () {
+    const stale = []
+    for (const trigger of Object.keys(periods)) {
+      for (const id of workerJobsFor(trigger)) {
+        if (!on.has(id) || !workerJobIsPanelOnly(id)) continue
+        const ran = lastRun.get(id)
+        if (ran === undefined || now() - ran >= periods[trigger]) stale.push(id)
+      }
+    }
+    return [...new Set(stale)]
   }
 
   return {
@@ -167,6 +191,20 @@ export function createModuleScheduler ({ initial, runners, eventHandlers, period
       if (!started || closed) return
       sync()
       await runBatch(workerJobsFor('activation').filter((id) => on.has(id) && !before.has(id)))
+    },
+
+    /**
+     * Whether a panel that shows the panel-only jobs is open right now (the
+     * worker's poll reads the panels' own signals, with their grace). Opening
+     * creates the timers those jobs need and refreshes the stale ones at
+     * once; closing clears the timers that have nothing else to run.
+     */
+    async setPanelOpen (open) {
+      if (open === panelOpen) return
+      panelOpen = open
+      if (!started || closed) return
+      sync()
+      if (open) await runBatch(stalePanelJobs())
     },
 
     /** Runs a poll turn's request handler only while its job is on; undefined (and nothing started) otherwise. */

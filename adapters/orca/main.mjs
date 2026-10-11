@@ -1523,6 +1523,39 @@ const PANEL_SEEN_FRESH_MS = 5 * 1000
 const SECRET_POLL_ACTIVE_MS = 1 * 1000
 const SECRET_POLL_IDLE_MS = 15 * 1000
 
+// T4b (odd/tasks/feature-modules.md): the display-only refreshes (the
+// measurements, gate authorizations, router status, consumption and activity
+// summaries) run only while a panel that shows them is open. The config panel
+// signals through PANEL_SEEN_KEY every 2 s; the board, which sends the
+// worker no request, signals through its own key each time it reloads, every
+// 8 s while visible. A panel counts as open for a little over two of its own
+// signal periods after the last signal, so one missed write does not close it
+// and a closed panel stops the refreshes within seconds.
+const BOARD_PANEL_SEEN_KEY = 'boardPanelSeen'
+const BOARD_PANEL_FRESH_MS = 17 * 1000
+
+function isPanelSeenFresh (seen, nowMs, graceMs) {
+  return isRecord(seen) && typeof seen.at === 'string' && (nowMs - Date.parse(seen.at)) < graceMs
+}
+
+/**
+ * Reads both panels' signals, tells the module scheduler whether any panel is
+ * open, and returns whether the config panel is (the poll runs fast only for
+ * it, since it is the one that sends requests). The refresh a newly opened
+ * panel triggers is not awaited: a sidecar must not hold the next poll turn.
+ */
+async function attendPanelSignals (orca, storageHost, scheduler, nowMs = Date.now()) {
+  const [config, board] = await Promise.all([
+    storageHost.get(PANEL_SEEN_KEY).catch(() => null),
+    storageHost.get(BOARD_PANEL_SEEN_KEY).catch(() => null)
+  ])
+  const configOpen = isPanelSeenFresh(config, nowMs, PANEL_SEEN_FRESH_MS)
+  const boardOpen = isPanelSeenFresh(board, nowMs, BOARD_PANEL_FRESH_MS)
+  scheduler.setPanelOpen(configOpen || boardOpen)
+    .catch((error) => orca.log(`panel refresh failed: ${error.message}`))
+  return configOpen
+}
+
 // ---------------------------------------------------------------------------
 // Worker heartbeat -- a panel cannot wake a reaped worker (see this module's
 // header and odd/tasks/panel-worker-wakeup.md): the only five panel-callable
@@ -2969,6 +3002,7 @@ export default function activate (orca) {
   // minutes idle, so this timer must be (and is) cleared by teardown below.
   let secretPollStopped = false
   let secretTimer = null
+  let panelFresh = false
   const catalogPolicyMirrorSeen = { value: null }
   const policySeedNoticeSeen = { value: null }
   const modelsMirrorSeen = { value: null }
@@ -2984,6 +3018,11 @@ export default function activate (orca) {
   }
   const runSecretPoll = () => {
     publishWorkerHeartbeat(orca, storageHost)
+      // First, so a panel that has just opened starts its refresh before the
+      // slower request handlers below.
+      .then(() => attendPanelSignals(orca, storageHost, scheduler))
+      .then((fresh) => { panelFresh = fresh })
+      .catch((error) => orca.log(`panel signal handling failed: ${error.message}`))
       .then(() => attendSecretRequest(orca, storageHost, secretsHost))
       .catch((error) => orca.log(`secret request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRequest(orca, storageHost))
@@ -3022,11 +3061,9 @@ export default function activate (orca) {
       .catch((error) => orca.log(`models mirror request handling failed: ${error.message}`))
       .then(() => scheduler.run('models-request', () => attendModelsSeedRequest(orca, storageHost, MODELS_WORKER_OPTIONS)))
       .catch((error) => orca.log(`models seed request handling failed: ${error.message}`))
-      .then(() => storageHost.get(PANEL_SEEN_KEY).catch(() => null))
-      .then((seen) => {
+      .then(() => {
         if (secretPollStopped) return
-        return isRecord(seen) && typeof seen.at === 'string' &&
-          (Date.now() - Date.parse(seen.at)) < PANEL_SEEN_FRESH_MS
+        return panelFresh
       })
       // Rescheduling must survive anything above it. Without this the loop
       // stops on the first unexpected error and the panel waits forever on a
@@ -3167,6 +3204,11 @@ export {
   publishGateAuthorizations,
   attendLocaleRequest,
   attendModelRouterConfigRequest,
+  attendPanelSignals,
+  BOARD_PANEL_FRESH_MS,
+  BOARD_PANEL_SEEN_KEY,
+  PANEL_SEEN_FRESH_MS,
+  PANEL_SEEN_KEY,
   attendModSkillsConfigRequest,
   attendPolicySeedDismissRequest,
   attendPolicySeedImportRequest,

@@ -1150,6 +1150,17 @@
       }
       function read (key, usuario) { return call('storage.get', { key: key }, usuario).then(stored) }
 
+      // ---------- "this panel is open" signal ----------------------------------
+      // The worker refreshes the summaries this board shows (measurements,
+      // consumption, activity) only while a panel is open, and the board sends
+      // it no request that would say so. Mirrors main.mjs's BOARD_PANEL_SEEN_KEY:
+      // written on every reload (every 8 s while visible, on focus, on refresh),
+      // in the background lane so a click's reserved quota is never spent on it.
+      var BOARD_PANEL_SEEN_KEY = 'boardPanelSeen'
+      function signalPanelOpen () {
+        return call('storage.set', { key: BOARD_PANEL_SEEN_KEY, value: { at: new Date().toISOString() } }, false)
+      }
+
       // ---------- worker liveness: heartbeat ----------------------------------
       // Mirrors main.mjs's WORKER_HEARTBEAT_KEY/WORKER_HEARTBEAT_STALE_MS and
       // isHeartbeatFresh -- see the tested original at
@@ -2416,6 +2427,7 @@
       }
 
       function reload (usuario) {
+        signalPanelOpen()
         return Promise.all([
           read('board', usuario),
           read('measurementsSummary', usuario),
