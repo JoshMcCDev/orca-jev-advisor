@@ -205,11 +205,19 @@ the state. Review Abide before designing this.
 gets one live verdict with its latency, and confirms the hook is installed
 and answers under the minimal environment of a Dock-launched app.
 
-**Why.** Several of our incidents (the 0.6.10 reinstall, plugin errors that
-only appear in memory) would have been one command to see.
+**We already have most of it.** `advisor.doctor` (`cmdDoctor`,
+`adapters/orca/main.mjs:2830`) checks the key against a real Jev call, CLI
+reachability, the catalog, the secret mirror and the Claude Code integration.
+What toolgate adds is running the installed hook itself under a minimal
+environment and timing the verdict.
 
-**First thing to verify.** What the panel already shows (Jev health, installed
-version) and what is still missing.
+**Why.** Several of our incidents (the 0.6.10 reinstall, plugin errors that
+only appear in memory) were cases where the integration existed but the
+installed copy was the wrong one.
+
+**First thing to verify.** Whether `cmdDoctor` would have caught the 0.6.10
+reinstall. If it would not, the gap is checking the installed hook's version
+and getting a real answer from it.
 
 ---
 
