@@ -12,6 +12,7 @@ import { after, test } from 'node:test'
 
 import { DEFAULT_DENY_TIER_SWITCHES, DENY_TOGGLE_KEYS } from '../../src/core/deny_tier_config.ts'
 import { GATE_CONSEQUENCE_CEILING } from '../../src/core/decisions.ts'
+import { FEATURE_MODULES } from '../../src/core/feature_modules.ts'
 import { POLICY_SEED_MARKER_KEY, parseSeedPolicies, parseSeedVersion } from '../../src/core/policy_seed.ts'
 import { decidePolicySeedNotice } from '../../src/core/policy_seed_notice.ts'
 import { getPolicies } from '../../src/core/store.ts'
@@ -39,6 +40,7 @@ const {
   attendClaudeIntegrationRequest,
   attendClaudeIntegrationRescan,
   attendDenyTierConfigRequest,
+  attendFeatureModulesSaveRequest,
   attendGateAuthorizationForgetRequest,
   attendTrustedProgramRequest,
   publishTrustedPrograms,
@@ -51,6 +53,11 @@ const {
   attendLocaleRequest,
   attendModelRouterConfigRequest,
   attendModelRouterStatusRefresh,
+  attendPanelSignals,
+  BOARD_PANEL_FRESH_MS,
+  BOARD_PANEL_SEEN_KEY,
+  PANEL_SEEN_FRESH_MS,
+  PANEL_SEEN_KEY,
   shareRecentAccountList,
   attendModSkillsConfigRequest,
   attendPolicySeedDismissRequest,
@@ -58,6 +65,7 @@ const {
   attendPolicySeedNoticeRefresh,
   attendSecretRequest,
   boardProjectName,
+  buildModuleRunners,
   CATALOG_PROPOSAL_ACCEPT_RESULT_KEY,
   CATALOG_PROPOSALS_STATUS_KEY,
   CATALOG_REFRESH_RESULT_KEY,
@@ -74,6 +82,7 @@ const {
   CONSUMPTION_STATUS_KEY,
   DENY_TIER_CONFIG_RESULT_KEY,
   DENY_TIER_STATUS_KEY,
+  FEATURE_MODULES_RESULT_KEY,
   deriveCatalogFromOrca,
   deriveInitialCatalogIfEmpty,
   GATE_DEFAULTS_KEY,
@@ -83,6 +92,7 @@ const {
   migrateLegacyPolicyKinds,
   mirrorAccountQuota,
   mirrorCatalogAndPolicies,
+  MODULE_PERIODS,
   onAgentStatusChanged,
   MODEL_ROUTER_CONFIG_RESULT_KEY,
   MODEL_ROUTER_STATUS_KEY,
@@ -105,6 +115,7 @@ const {
   publishWorkerHeartbeat,
   repoNameSources,
   SECRET_RESULT_KEY,
+  secretMirrorPermissionArgs,
   seedPoliciesIfEmpty,
   spawnSidecar,
   WORKER_HEARTBEAT_KEY
@@ -2512,4 +2523,222 @@ test('publishTrustedPrograms publishes the stored list, validated', async () => 
   const storageHost = fakeStorageHost({ trustedPrograms: ['acme-notify', 'rm'] })
   await publishTrustedPrograms(fakeOrca(), storageHost)
   assert.deepEqual((await storageHost.get(TRUSTED_PROGRAMS_STATUS_KEY)).programs, ['acme-notify'])
+})
+
+// ---------------------------------------------------------------------------
+// Feature modules (odd/tasks/feature-modules.md, T4): the scheduler is only as
+// complete as the table of what each registry job runs.
+// ---------------------------------------------------------------------------
+
+test('buildModuleRunners: a runner for every registry job that runs at activation or on an interval, a handler for every Orca event, and a period for every interval', () => {
+  const { runners, eventHandlers } = buildModuleRunners(fakeOrca(), fakeStorageHost())
+  const jobs = FEATURE_MODULES.flatMap((module) => module.workerJobs)
+  const triggers = new Set(jobs.flatMap((job) => job.triggers))
+  const expectedRunners = new Set(jobs.filter((job) => job.triggers.some((t) => t === 'activation' || t.startsWith('interval-'))).map((job) => job.id))
+  assert.deepEqual(new Set(Object.keys(runners)), expectedRunners)
+  const events = [...triggers].filter((t) => t.includes('.'))
+  assert.deepEqual(new Set(Object.keys(eventHandlers)), new Set(events))
+  const intervals = [...triggers].filter((t) => t.startsWith('interval-'))
+  assert.deepEqual(new Set(Object.keys(MODULE_PERIODS)), new Set(intervals))
+  for (const period of Object.values(MODULE_PERIODS)) assert.ok(period > 0)
+})
+
+// ---------------------------------------------------------------------------
+// T4b: the panels' own "I am open" signals decide whether the panel-only
+// refreshes run (module-scheduler.mjs setPanelOpen). The poll reads both
+// keys each turn; the grace is a little over two of each panel's own signal
+// periods (config every 2 s, board every 8 s): 5 s and 17 s.
+// ---------------------------------------------------------------------------
+
+function fakeScheduler () {
+  const seen = []
+  return { seen, setPanelOpen: async (open) => { seen.push(open) } }
+}
+
+const NOW = Date.parse('2026-10-11T12:00:00.000Z')
+const secondsAgo = (seconds) => ({ at: new Date(NOW - seconds * 1000).toISOString() })
+
+test('attendPanelSignals: no signal at all means no panel is open', async () => {
+  const scheduler = fakeScheduler()
+  const fresh = await attendPanelSignals(fakeOrca(), fakeStorageHost(), scheduler, NOW)
+  assert.deepEqual(scheduler.seen, [false])
+  assert.equal(fresh, false)
+})
+
+test('attendPanelSignals: the config panel signals every 2 s; it counts as open for 5 s after the last signal and quickens the poll', async () => {
+  assert.equal(PANEL_SEEN_FRESH_MS >= 2 * 2000, true, 'at least two of its own signal periods')
+  const open = fakeScheduler()
+  assert.equal(await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(4) }), open, NOW), true)
+  assert.deepEqual(open.seen, [true])
+  const closed = fakeScheduler()
+  assert.equal(await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(6) }), closed, NOW), false)
+  assert.deepEqual(closed.seen, [false])
+})
+
+test('attendPanelSignals: the board signals every 8 s; it counts as open for 17 s, but its poll stays slow (the board sends no requests)', async () => {
+  assert.equal(BOARD_PANEL_FRESH_MS >= 2 * 8000, true, 'at least two of its own signal periods')
+  const open = fakeScheduler()
+  assert.equal(await attendPanelSignals(fakeOrca(), fakeStorageHost({ [BOARD_PANEL_SEEN_KEY]: secondsAgo(12) }), open, NOW), false)
+  assert.deepEqual(open.seen, [true])
+  const closed = fakeScheduler()
+  await attendPanelSignals(fakeOrca(), fakeStorageHost({ [BOARD_PANEL_SEEN_KEY]: secondsAgo(17) }), closed, NOW)
+  assert.deepEqual(closed.seen, [false])
+})
+
+test('attendPanelSignals: either panel is enough, and garbage or an unreadable key counts as closed', async () => {
+  const scheduler = fakeScheduler()
+  await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(60), [BOARD_PANEL_SEEN_KEY]: secondsAgo(1) }), scheduler, NOW)
+  await attendPanelSignals(fakeOrca(), fakeStorageHost({ [PANEL_SEEN_KEY]: 'x', [BOARD_PANEL_SEEN_KEY]: { at: 'not a date' } }), scheduler, NOW)
+  const failing = { ...fakeStorageHost(), get: async () => { throw new Error('host down') } }
+  await attendPanelSignals(fakeOrca(), failing, scheduler, NOW)
+  assert.deepEqual(scheduler.seen, [true, false, false])
+})
+
+test('attendPanelSignals: a refresh that fails is logged, never thrown, and does not hold the poll back', async () => {
+  const orca = fakeOrca()
+  const scheduler = { setPanelOpen: () => Promise.reject(new Error('sidecar exploded')) }
+  assert.equal(await attendPanelSignals(orca, fakeStorageHost({ [PANEL_SEEN_KEY]: secondsAgo(1) }), scheduler, NOW), true)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.match(orca._logs.join('\n'), /panel refresh failed: sidecar exploded/)
+})
+
+// ---------------------------------------------------------------------------
+// feature-modules T5: the panel's module switch. The panel asks, the worker
+// writes feature-modules.json through the sidecar, runs the installer (under
+// the 0.6.26 guard), moves the scheduler at once, and publishes the refreshed
+// status BEFORE the result. Every dependency is injected: no real sidecar, no
+// real installer, no ~/.claude.
+// ---------------------------------------------------------------------------
+
+test('secretMirrorPermissionArgs: feature-modules-save may write the config dir and nothing else; the read modes write nothing', () => {
+  const save = secretMirrorPermissionArgs('feature-modules-save')
+  const writes = save.filter((arg) => arg.startsWith('--allow-fs-write='))
+  assert.equal(writes.length, 1, 'one write grant')
+  assert.ok(writes[0].endsWith(join('config')), `the config dir, got ${writes[0]}`)
+  assert.ok(save.includes('--permission'))
+  assert.equal(save.includes('--allow-child-process'), false)
+  for (const mode of ['feature-modules-read', 'read', 'stat']) {
+    assert.equal(secretMirrorPermissionArgs(mode).some((arg) => arg.startsWith('--allow-fs-write=')), false, mode)
+  }
+})
+
+const MODULES_CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'active', board: 'active' }
+
+function modulesRequest (overrides = {}) {
+  return { id: 'fm-1', at: new Date().toISOString(), modules: MODULES_CHOSEN, ...overrides }
+}
+
+/** Doubles for the save sidecar, the installer and the scheduler, recording the order they were called in. */
+function modulesSaveHarness ({ save, install, applyFails } = {}) {
+  const order = []
+  const saved = []
+  const applied = []
+  const options = {
+    save: async (mode, stdin) => {
+      order.push('save')
+      saved.push({ mode, stdin })
+      return save ?? { ok: true, value: MODULES_CHOSEN }
+    },
+    runScript: async (mode) => {
+      order.push(mode)
+      if (mode === 'install') return install ?? { ok: true }
+      if (mode === 'status') return { ok: true, modules: { gate: { state: 'off', hookCount: 5, installed: false, removed: true, matchesState: true } }, targets: [] }
+      return { ok: true }
+    },
+    mirror: async () => ({ ok: true })
+  }
+  const scheduler = { apply: async (modules) => { order.push('apply'); if (applyFails) throw new Error('boom'); applied.push(modules) } }
+  return { options, scheduler, order, saved, applied }
+}
+
+test('attendFeatureModulesSaveRequest: writes, installs, moves the scheduler, publishes the status, and only then the result', async () => {
+  const storageHost = fakeStorageHost({ featureModulesSaveRequest: modulesRequest() })
+  const setOrder = []
+  const set = storageHost.set
+  storageHost.set = async (key, value) => { setOrder.push(key); return set(key, value) }
+  const { options, scheduler, order, saved, applied } = modulesSaveHarness()
+  await attendFeatureModulesSaveRequest(fakeOrca(), storageHost, scheduler, options)
+
+  assert.deepEqual(saved, [{ mode: 'feature-modules-save', stdin: JSON.stringify({ modules: MODULES_CHOSEN }) }])
+  assert.deepEqual(order, ['save', 'installed-roots', 'install', 'apply', 'status'], 'the guard is not forced: installed-roots then install, no --force')
+  assert.deepEqual(applied, [MODULES_CHOSEN])
+  const result = await storageHost.get(FEATURE_MODULES_RESULT_KEY)
+  assert.equal(result.id, 'fm-1')
+  assert.equal(result.ok, true)
+  assert.equal(result.skipped, false)
+  assert.deepEqual(result.modules, MODULES_CHOSEN)
+  assert.ok(setOrder.indexOf('claudeIntegrationStatus') < setOrder.indexOf(FEATURE_MODULES_RESULT_KEY), `status before result, got ${setOrder.join(', ')}`)
+  assert.equal((await storageHost.get('claudeIntegrationStatus')).modules.gate.matchesState, true)
+  assert.equal(await storageHost.get('featureModulesSaveRequest'), null, 'the request is consumed')
+})
+
+test('attendFeatureModulesSaveRequest: an install left alone by a newer one is reported as skipped, and the worker still follows the file', async () => {
+  const storageHost = fakeStorageHost({ featureModulesSaveRequest: modulesRequest({ id: 'fm-2' }) })
+  const { options, scheduler, applied } = modulesSaveHarness({ install: NEWER_SKIP })
+  await attendFeatureModulesSaveRequest(fakeOrca(), storageHost, scheduler, options)
+  const result = await storageHost.get(FEATURE_MODULES_RESULT_KEY)
+  assert.equal(result.ok, true)
+  assert.equal(result.skipped, true)
+  assert.equal(result.reason, 'newer-install-present')
+  assert.deepEqual(applied, [MODULES_CHOSEN], 'worker jobs and the mod follow the file whatever the hooks did')
+  assert.deepEqual((await storageHost.get('claudeIntegrationStatus')).newerInstall, { version: '0.6.25', root: '/work/advisor-dev', ownVersion: '0.6.10' })
+  await installClaudeIntegration(fakeOrca(), { runScript: recordingRunScript({ install: { ok: true } }).runScript })
+})
+
+test('attendFeatureModulesSaveRequest: a failed install is an error that says the choice was saved', async () => {
+  const storageHost = fakeStorageHost({ featureModulesSaveRequest: modulesRequest({ id: 'fm-3' }) })
+  const { options, scheduler, applied } = modulesSaveHarness({ install: { ok: false, reason: 'exception', detail: 'EACCES' } })
+  const orca = fakeOrca()
+  await attendFeatureModulesSaveRequest(orca, storageHost, scheduler, options)
+  const result = await storageHost.get(FEATURE_MODULES_RESULT_KEY)
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'install-failed')
+  assert.equal(result.saved, true)
+  assert.deepEqual(applied, [MODULES_CHOSEN])
+})
+
+test('attendFeatureModulesSaveRequest: a refusal by the sidecar installs nothing and moves nothing', async () => {
+  const storageHost = fakeStorageHost({ featureModulesSaveRequest: modulesRequest({ id: 'fm-4' }) })
+  const { options, scheduler, order } = modulesSaveHarness({ save: { ok: false, reason: 'invalid-shape', detail: 'gate needs one of: off, active.' } })
+  await attendFeatureModulesSaveRequest(fakeOrca(), storageHost, scheduler, options)
+  assert.deepEqual(order, ['save'])
+  const result = await storageHost.get(FEATURE_MODULES_RESULT_KEY)
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'invalid-shape')
+  assert.equal(result.saved, false)
+})
+
+test('attendFeatureModulesSaveRequest: an expired request and a malformed one touch nothing', async () => {
+  for (const [id, request, reason] of [
+    ['fm-5', modulesRequest({ id: 'fm-5', at: TEN_MINUTES_AGO }), 'expired'],
+    ['fm-6', modulesRequest({ id: 'fm-6', modules: 'off' }), 'invalid-request'],
+    ['fm-7', modulesRequest({ id: 'fm-7', modules: null }), 'invalid-request']
+  ]) {
+    const storageHost = fakeStorageHost({ featureModulesSaveRequest: request })
+    const { options, scheduler, order } = modulesSaveHarness()
+    await attendFeatureModulesSaveRequest(fakeOrca(), storageHost, scheduler, options)
+    assert.deepEqual(order, [], reason)
+    const result = await storageHost.get(FEATURE_MODULES_RESULT_KEY)
+    assert.equal(result.id, id)
+    assert.equal(result.reason, reason)
+    assert.equal(result.ok, false)
+  }
+})
+
+test('attendFeatureModulesSaveRequest: no request, or one with no id, does nothing', async () => {
+  const none = fakeStorageHost()
+  const { options, scheduler, order } = modulesSaveHarness()
+  await attendFeatureModulesSaveRequest(fakeOrca(), none, scheduler, options)
+  await attendFeatureModulesSaveRequest(fakeOrca(), fakeStorageHost({ featureModulesSaveRequest: { modules: MODULES_CHOSEN } }), scheduler, options)
+  assert.deepEqual(order, [])
+  assert.equal(await none.get(FEATURE_MODULES_RESULT_KEY), null)
+})
+
+test('attendFeatureModulesSaveRequest: a scheduler that throws is logged and the result still reaches the panel', async () => {
+  const storageHost = fakeStorageHost({ featureModulesSaveRequest: modulesRequest({ id: 'fm-8' }) })
+  const { options, scheduler } = modulesSaveHarness({ applyFails: true })
+  const orca = fakeOrca()
+  await attendFeatureModulesSaveRequest(orca, storageHost, scheduler, options)
+  assert.ok(orca._logs.some((line) => /boom/.test(line)), JSON.stringify(orca._logs))
+  assert.equal((await storageHost.get(FEATURE_MODULES_RESULT_KEY)).id, 'fm-8')
 })

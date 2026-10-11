@@ -488,3 +488,80 @@ test("steward, active: with the soft tier switched on it compacts at 400k unless
   assert.equal(row?.verdict, "boundary", "a low-confidence verdict is logged too");
   assert.ok(host.statusLines.some((line) => line?.includes("(límite suave de 400k)")), `status: ${host.statusLines.join(" | ")}`);
 });
+
+// ---------------------------------------------------------------------------
+// Feature modules (odd/tasks/feature-modules.md, T4): the steward module's
+// state is read from `<configDir>/feature-modules.json` on every hook call.
+// ---------------------------------------------------------------------------
+
+const MODULES_PATH = `${HOME}/.config/orca-supervisor/feature-modules.json`;
+
+function setModules(host: FakeHost, modules: Record<string, string>): void {
+  host.files.set(MODULES_PATH, JSON.stringify({ modules }));
+}
+
+test("T4 steward off: a turn counts nothing, schedules no timer, asks Jev nothing and compacts nothing", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active");
+  setModules(host, { steward: "off" });
+  host.messages = WORK;
+  host.fetchQueue.push(verdict("boundary", 0.95));
+  const submit = host.handlers.get("prompt.submit");
+  assert.ok(submit);
+  await submit(engine, { text: "commit it", wait: false, origin: { kind: "composer" } }, async (e: unknown) => e);
+  await turnStart(host, engine, "turn-1");
+  await turnComplete(host, engine);
+
+  assert.equal(host.timers.length, 0, "no timer is scheduled");
+  await runTimers(host);
+  assert.equal(host.state.has("steward"), false, "no person-turn counter");
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(stewardLog(host).length, 0);
+  assert.equal(host.fetchCalls.length, 0, "no Jev call");
+});
+
+test("T4 steward off: a timer already scheduled asks nothing once the module went off", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active");
+  host.messages = WORK;
+  await personPrompt(host, engine, "commit it");
+  await turnStart(host, engine, "turn-1");
+  host.fetchQueue.push(verdict("boundary", 0.95));
+  await turnComplete(host, engine);
+  assert.equal(host.timers.length, 1, "scheduled while the module was on");
+
+  setModules(host, { steward: "off" });
+  await runTimers(host);
+  assert.equal(host.fetchCalls.length, 0);
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(stewardLog(host).length, 0);
+});
+
+test("T4 steward shadow: an active steward and its soft tier only measure -- decided and logged, never compacted", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, "active");
+  setModules(host, { steward: "shadow" });
+  host.messages = WORK;
+  await personTurn(host, engine, "commit it", verdict("boundary", 0.85));
+  assert.equal(host.compactCalls.length, 0);
+  const log = stewardLog(host);
+  assert.equal(log[0]?.mode, "measure");
+  assert.equal(log[0]?.compact, true);
+  assert.equal(log[0]?.applied, false);
+});
+
+test("T4 steward: a switch in the file is picked up by the loaded hooks, with no reload", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active");
+  host.messages = WORK;
+  setModules(host, { steward: "off" });
+  await personTurn(host, engine, "one", verdict("boundary", 0.85));
+  assert.equal(host.compactCalls.length, 0);
+  setModules(host, { steward: "active" });
+  await personTurn(host, engine, "commit it", verdict("boundary", 0.85));
+  assert.equal(host.compactCalls.length, 1);
+});

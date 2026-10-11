@@ -266,6 +266,22 @@
       .trusted-name { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; flex: 1 1 10em; }
       .trusted-add-row { display: flex; gap: 8px; flex-wrap: wrap; }
       .trusted-add-row input { flex: 1 1 12em; width: auto; min-width: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+      /* Feature modules (T5): one bordered card per module, the switch beside its
+         name and wrapping under it on a phone; the lines under it are muted hints. */
+      .module-row { border: 1px solid var(--border, var(--fb-border)); border-radius: var(--radius-md);
+        padding: 10px; margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+      .module-row:first-child { margin-top: 0; }
+      .module-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+      .module-name { font-size: 12px; font-weight: 600; flex: 1 1 10em; min-width: 0; overflow-wrap: anywhere; }
+      .module-states { flex: 0 1 18em; }
+      .module-row .hint { margin-top: 4px; overflow-wrap: anywhere; }
+      .module-row .said:not(:empty) { margin-top: 6px; }
+      .mode-buttons button[hidden] { display: none; }
+      .hint.info[data-module-note] { margin: 12px 12px 0; }
+      section .hint.info[data-module-note] { margin: 8px 0 0; }
+      /* A module that is off hides the settings that belong to it, and the
+         author display rules of rows like .checkbox-row would override [hidden]. */
+      [data-module][hidden], [data-module-note][hidden] { display: none !important; }
       .tabbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 12px 0; border-top: 1px solid var(--border, var(--fb-border)); }
       .tab {
         border: 1px solid transparent; border-bottom: none; border-radius: var(--radius-md) var(--radius-md) 0 0;
@@ -317,6 +333,22 @@
       </div>
 
       <div class="tab-panel" id="panel-general" role="tabpanel" aria-labelledby="tab-general">
+      <!--
+        Feature modules (odd/tasks/feature-modules.md T5). First on the General
+        tab, beside the key and the Claude Code integration: those are the base,
+        and these switches say which of the features built on it run. A switch
+        is a request the worker attends (featureModulesSaveRequest): the panel
+        never writes feature-modules.json, which the gate refuses every other
+        writer. The state and each module's install line come from the
+        integration status (`modules`).
+      -->
+      <section id="modules-section">
+        <h2 data-i18n="modules.heading"></h2>
+        <p class="hint" data-i18n="modules.intro"></p>
+        <div id="modules-rows"></div>
+        <p class="hint" data-i18n="modules.costNote"></p>
+      </section>
+
       <section id="secret-section">
         <h2 data-i18n="secret.heading"></h2>
         <div class="sub" id="secret-status" style="padding:0 0 6px"></div>
@@ -414,7 +446,8 @@
         the Save button below to `queueMode` ({ enabled }); the worker
         mirrors it to queue-mode.json.
       -->
-      <section id="queue-mode-section">
+      <p class="hint info" data-module-note="gate" hidden></p>
+      <section id="queue-mode-section" data-module="gate">
         <h2 data-i18n="queueMode.heading"></h2>
         <label id="queue-mode-label" data-i18n="queueMode.label"></label>
         <div id="queue-mode" class="mode-buttons" role="group" aria-labelledby="queue-mode-label">
@@ -426,7 +459,8 @@
       </div>
 
       <div class="tab-panel" id="panel-modskills" role="tabpanel" aria-labelledby="tab-modskills" hidden>
-      <section id="mod-skills-section">
+      <p class="hint info" data-module-note="skill-selection" hidden></p>
+      <section id="mod-skills-section" data-module="skill-selection">
         <h2 data-i18n="modSkills.heading"></h2>
         <p class="hint" id="mod-skills-hint"></p>
         <p class="hint" id="mod-skills-readiness"></p>
@@ -452,6 +486,7 @@
       </div>
 
       <div class="tab-panel" id="panel-models" role="tabpanel" aria-labelledby="tab-models" hidden>
+      <p class="hint info" data-module-note="model-router" hidden></p>
       <!--
         odd/tasks/model-reclassification.md T7. Self-contained on purpose:
         this is the only section a parallel change may not need to touch,
@@ -459,7 +494,7 @@
         logic lives in its own script tag at the end of the body rather
         than inside the original panel script above.
       -->
-      <section id="models-section">
+      <section id="models-section" data-module="model-router">
         <h2 data-i18n="models.heading"></h2>
         <p class="hint" data-i18n="models.hint"></p>
         <p class="hint" id="models-source-line"><a id="models-source-link" href="https://platform.claude.com/docs/en/about-claude/models/overview" target="_blank" rel="noopener" data-i18n="models.sourceLine"></a></p>
@@ -550,11 +585,12 @@
         the exact same `pluginConfigs[...].options.routerMode` the plugin's
         own userConfig picker in Claude Code's config menu also writes.
       -->
-      <section id="model-router-section">
+      <section id="model-router-section" data-module="model-router">
         <h2 data-i18n="modelRouter.heading"></h2>
         <p class="hint" data-i18n="modelRouter.explanation"></p>
         <p class="hint" data-i18n="modelRouter.workKindHint"></p>
-        <p class="hint" data-i18n="modelRouter.stewardHint"></p>
+        <p class="hint" data-i18n="modelRouter.stewardHint" data-module="steward"></p>
+        <p class="hint info" data-module-note="steward" hidden></p>
         <div id="model-router-rows"></div>
         <p class="hint" id="model-router-empty" style="display:none" data-i18n="modelRouter.empty"></p>
       </section>
@@ -567,7 +603,7 @@
         `explicitModels` ({ mode }); the worker mirrors it to
         explicit-models.json for the hooks module.
       -->
-      <section id="explicit-models-section">
+      <section id="explicit-models-section" data-module="model-router">
         <h2 data-i18n="explicitModels.heading"></h2>
         <label id="explicit-models-label" data-i18n="explicitModels.label"></label>
         <div id="explicit-models" class="mode-buttons" role="group" aria-labelledby="explicit-models-label">
@@ -579,7 +615,8 @@
       </div>
 
       <div class="tab-panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
-      <section id="deny-tier-section">
+      <p class="hint info" data-module-note="gate" hidden></p>
+      <section id="deny-tier-section" data-module="gate">
         <h2 data-i18n="denyTier.heading"></h2>
         <p class="hint" data-i18n="denyTier.hint"></p>
         <div id="deny-tier-rows"></div>
@@ -597,7 +634,7 @@
         store itself (it lives in the cache dir, which only the sidecar may
         write).
       -->
-      <section id="gate-authorizations-section">
+      <section id="gate-authorizations-section" data-module="gate">
         <h2 data-i18n="gateAuth.heading"></h2>
         <p class="hint" data-i18n="gateAuth.hint"></p>
         <p class="hint" id="gate-auth-empty" data-i18n="gateAuth.loading"></p>
@@ -614,7 +651,7 @@
         validates and mirrors to trusted-programs.json for the gate; the
         panel shows the reason when a name is refused. Empty by default.
       -->
-      <section id="trusted-programs-section">
+      <section id="trusted-programs-section" data-module="gate">
         <h2 data-i18n="trusted.heading"></h2>
         <p class="hint" data-i18n="trusted.hint"></p>
         <p class="hint" id="trusted-empty" data-i18n="trusted.loading"></p>
@@ -658,6 +695,50 @@
           'tabs.models': 'Modelos',
           'tabs.modSkills': 'Mod de skills',
           'tabs.rules': 'Reglas',
+          'modules.heading': 'Módulos',
+          'modules.intro': 'Cada función se puede apagar para que no cueste nada: sin proceso de hook, sin llamadas a Jev y sin trabajo en segundo plano. «Sombra» la deja medir y registrar lo que haría, sin cambiar tus turnos. Lo que elijas vale al instante, sin recargar Claude Code. Una sesión que ya estaba abierta antes de actualizar el plugin conserva su mod anterior hasta que la reinicies.',
+          'modules.costNote': 'Las cifras salen de una semana de uso real medido (odd/tasks/feature-modules.md); las tuyas dependen de cómo trabajes. El trabajo en segundo plano cuenta solo lo que el módulo hace por sí solo: los resúmenes que comparten varios módulos siguen mientras alguno esté encendido. Con todos los módulos encendidos son unos 730 procesos de node por hora con un panel abierto y unos 240 sin ninguno abierto.',
+          'modules.state.off': 'Apagado',
+          'modules.state.shadow': 'Sombra',
+          'modules.state.active': 'Activo',
+          'modules.stateGroup': 'Estado de {{module}}',
+          'modules.name.gate': 'Gate',
+          'modules.name.model-router': 'Enrutador de modelo',
+          'modules.name.steward': 'Guardián de contexto',
+          'modules.name.skill-selection': 'Selección de skill y herramienta',
+          'modules.name.board': 'Tablero',
+          'modules.desc.gate': 'Revisa cada comando de Bash y cada edición de archivos antes de que se ejecuten, te pregunta cuando una política lo pide y rechaza los comandos del nivel de bloqueo.',
+          'modules.desc.model-router': 'Elige un modelo para cada prompt y cada subagente, muestra la banda de subagentes y registra el uso de cada turno.',
+          'modules.desc.steward': 'Vigila cuánto ha crecido una sesión y la compacta, o sugiere /clear, cuando una tarea se cierra.',
+          'modules.desc.skill-selection': 'Deja que Jev elija la skill y la herramienta de un turno, en vez de que el modelo vea la lista completa.',
+          'modules.desc.board': 'Mantiene el tablero: el estado en vivo de tus agentes, por proyecto y rama.',
+          'modules.cost.gate': 'En uso: unas {{jev}} llamadas a Jev por prompt y {{hooks}} procesos de hook por cada comando de Bash o edición de archivos (unos {{seconds}} s cada uno).',
+          'modules.cost.model-router': 'En uso: unas {{jev}} llamadas a Jev por prompt y, por cada subagente que arranca, {{agentJev}} llamadas a Jev y {{agentHooks}} procesos de hook.',
+          'modules.cost.steward': 'En uso: unas {{jev}} llamadas a Jev por prompt.',
+          'modules.cost.skill-selection': 'En uso: unas {{jev}} llamadas a Jev por prompt.',
+          'modules.cost.board': 'En uso: ninguna llamada a Jev ni hooks.',
+          'modules.bg.none': 'Segundo plano: nada propio.',
+          'modules.bg.processes': 'Segundo plano: unos {{n}} procesos de node por hora.',
+          'modules.bg.cli': 'Segundo plano: unas {{n}} ejecuciones por hora del comando orca.',
+          'modules.bg.panelOnly': 'Segundo plano: unos {{open}} procesos de node por hora con un panel abierto, ninguno sin panel abierto.',
+          'modules.install.reading': 'Leyendo el estado de los módulos…',
+          'modules.install.unavailable': 'No se pudo leer el estado de este módulo.',
+          'modules.install.noHooks': 'No tiene hooks en Claude Code: sigue al interruptor directamente.',
+          'modules.install.installed': 'Hooks puestos ({{n}}), como elegiste.',
+          'modules.install.removed': 'Hooks quitados de Claude Code, como elegiste.',
+          'modules.install.pending': 'Pendiente: los hooks todavía no han alcanzado esta elección. Pulsa «Configurar» en la integración con Claude Code para aplicarlos ya.',
+          'modules.install.skipped': 'Omitido: una instalación más nueva (versión {{version}}) conserva sus propios hooks. Pulsa «Configurar» para reemplazarla.',
+          'modules.saving': 'Guardando…',
+          'modules.saved': 'Guardado.',
+          'modules.savedSkipped': 'Guardado. Una instalación más nueva conserva sus hooks tal como estaban; pulsa «Configurar» en la integración con Claude Code para aplicarlos.',
+          'modules.installFailed': 'Se guardó tu elección, pero no se pudieron actualizar los hooks de Claude Code. Pulsa «Configurar» para reintentar.',
+          'modules.invalidShape': 'El plugin rechazó esa elección porque no era válida. Vuelve a abrir este panel e inténtalo otra vez.',
+          'modules.gateOffWarn': 'Con el gate apagado nada revisa los comandos de Bash ni las ediciones de archivos antes de que se ejecuten.',
+          'modules.noteOff': 'El módulo {{module}} está apagado, así que sus ajustes están ocultos. Enciéndelo en General, en Módulos.',
+          'modules.noteShadow': 'El módulo {{module}} está en sombra: mide y registra lo que haría, y no cambia tus turnos. Un ajuste «Activo» de aquí queda limitado a medir hasta que el módulo esté Activo.',
+          'integration.hookModuleOff': 'Hook de Bash: quitado a propósito (el módulo Gate está apagado).',
+          'integration.agentModelHookModuleOff': 'Hooks de modelo del Agent: quitados a propósito (el módulo Enrutador de modelo está apagado).',
+          'integration.fileGuardModuleOff': 'Guarda de ediciones (reglas del propio gate): quitada a propósito (el módulo Gate está apagado).',
           'secret.heading': 'Clave de TypeSafe',
           'secret.checking': 'Comprobando…',
           'secret.label': 'Nueva clave (se guarda cifrada; nunca se vuelve a mostrar completa)',
@@ -673,7 +754,7 @@
           'secret.configured': 'Clave configurada (termina en …{{tail}}).',
           'secret.notConfigured': 'Sin clave configurada.',
           'integration.heading': 'Integración con Claude Code',
-          'integration.hint': 'Este plugin escribe siete cosas fuera de sí mismo para que los hooks y el mod de skills funcionen en Claude Code: entradas en <code>~/.claude/settings.json</code>, una variable de entorno en ese mismo archivo, un archivo con la clave en texto plano con permisos restringidos, una copia del mod de skills, un espejo del catálogo de destinos en JSON legible (no es secreto), un espejo de las políticas del equipo en JSON legible (no es secreto), y un espejo del catálogo de modelos en JSON legible (no es secreto). Nada de esto se hace sin mostrarlo aquí. "Revertir todo" deshace las entradas de hooks, la variable de entorno y la copia del mod de skills; borrar la clave elimina el archivo de la clave; los tres espejos JSON nunca se borran, solo se sobrescriben con su siguiente guardado.',
+          'integration.hint': 'Este plugin escribe ocho cosas fuera de sí mismo para que los hooks y el mod de skills funcionen en Claude Code: entradas en <code>~/.claude/settings.json</code>, una variable de entorno en ese mismo archivo, un archivo con la clave en texto plano con permisos restringidos, una copia del mod de skills, un espejo del catálogo de destinos en JSON legible (no es secreto), un espejo de las políticas del equipo en JSON legible (no es secreto), un espejo del catálogo de modelos en JSON legible (no es secreto) y el archivo de los módulos encendidos (no es secreto). Nada de esto se hace sin mostrarlo aquí. "Revertir todo" deshace las entradas de hooks, la variable de entorno y la copia del mod de skills; borrar la clave elimina el archivo de la clave; los tres espejos JSON nunca se borran, solo se sobrescriben con su siguiente guardado.',
           'integration.checking': 'Comprobando…',
           'integration.statusUnavailable': 'No se pudo leer el estado.',
           'integration.hookInstalled': 'Hook de Bash: puesto, en {{path}}',
@@ -1015,6 +1096,50 @@
           'tabs.models': 'Models',
           'tabs.modSkills': 'Skills mod',
           'tabs.rules': 'Rules',
+          'modules.heading': 'Modules',
+          'modules.intro': 'Each feature can be switched off so it costs nothing: no hook process, no Jev call and no background work. Shadow lets it measure and log what it would do, without changing your turns. A choice takes effect at once, with no Claude Code reload. A session that was already open before the plugin updated keeps its old mod until you restart it.',
+          'modules.costNote': 'Figures come from one week of measured real use (odd/tasks/feature-modules.md); yours depend on how you work. Background counts only the work a module does on its own: summaries several modules share keep running while any of them is on. With every module on, that is about 730 node processes an hour while a panel is open and about 240 with none open.',
+          'modules.state.off': 'Off',
+          'modules.state.shadow': 'Shadow',
+          'modules.state.active': 'Active',
+          'modules.stateGroup': '{{module}} state',
+          'modules.name.gate': 'Gate',
+          'modules.name.model-router': 'Model router',
+          'modules.name.steward': 'Context steward',
+          'modules.name.skill-selection': 'Skill and tool selection',
+          'modules.name.board': 'Board',
+          'modules.desc.gate': 'Checks every Bash command and file edit before it runs, asks you when a policy says so, and refuses the commands in the deny tier.',
+          'modules.desc.model-router': 'Chooses a model for each prompt and each subagent, shows the subagent band and logs the usage of every turn.',
+          'modules.desc.steward': 'Watches how far a session has grown and compacts it, or suggests /clear, once a task closes.',
+          'modules.desc.skill-selection': 'Lets Jev pick the skill and the tool for a turn, instead of the model seeing the full list.',
+          'modules.desc.board': 'Keeps the board: the live status of your agents, by project and branch.',
+          'modules.cost.gate': 'In use: about {{jev}} Jev calls per prompt, and {{hooks}} hook processes per Bash command or file edit (about {{seconds}} s each).',
+          'modules.cost.model-router': 'In use: about {{jev}} Jev calls per prompt and, for every subagent started, {{agentJev}} Jev calls and {{agentHooks}} hook processes.',
+          'modules.cost.steward': 'In use: about {{jev}} Jev calls per prompt.',
+          'modules.cost.skill-selection': 'In use: about {{jev}} Jev calls per prompt.',
+          'modules.cost.board': 'In use: no Jev calls and no hooks.',
+          'modules.bg.none': 'Background: nothing of its own.',
+          'modules.bg.processes': 'Background: about {{n}} node processes an hour.',
+          'modules.bg.cli': 'Background: about {{n}} runs an hour of the orca command.',
+          'modules.bg.panelOnly': 'Background: about {{open}} node processes an hour with a panel open, none with no panel open.',
+          'modules.install.reading': 'Reading the state of the modules…',
+          'modules.install.unavailable': 'The state of this module could not be read.',
+          'modules.install.noHooks': 'It has no Claude Code hooks: it follows the switch directly.',
+          'modules.install.installed': 'Hooks installed ({{n}}), as you chose.',
+          'modules.install.removed': 'Hooks removed from Claude Code, as you chose.',
+          'modules.install.pending': 'Pending: the hooks have not caught up with this choice yet. Press "Set up" in the Claude Code integration to apply them now.',
+          'modules.install.skipped': 'Skipped: a newer install (version {{version}}) keeps its own hooks. Press "Set up" to replace it.',
+          'modules.saving': 'Saving…',
+          'modules.saved': 'Saved.',
+          'modules.savedSkipped': 'Saved. A newer install keeps its hooks as they were; press "Set up" in the Claude Code integration to apply them.',
+          'modules.installFailed': 'Your choice was saved, but the Claude Code hooks could not be updated. Press "Set up" to try again.',
+          'modules.invalidShape': 'The plugin refused that choice because it was not valid. Reopen this panel and try again.',
+          'modules.gateOffWarn': 'With the gate off, nothing checks Bash commands or file edits before they run.',
+          'modules.noteOff': 'The {{module}} module is off, so its settings are hidden. Switch it on in General, under Modules.',
+          'modules.noteShadow': 'The {{module}} module is in shadow: it measures and logs what it would do, and changes nothing in your turns. An "Active" setting here stays capped at measuring until the module is Active.',
+          'integration.hookModuleOff': 'Bash hook: removed on purpose (the Gate module is off).',
+          'integration.agentModelHookModuleOff': 'Agent model hooks: removed on purpose (the Model router module is off).',
+          'integration.fileGuardModuleOff': "Edit guard (the gate's own rules): removed on purpose (the Gate module is off).",
           'secret.heading': 'TypeSafe key',
           'secret.checking': 'Checking…',
           'secret.label': 'New key (saved encrypted; never shown in full again)',
@@ -1030,7 +1155,7 @@
           'secret.configured': 'Key configured (ends in …{{tail}}).',
           'secret.notConfigured': 'No key configured.',
           'integration.heading': 'Claude Code integration',
-          'integration.hint': "This plugin writes seven things outside itself so the hooks and the skills mod work in Claude Code: entries in <code>~/.claude/settings.json</code>, an environment variable in that same file, a plain-text file holding the key with restricted permissions, a copy of the skills mod, a human-readable JSON mirror of the destination catalog (not secret), a human-readable JSON mirror of the team policies (not secret), and a human-readable JSON mirror of the model catalog (not secret). None of this happens without showing it here. \"Revert everything\" puts back the hook entries, the environment variable and the skills-mod copy; clearing the key deletes the key file; the three JSON mirrors are never deleted, only overwritten by their own next save.",
+          'integration.hint': "This plugin writes eight things outside itself so the hooks and the skills mod work in Claude Code: entries in <code>~/.claude/settings.json</code>, an environment variable in that same file, a plain-text file holding the key with restricted permissions, a copy of the skills mod, a human-readable JSON mirror of the destination catalog (not secret), a human-readable JSON mirror of the team policies (not secret), a human-readable JSON mirror of the model catalog (not secret), and the file saying which modules are on (not secret). None of this happens without showing it here. \"Revert everything\" puts back the hook entries, the environment variable and the skills-mod copy; clearing the key deletes the key file; the three JSON mirrors are never deleted, only overwritten by their own next save.",
           'integration.checking': 'Checking…',
           'integration.statusUnavailable': 'Could not read the status.',
           'integration.hookInstalled': 'Bash hook: installed, at {{path}}',
@@ -1382,7 +1507,11 @@
         'missing-plugin-root': 'error.missingPluginRoot',
         expired: 'error.expired',
         'derivation-failed': 'error.derivationFailed',
-        'seed-unavailable': 'error.seedUnavailable'
+        'seed-unavailable': 'error.seedUnavailable',
+        'install-failed': 'modules.installFailed',
+        'invalid-shape': 'modules.invalidShape',
+        'invalid-json': 'modules.invalidShape',
+        'invalid-request': 'modules.invalidShape'
       }
       /**
        * An error whose text is safe to put in front of a person.
@@ -1755,6 +1884,38 @@
         return write(CLAUDE_INTEGRATION_REQUEST_KEY, request).then(function (r) {
           if (!r || !r.ok) throw shownError(t('common.couldNotSend'))
           return waitForClaudeIntegrationResult(requestId, Date.now() + 20000)
+        })
+      }
+
+      // ---------- feature modules: request/result -----------------------------
+      // The module switch. This panel never writes feature-modules.json (the
+      // gate refuses every other writer): it asks, the worker writes it through
+      // the strict feature-modules-save sidecar, runs the installer under the
+      // 0.6.26 guard, moves its own scheduler and publishes the refreshed
+      // integration status BEFORE the result (main.mjs attendFeatureModulesSaveRequest).
+      var FEATURE_MODULES_REQUEST_KEY = 'featureModulesSaveRequest'
+      var FEATURE_MODULES_RESULT_KEY = 'featureModulesSaveResult'
+
+      function waitForFeatureModulesResult (requestId, deadline) {
+        return read(FEATURE_MODULES_RESULT_KEY, false).then(function (result) {
+          if (result && result.id === requestId) {
+            if (result.ok) return result
+            throw shownError(errorMessageFor(result))
+          }
+          if (Date.now() >= deadline) throw shownError(t('common.workerSilent'))
+          return new Promise(function (resolve) { setTimeout(resolve, 700) })
+            .then(function () { return waitForFeatureModulesResult(requestId, deadline) })
+        })
+      }
+
+      /** `modules` is the whole map, `{ gate: 'off', ... }`: the sidecar refuses a partial one. */
+      function sendFeatureModulesRequest (modules) {
+        var requestId = 'feature-modules-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+        var request = { id: requestId, at: new Date().toISOString(), modules: modules }
+        signalPanelOpen()
+        return write(FEATURE_MODULES_REQUEST_KEY, request).then(function (r) {
+          if (!r || !r.ok) throw shownError(t('common.couldNotSend'))
+          return waitForFeatureModulesResult(requestId, Date.now() + 20000)
         })
       }
 
@@ -3072,6 +3233,10 @@
             var btn = elMake('button')
             btn.type = 'button'
             btn.textContent = t(MODEL_ROUTER_MODE_KEYS[mode])
+            // The module's own Off (General, Modules) is the one place to turn
+            // the router off; a target that still holds the old value keeps its
+            // button so the stored choice stays visible and changeable.
+            btn.hidden = mode === 'off' && selectedMode !== 'off'
             pressModeButton(btn, mode === selectedMode)
             btn.addEventListener('click', function () {
               selectedMode = mode
@@ -3147,6 +3312,8 @@
       function renderModelRouterSteward (target) {
         var row = elMake('div', 'checkbox-row router-row steward-row')
         row.setAttribute('data-steward-target', target.target)
+        row.setAttribute('data-module', 'steward')
+        row.hidden = shownModuleState('steward') === 'off'
         var text = elMake('div', 'checkbox-text router-target')
         var label = elMake('span', 'checkbox-label')
         label.textContent = t('modelRouter.stewardLabel')
@@ -3159,6 +3326,8 @@
           var btn = elMake('button')
           btn.type = 'button'
           btn.textContent = t(MODEL_ROUTER_MODE_KEYS[mode])
+          // Same as the router row: the steward module's Off replaces its own.
+          btn.hidden = mode === 'off' && selectedMode !== 'off'
           pressModeButton(btn, mode === selectedMode)
           btn.addEventListener('click', function () {
             selectedMode = mode
@@ -3788,6 +3957,12 @@
         })
       }
 
+      /** The module is off and the installer confirms its hooks are gone (`matchesState`). */
+      function moduleHooksRemoved (status, id) {
+        var info = status && status.modules && status.modules[id]
+        return !!info && info.state === 'off' && info.matchesState === true
+      }
+
       // Paints exactly what the worker published in
       // CLAUDE_INTEGRATION_STATUS_KEY -- never the key, and never more detail
       // than the panel needs for the user to know what's set up and where.
@@ -3802,6 +3977,7 @@
       // in odd/tasks/panel-worker-wakeup.md).
       function renderClaudeIntegrationStatus (status, heartbeat, measurements, modSkillsStatus) {
         lastClaudeIntegrationStatus = status
+        renderModules(status)
         claudeIntegrationStatusEl.innerHTML = ''
         if (status === null) {
           claudeIntegrationStatusEl.appendChild(li(
@@ -3827,9 +4003,16 @@
           })))
         }
 
-        var hookLine = status.hook && status.hook.installed
-          ? t('integration.hookCount', { installed: String(status.hook.installedCount), total: String(status.hook.totalCount) })
-          : t('integration.hookNotInstalled')
+        // A module switched off removes its hooks on purpose (feature modules):
+        // that reads as a choice, never as a hook that is missing.
+        var gateRemoved = moduleHooksRemoved(status, 'gate')
+        var routerRemoved = moduleHooksRemoved(status, 'model-router')
+
+        var hookLine = gateRemoved
+          ? t('integration.hookModuleOff')
+          : status.hook && status.hook.installed
+            ? t('integration.hookCount', { installed: String(status.hook.installedCount), total: String(status.hook.totalCount) })
+            : t('integration.hookNotInstalled')
         claudeIntegrationStatusEl.appendChild(li(hookLine))
 
         // Orca's own panes are the ones that matter most for a plugin shipped
@@ -3839,7 +4022,7 @@
         var paneLine = !panes
           ? t('integration.hookPanesNone', { reason: (status.orcaUserData && status.orcaUserData.reason) || '-' })
           : (status.hook.orcaPanesCovered ? t('integration.hookPanesCovered', { panes: String(panes) }) : t('integration.hookPanesMissing'))
-        claudeIntegrationStatusEl.appendChild(li(paneLine))
+        if (!gateRemoved) claudeIntegrationStatusEl.appendChild(li(paneLine))
 
         var envLine = status.env && status.env.installed
           ? t('integration.envInstalled', { name: status.env.name })
@@ -3875,7 +4058,9 @@
         // on the field existing (install-claude-integration.mjs's status()
         // only ever omits it if an older worker build never computed it).
         if (status.agentModelHook && typeof status.agentModelHook.installed === 'boolean') {
-          var agentModelHookLine = status.agentModelHook.installed
+          var agentModelHookLine = routerRemoved
+            ? t('integration.agentModelHookModuleOff')
+            : status.agentModelHook.installed
             ? t('integration.agentModelHookInstalled', { installed: String(status.agentModelHook.installedCount), total: String(status.agentModelHook.totalCount) })
             : t('integration.agentModelHookNotInstalled')
           claudeIntegrationStatusEl.appendChild(li(agentModelHookLine))
@@ -3884,7 +4069,9 @@
         // 0.6.17 T2: the file tools' guard, the same way -- guarded on the
         // field, which a worker older than this panel never reports.
         if (status.fileGuardHook && typeof status.fileGuardHook.installed === 'boolean') {
-          claudeIntegrationStatusEl.appendChild(li(status.fileGuardHook.installed
+          claudeIntegrationStatusEl.appendChild(li(gateRemoved
+            ? t('integration.fileGuardModuleOff')
+            : status.fileGuardHook.installed
             ? t('integration.fileGuardInstalled', { installed: String(status.fileGuardHook.installedCount), total: String(status.fileGuardHook.totalCount) })
             : t('integration.fileGuardNotInstalled')))
         }
@@ -3931,6 +4118,182 @@
           said(claudeIntegrationSaidEl, errorText(error), true)
         })
       })
+
+      // ---------- feature modules (T5) -----------------------------------------
+      // One card per module: name, switch, what it does, what it costs and
+      // whether the Claude Code hooks match the choice. The registry
+      // (src/core/feature_modules.ts) decides which states a module offers: a
+      // module with no measure mode of its own (the gate, the board) has no
+      // shadow. The figures are one week of measured use (odd/tasks/feature-modules.md,
+      // T0 and T4b); background counts the node processes only this module's
+      // own jobs start, with a panel open and with none.
+      var MODULE_ROWS = [
+        { id: 'gate', states: ['off', 'active'], cost: { jev: 9.3, hooks: 1.9, seconds: 0.6 }, background: { open: 236, closed: 0, kind: 'processes' } },
+        { id: 'model-router', states: ['off', 'shadow', 'active'], cost: { jev: 1.1, agentJev: 2, agentHooks: 2 }, background: { open: 240, closed: 240, kind: 'processes' } },
+        { id: 'steward', states: ['off', 'shadow', 'active'], cost: { jev: 0.5 }, background: { open: 0, closed: 0, kind: 'processes' } },
+        { id: 'skill-selection', states: ['off', 'shadow', 'active'], cost: { jev: 7.4 }, background: { open: 0, closed: 0, kind: 'processes' } },
+        { id: 'board', states: ['off', 'active'], cost: {}, background: { open: 38, closed: 38, kind: 'cli' } }
+      ]
+      var moduleStates = null
+      var moduleRowsBuilt = false
+      var moduleBusy = false
+
+      function moduleRow (id) { return MODULE_ROWS.filter(function (row) { return row.id === id })[0] }
+
+      /** 9.3 in English, 9,3 in Spanish; a whole number has no decimals. */
+      function formatFigure (value) {
+        var text = String(value)
+        return currentLocale === 'es' ? text.replace('.', ',') : text
+      }
+
+      function moduleCostText (row) {
+        var params = {}
+        Object.keys(row.cost).forEach(function (key) { params[key] = formatFigure(row.cost[key]) })
+        return t('modules.cost.' + row.id, params)
+      }
+
+      function moduleBackgroundText (row) {
+        var bg = row.background
+        if (bg.open === 0 && bg.closed === 0) return t('modules.bg.none')
+        if (bg.open === bg.closed) return t(bg.kind === 'cli' ? 'modules.bg.cli' : 'modules.bg.processes', { n: String(bg.open) })
+        return t('modules.bg.panelOnly', { open: String(bg.open) })
+      }
+
+      /** The module's own row text in the current language, built once and re-labelled on each render. */
+      function buildModuleRows () {
+        if (moduleRowsBuilt) return
+        moduleRowsBuilt = true
+        var host = el('modules-rows')
+        MODULE_ROWS.forEach(function (row) {
+          var card = elMake('div', 'module-row')
+          card.setAttribute('data-module-row', row.id)
+          var head = elMake('div', 'module-head')
+          var name = elMake('span', 'module-name')
+          name.setAttribute('data-module-name', row.id)
+          var group = elMake('div', 'mode-buttons module-states')
+          group.setAttribute('role', 'group')
+          group.setAttribute('data-module-states', row.id)
+          row.states.forEach(function (state) {
+            var btn = elMake('button')
+            btn.type = 'button'
+            btn.setAttribute('data-value', state)
+            btn.addEventListener('click', function () { chooseModuleState(row.id, state) })
+            group.appendChild(btn)
+          })
+          head.appendChild(name)
+          head.appendChild(group)
+          card.appendChild(head)
+          ;['desc', 'cost', 'background', 'install'].forEach(function (part) {
+            var line = elMake('p', 'hint module-' + part)
+            line.setAttribute('data-module-' + part, row.id)
+            card.appendChild(line)
+          })
+          if (row.id === 'gate') {
+            var warn = elMake('p', 'hint warn module-warn')
+            warn.setAttribute('data-module-warn', row.id)
+            warn.hidden = true
+            card.appendChild(warn)
+          }
+          var saidNode = elMake('span', 'said')
+          saidNode.setAttribute('role', 'status')
+          saidNode.setAttribute('data-module-said', row.id)
+          card.appendChild(saidNode)
+          host.appendChild(card)
+        })
+      }
+
+      function moduleQuery (kind, id) { return document.querySelector('[data-module-' + kind + '="' + id + '"]') }
+
+      /** What the install line says: the hooks' state against the choice, from the installer's per-module `matchesState`. */
+      function moduleInstallText (id, info, status) {
+        if (!info) return t('modules.install.unavailable')
+        if (!(info.hookCount > 0)) return t('modules.install.noHooks')
+        if (info.matchesState === true) {
+          return info.state === 'off' ? t('modules.install.removed') : t('modules.install.installed', { n: String(info.hookCount) })
+        }
+        var newer = status && status.newerInstall
+        if (newer && typeof newer.version === 'string') return t('modules.install.skipped', { version: newer.version })
+        return t('modules.install.pending')
+      }
+
+      /** Paints the cards from the integration status (null while it is still being read). */
+      function renderModules (status) {
+        buildModuleRows()
+        var all = status && status.ok && status.modules && typeof status.modules === 'object' ? status.modules : null
+        var states = {}
+        var known = all !== null
+        MODULE_ROWS.forEach(function (row) {
+          var info = all && all[row.id] && typeof all[row.id] === 'object' ? all[row.id] : null
+          if (info === null || row.states.indexOf(info.state) === -1) { known = false; info = null }
+          states[row.id] = info ? info.state : null
+          moduleQuery('name', row.id).textContent = t('modules.name.' + row.id)
+          moduleQuery('desc', row.id).textContent = t('modules.desc.' + row.id)
+          moduleQuery('cost', row.id).textContent = moduleCostText(row)
+          moduleQuery('background', row.id).textContent = moduleBackgroundText(row)
+          moduleQuery('install', row.id).textContent = status === null ? t('modules.install.reading') : moduleInstallText(row.id, info, status)
+          var group = moduleQuery('states', row.id)
+          group.setAttribute('aria-label', t('modules.stateGroup', { module: t('modules.name.' + row.id) }))
+          Array.from(group.querySelectorAll('button')).forEach(function (btn) {
+            btn.textContent = t('modules.state.' + btn.getAttribute('data-value'))
+            btn.disabled = info === null || moduleBusy
+          })
+          setPressedValue(group, states[row.id])
+        })
+        moduleStates = known ? states : null
+        applyModuleVisibility()
+      }
+
+      /** The state a module is shown in; `active` while it is unknown, so nothing is hidden on a guess. */
+      function shownModuleState (id) { return moduleStates && moduleStates[id] ? moduleStates[id] : 'active' }
+
+      /**
+       * A module that is off hides the settings that belong to it; one in
+       * shadow shows them with a note, since its own "active" is capped at
+       * measuring. The gate's warning shows while it is off.
+       */
+      function applyModuleVisibility () {
+        document.querySelectorAll('[data-module]').forEach(function (node) {
+          node.hidden = shownModuleState(node.getAttribute('data-module')) === 'off'
+        })
+        document.querySelectorAll('[data-module-note]').forEach(function (node) {
+          var id = node.getAttribute('data-module-note')
+          var state = shownModuleState(id)
+          node.hidden = state === 'active'
+          node.textContent = state === 'active' ? '' : t(state === 'off' ? 'modules.noteOff' : 'modules.noteShadow', { module: t('modules.name.' + id) })
+        })
+        var warn = moduleQuery('warn', 'gate')
+        if (warn) {
+          warn.hidden = shownModuleState('gate') !== 'off'
+          warn.textContent = warn.hidden ? '' : t('modules.gateOffWarn')
+        }
+      }
+
+      function setModuleButtonsDisabled (disabled) {
+        MODULE_ROWS.forEach(function (row) {
+          Array.from(moduleQuery('states', row.id).querySelectorAll('button')).forEach(function (btn) { btn.disabled = disabled || moduleStates === null })
+        })
+      }
+
+      /** One switch: the whole map goes to the worker with this module changed. */
+      function chooseModuleState (id, state) {
+        if (moduleBusy || moduleStates === null || moduleStates[id] === state) return
+        var next = {}
+        MODULE_ROWS.forEach(function (row) { next[row.id] = moduleStates[row.id] })
+        next[id] = state
+        var saidNode = moduleQuery('said', id)
+        moduleBusy = true
+        setModuleButtonsDisabled(true)
+        said(saidNode, t('modules.saving'))
+        sendFeatureModulesRequest(next).then(function (result) {
+          said(saidNode, t(result.skipped === true ? 'modules.savedSkipped' : 'modules.saved'))
+        }).catch(function (error) {
+          said(saidNode, errorText(error), true)
+        }).then(function () {
+          moduleBusy = false
+          // Reads back what the worker really did: the state, the install line and the hidden settings follow it.
+          return loadClaudeIntegrationStatus().catch(function () {})
+        }).then(function () { setModuleButtonsDisabled(false) })
+      }
 
       // ---------- guardar / cargar ------------------------------------------
 

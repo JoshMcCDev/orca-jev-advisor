@@ -1,6 +1,6 @@
 {
   "name": "orca-supervisor",
-  "version": "0.6.29",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Multi-project supervisor that routes work to Orca terminals, using Jev (TypeSafe) for judgment and code for the facts.",
@@ -18,7 +18,8 @@
     "check": "npm run preflight && npm run test:panels",
     "test:panels": "node --test scripts/panels.spec.mjs",
     "ab-benchmark": "node --experimental-strip-types adapters/cli/ab_benchmark_cli.ts",
-    "jev-health": "node --experimental-strip-types adapters/cli/jev_health_cli.ts"
+    "jev-health": "node --experimental-strip-types adapters/cli/jev_health_cli.ts",
+    "measure-module-cost": "node --experimental-strip-types scripts/measure-module-cost.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.19.0",

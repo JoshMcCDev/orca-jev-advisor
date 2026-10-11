@@ -226,6 +226,24 @@ function emptyWindow (key) {
   }
 }
 
+/**
+ * install-claude-integration.mjs's status().modules (moduleHookSummary): per
+ * module its state, how many hooks it owns, and whether the hooks on disk
+ * match the state. `states` overrides a module's state; `unmatched` lists the
+ * modules whose hooks did NOT follow (a newer install was left alone).
+ * scripts/fixture_shape.test.mjs holds this to the real installer's output.
+ */
+const MODULE_HOOK_COUNTS = { gate: 5, 'model-router': 3, steward: 0, 'skill-selection': 0, board: 0 }
+function moduleStatus (states, unmatched = []) {
+  return Object.fromEntries(Object.entries(MODULE_HOOK_COUNTS).map(([id, hookCount]) => {
+    const state = states[id] ?? 'active'
+    const hooksPresent = unmatched.includes(id) ? state === 'off' : state !== 'off'
+    const installed = hookCount === 0 ? true : hooksPresent
+    const removed = hookCount === 0 ? true : !hooksPresent
+    return [id, { state, hookCount, installed, removed, matchesState: state === 'off' ? removed : installed }]
+  }))
+}
+
 /** A machine where the worker has run and published everything it mirrors. */
 // 0.6.28 T4: the Rules tab's remembered authorizations, built with the real
 // store functions and authorizationRows -- the same producer the worker's
@@ -271,6 +289,10 @@ const READY = {
     fileGuardHook: { installed: true, installedCount: 2, totalCount: 2, orcaPaneCount: 2 },
     // install-claude-integration.mjs's status().node: the Node the hooks run on.
     node: { state: 'ok', path: '/opt/homebrew/bin/node', version: 'v26.9.0' },
+    // feature-modules T5: status().modules, the installer's real per-module
+    // shape. Every module active is what an install starts in; the gate and
+    // the model router own hooks, the other three follow the switch directly.
+    modules: moduleStatus({}),
     // statMirror()'s real shape. `{ ok: true }` alone left `exists` and
     // `path` undefined, and the panel photographed "Key file: doesn't exist
     // yet (undefined)." -- next to a secretStatus that says a key is set.
@@ -868,6 +890,41 @@ const SCENARIOS = { fresh: FRESH, empty: EMPTY, ready: READY, degraded: DEGRADED
 SCENARIOS['skills-ready'] = SKILLS_READY
 
 /**
+ * feature-modules T5 -- the Modules section with a mixed choice: the gate off
+ * (its hooks gone, the Rules tab reduced to a note) and the model router in
+ * shadow (the Models tab keeps its settings under a note). The hook lines of
+ * the integration status read like the installer reports them: removed.
+ */
+SCENARIOS['modules-mixed'] = {
+  ...READY,
+  claudeIntegrationStatus: {
+    ...READY.claudeIntegrationStatus,
+    hook: { installed: false, installedCount: 0, totalCount: 2, orcaPaneCount: 2 },
+    fileGuardHook: { installed: false, installedCount: 0, totalCount: 2, orcaPaneCount: 2 },
+    modules: moduleStatus({ gate: 'off', 'model-router': 'shadow' }),
+  },
+}
+
+/**
+ * feature-modules T5 -- the guard case: a newer install was left alone, so
+ * the gate was chosen off but its hooks are still in place (pending against
+ * the choice, named as skipped), and the switch just pressed answers
+ * "saved, but a newer install keeps its hooks". The click presses the
+ * skill-selection Shadow button; the fake host answers with the skipped result
+ * (the fixture status itself stays as it is, so the photograph shows the
+ * answer next to the gate's pending hooks).
+ */
+SCENARIOS['modules-skipped'] = {
+  ...READY,
+  claudeIntegrationStatus: {
+    ...READY.claudeIntegrationStatus,
+    newerInstall: { version: '0.7.1', root: '/home/you/Projects/orca-jev-advisor-dev', ownVersion: '0.6.28' },
+    modules: moduleStatus({ gate: 'off' }, ['gate']),
+  },
+  featureModulesSaveResult: { ok: true, saved: true, skipped: true, reason: 'newer-install-present', detail: null, modules: null },
+}
+
+/**
  * 0.6.26 T3 -- an older plugin copy (Orca's marketplace one) activated over a
  * newer install and left it alone: main.mjs publishes what it skipped as
  * `newerInstall` next to the rest of the integration status.
@@ -1045,7 +1102,10 @@ SCENARIOS['activity-ready'] = {
 
 /** A scenario may need one click before the shot -- see SEEDS. `baseline`
  *  needs none: the notice renders straight from policySeedNoticeStatus. */
-const SCENARIO_CLICKS = { seeds: { panel: 'config.html', selector: '#import-policy-seeds' } }
+const SCENARIO_CLICKS = {
+  seeds: { panel: 'config.html', selector: '#import-policy-seeds' },
+  'modules-skipped': { panel: 'config.html', selector: '[data-module-states="skill-selection"] button[data-value="shadow"]' }
+}
 
 // JEVADV-41 -- config.html now shows one section-group at a time behind
 // role="tab" buttons inside #config-tabbar (see that element's own comment
@@ -1070,6 +1130,7 @@ function hostBridge(storage) {
   // every interactive surface behind a request stays unphotographable, which
   // is how the policy-difference list would have shipped unseen.
   let lastRequestId = null
+  let lastModulesRequestId = null
   window.addEventListener('message', (event) => {
     const msg = event.data
     if (!msg || msg.type !== 'orca-panel-action') return
@@ -1077,9 +1138,15 @@ function hostBridge(storage) {
     if (msg.action === 'storage.set' && msg.params?.key === 'policySeedImportRequest') {
       lastRequestId = msg.params?.value?.id ?? null
     }
+    if (msg.action === 'storage.set' && msg.params?.key === 'featureModulesSaveRequest') {
+      lastModulesRequestId = msg.params?.value?.id ?? null
+    }
     if (msg.action === 'storage.get') value = storage[msg.params?.key] ?? null
     if (msg.action === 'storage.get' && msg.params?.key === 'policySeedImportResult' && value && lastRequestId) {
       value = { ...value, id: lastRequestId }
+    }
+    if (msg.action === 'storage.get' && msg.params?.key === 'featureModulesSaveResult' && value && lastModulesRequestId) {
+      value = { ...value, id: lastModulesRequestId }
     }
     if (value && value.at === 'now') value = { ...value, at: new Date().toISOString() }
     // Same sentinel for a live-status row, so its "N min ago" reads as live.
@@ -1179,9 +1246,10 @@ async function main() {
               await page.waitForTimeout(300)
               // 0.6.28 T4: the remembered authorizations are read after the
               // panel's first batch of reads, a host quota window later.
-              if (tabKey === 'rules') await page.waitForSelector('#gate-authorizations-section[data-state="ready"]', { timeout: 15000 })
+              // (Attached, not visible: a module that is off hides its sections.)
+              if (tabKey === 'rules') await page.waitForSelector('#gate-authorizations-section[data-state="ready"]', { state: 'attached', timeout: 15000 })
               // 0.6.28 T7: the trusted programs are read right after them.
-              if (tabKey === 'rules') await page.waitForSelector('#trusted-programs-section[data-state="ready"]', { timeout: 15000 })
+              if (tabKey === 'rules') await page.waitForSelector('#trusted-programs-section[data-state="ready"]', { state: 'attached', timeout: 15000 })
 
               const overflow = await page.evaluate(() => ({
                 scrollWidth: document.documentElement.scrollWidth,

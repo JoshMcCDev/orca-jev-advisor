@@ -16,6 +16,20 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.7.0
+
+Every feature is now a module you can switch off, so a part you do not use costs nothing: no hook process, no Jev call and no background work. The switches are the new **Modules** section at the top of Settings → General.
+
+- **Five modules.** Gate (Bash and file-edit checks, deny tier, policies), Model router (model and effort per prompt and per subagent, the subagent band, turn usage), Context steward (compaction and `/clear` suggestions), Skill and tool selection, and Board. The API key, the Claude Code integration, the catalog and the commands are the base and always run.
+- **Three states.** Off, Shadow and Active. Shadow measures and logs what the module would do without changing your turns: it caps the module's own controls at measurement. Gate and Board have no measurement mode, so they offer Off and Active only. Each card shows what the module costs, from a week of measured real use.
+- **Nothing changes until you choose.** With no choice saved every module is Active: the same features and decisions as 0.6.29, with a lighter background refresh (below).
+- **Router and steward Off moved.** The per-account Off of the model router and of the context steward is no longer offered in the Models tab; the module's Off replaces it, for every account at once. An account that already had Off stored keeps it, and the control stays visible there so you can change it.
+- **No reload.** Turning a module off removes its hooks from every `settings.json` the plugin manages and stops its worker jobs at once; turning it on puts them back. The skills mod reads the choice on every hook call, so a running session follows it too. A session that was already open before the plugin updated keeps its old mod until you restart it.
+- **The agent cannot switch the gate off.** The module file (`~/.config/orca-supervisor/feature-modules.json`) is one of the gate's own files: an Edit, a Write, a heredoc, `sed -i`, `cp`, `mv` or `rm` on it is refused, like the policies.
+- **Orca does less in the background.** The worker used to refresh every panel figure every 15 seconds whether a panel was open or not, about 730 node processes an hour. Figures only a panel shows now refresh while a panel shows them: about 240 an hour with no panel open and every module on, and none with the model router off. The rest (the model readiness mirror and the account quota) keep their cadence because the router decides from them. These are counts from the code; the live measurement on a released build is pending.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.6.29
 
 The model router's cheapest tier now runs on Claude Haiku 5.5. Simple work (a greeting, a one-line question, reading a file) used to go to Haiku 4.5, at $1 / $5 per million tokens. Haiku 5.5 costs $0.10 / $0.50 when the prompt is up to 100,000 tokens: ten times less per token. Its tokenizer counts the same text as about 30% more tokens, so for the same text the saving is nearer 7 to 8 times. Above 100,000 tokens of prompt the whole request is priced at $0.50 / $2.50, which is only about half of Haiku 4.5 per token (about 1.5 times cheaper for the same text), so the saving is smaller on long contexts.
@@ -222,7 +236,7 @@ and no key at all. The key only buys judgement on the grey cases.
 ## What it writes outside itself
 
 A plugin that reaches outside its own directory should say so. This one
-writes eleven things, all listed in the settings panel. **Revert
+writes twelve things, all listed in the settings panel. **Revert
 everything** puts back the hook entries, the env var and the skills-mod
 copy. Clearing the key from the settings panel deletes the key file
 separately. The three JSON mirrors below are never deleted by any action
@@ -231,7 +245,7 @@ for the three setting mirrors and the queue below:
 
 | What | Where | Why |
 |---|---|---|
-| Seven hook entries — four on the command gate (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) plus three on model reclassification (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) | `settings.json` in every Claude Code config root, including Orca's own per-account ones | so the gate and the model hooks run in Orca's agent panes, not only outside them |
+| Eight hook entries — four on the command gate (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), three on model reclassification (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) and one file-tools guard (`PreToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit`) | `settings.json` in every Claude Code config root, including Orca's own per-account ones | so the gate and the model hooks run in Orca's agent panes, not only outside them |
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` | the same files | required by the skill and tool advisories |
 | The API key, plain text, mode `600` | `~/.config/orca-supervisor/env` | the gate runs outside Orca and cannot reach encrypted plugin storage |
 | A copy of the skills mod | `skills/orca-jev-mod-skills` under every one of the same config roots | so Claude Code auto-loads it in each one |
@@ -240,6 +254,7 @@ for the three setting mirrors and the queue below:
 | A human-readable mirror of the model catalog (not secret) | `~/.config/orca-supervisor/models-catalog.json` | the model hook reads it outside Orca to rank a recommendation |
 | Your team's repository owners (not secret) | `~/.config/orca-supervisor/team-owners.json` | the gate checks a command's remote against them |
 | *When a person must approve* and *Models fixed by an agent* (not secret) | `~/.config/orca-supervisor/queue-mode.json`, `explicit-models.json` | the gate and the router read them outside Orca |
+| Which modules are on (not secret) | `~/.config/orca-supervisor/feature-modules.json` | the hooks and the skills mod read it outside Orca; written only when you save the Modules section |
 | The actions queued for a person, command redacted | `~/.cache/orca-supervisor/human-queue.jsonl` | the board's "Waiting for you" list; only written in queue mode |
 
 Nothing is sent anywhere except the questions themselves, to

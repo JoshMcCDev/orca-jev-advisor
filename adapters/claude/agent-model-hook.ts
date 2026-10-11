@@ -54,6 +54,7 @@ import { buildModelOutcomeRecord, type ModelDecisionRecord, type ModelFailOpenRe
 import { engineSupports } from "../../src/core/engine_support.ts";
 import { parseModelsMirror } from "../../src/core/model_mirror.ts";
 import { JevRequestError, type JevResponse, type JsonValue, type Question } from "../../src/core/jev.ts";
+import { effectiveMode, switchMode, type ModuleState } from "../../src/core/feature_modules.ts";
 
 export interface AgentModelHookDeps {
   readonly mirror: unknown;
@@ -68,6 +69,12 @@ export interface AgentModelHookDeps {
    * both rewrite one spawn.
    */
   readonly routerActive?: boolean;
+  /**
+   * The model-router feature module's state (feature-modules.json). `off`
+   * asks Jev nothing and records nothing; `shadow` caps the legacy switch
+   * at measurement. Absent reads as `active`, the 0.6.28 behaviour.
+   */
+  readonly moduleState?: ModuleState;
   /**
    * 0.6.29 T8: the version of the engine running the session, as the mod
    * recorded it (src/core/engine_support.ts); null or absent = unknown, which
@@ -140,7 +147,8 @@ async function handlePreToolUse(payload: Record<string, unknown>, id: string, de
 
   const mirror = parseModelsMirror(deps.mirror);
   const ladder: readonly ModelEntry[] = availableLadder(mirror.models).filter((row) => engineSupports(row.id, deps.engineVersion));
-  const mode: "measurement" | "active" = mirror.active && deps.routerActive !== true ? "active" : "measurement";
+  const legacy = effectiveMode(deps.moduleState ?? "active", switchMode(mirror.active));
+  const mode: "measurement" | "active" = legacy === "active" && deps.routerActive !== true ? "active" : "measurement";
   const promptChars = input.prompt.length;
 
   const questions = buildModelQuestions(ladder, input);
@@ -251,6 +259,7 @@ export async function handleAgentModelHook(payload: unknown, deps: AgentModelHoo
   try {
     if (!isRecord(payload) || payload.tool_name !== "Agent") return { stdout: null, record: null };
     if (id === null) return { stdout: null, record: null };
+    if (deps.moduleState === "off") return { stdout: null, record: null };
 
     if (payload.hook_event_name === "PreToolUse") {
       return await handlePreToolUse(payload, id, deps);

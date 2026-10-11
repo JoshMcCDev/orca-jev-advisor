@@ -320,6 +320,35 @@ test("JEV-060 slice 2: with the function-hook model router active, this classic 
   assert.equal(decisionRecord(result).mode, "measurement");
 });
 
+test("feature modules T4: with model-router in shadow, the legacy switch only measures", async () => {
+  const payload = preToolUsePayload({
+    permission_mode: "bypassPermissions",
+    tool_input: { prompt: "do the thing", description: "a task", subagent_type: "general-purpose", model: "haiku" },
+  });
+  const result = await handleAgentModelHook(payload, baseDeps({ mirror: { active: true, ready: true, models: LADDER }, moduleState: "shadow" }));
+  assert.equal(result.stdout, null);
+  assert.equal(decisionRecord(result).mode, "measurement");
+});
+
+test("feature modules T4: with model-router off, the hook asks Jev nothing and records nothing", async () => {
+  let calls = 0;
+  for (const hook_event_name of ["PreToolUse", "PostToolUse"]) {
+    const result = await handleAgentModelHook(
+      preToolUsePayload({ hook_event_name }),
+      baseDeps({
+        mirror: { active: true, ready: true, models: LADDER },
+        moduleState: "off",
+        askJev: async () => {
+          calls += 1;
+          return jevResponse(2);
+        },
+      }),
+    );
+    assert.deepEqual(result, { stdout: null, record: null }, hook_event_name);
+  }
+  assert.equal(calls, 0);
+});
+
 // 0.6.29 T8: a model the running engine cannot run is never on the ladder Jev chooses from.
 test("engine too old for a model on the ladder: that model is left off it, so Jev is never asked to pick it", async () => {
   const haiku55 = entry({ id: "claude-haiku-5-5", rank: 4, label: "Haiku 5.5" });

@@ -65,6 +65,8 @@ import { normalizePlatform, resolveCacheDir, resolveConfigDir } from '../../src/
 import { ORCA_USER_DATA_ENV, claudeAccountsDir, homeConfigTarget, resolveOrcaUserDataDir } from '../../src/core/orca_accounts.ts'
 import { managedNodeRoots } from '../../src/core/node_runtime.ts'
 import { decideRescanInstall, isRescanDue } from '../../src/core/claude_integration_rescan.ts'
+import { DEFAULT_FEATURE_MODULES } from '../../src/core/feature_modules.ts'
+import { createModuleScheduler, followStatus, modulesFromRead } from './module-scheduler.mjs'
 import {
   attendModelsMirrorRequest,
   attendModelsSeedRequest,
@@ -149,7 +151,7 @@ function sidecarEnv (extra = {}) {
   return env
 }
 
-const SECRET_MIRROR_READ_ONLY_MODES = new Set(['read', 'locale-read', 'stat', 'mod-skills-config-read', 'deny-tier-config-read'])
+const SECRET_MIRROR_READ_ONLY_MODES = new Set(['read', 'locale-read', 'stat', 'mod-skills-config-read', 'deny-tier-config-read', 'feature-modules-read'])
 
 /**
  * Spawns `argv[0]` (always a script path, following `process.execPath`) as a
@@ -198,11 +200,16 @@ function spawnSidecar (argv, execOptions, stdin) {
   })
 }
 
-function runSecretMirrorScript (mode, stdin, extraArgs = []) {
+/** The `--permission` flags the secret-mirror sidecar runs under for `mode`: it reads the plugin root and the config dir, and only a mode that writes gets the one write grant, on the config dir (an atomic write needs room for its temp file there). Exported so a test can pin them. */
+function secretMirrorPermissionArgs (mode) {
   const permissionArgs = ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, `--allow-fs-read=${CONFIG_DIR}`]
   if (!SECRET_MIRROR_READ_ONLY_MODES.has(mode)) permissionArgs.push(`--allow-fs-write=${CONFIG_DIR}`)
+  return permissionArgs
+}
+
+function runSecretMirrorScript (mode, stdin, extraArgs = []) {
   return spawnSidecar(
-    [...permissionArgs, SECRET_MIRROR_SCRIPT, mode, ...extraArgs],
+    [...secretMirrorPermissionArgs(mode), SECRET_MIRROR_SCRIPT, mode, ...extraArgs],
     {
       timeout: SECRET_MIRROR_TIMEOUT_MS,
       maxBuffer: 64 * 1024,
@@ -1522,6 +1529,39 @@ const PANEL_SEEN_FRESH_MS = 5 * 1000
 const SECRET_POLL_ACTIVE_MS = 1 * 1000
 const SECRET_POLL_IDLE_MS = 15 * 1000
 
+// T4b (odd/tasks/feature-modules.md): the display-only refreshes (the
+// measurements, gate authorizations, router status, consumption and activity
+// summaries) run only while a panel that shows them is open. The config panel
+// signals through PANEL_SEEN_KEY every 2 s; the board, which sends the
+// worker no request, signals through its own key each time it reloads, every
+// 8 s while visible. A panel counts as open for a little over two of its own
+// signal periods after the last signal, so one missed write does not close it
+// and a closed panel stops the refreshes within seconds.
+const BOARD_PANEL_SEEN_KEY = 'boardPanelSeen'
+const BOARD_PANEL_FRESH_MS = 17 * 1000
+
+function isPanelSeenFresh (seen, nowMs, graceMs) {
+  return isRecord(seen) && typeof seen.at === 'string' && (nowMs - Date.parse(seen.at)) < graceMs
+}
+
+/**
+ * Reads both panels' signals, tells the module scheduler whether any panel is
+ * open, and returns whether the config panel is (the poll runs fast only for
+ * it, since it is the one that sends requests). The refresh a newly opened
+ * panel triggers is not awaited: a sidecar must not hold the next poll turn.
+ */
+async function attendPanelSignals (orca, storageHost, scheduler, nowMs = Date.now()) {
+  const [config, board] = await Promise.all([
+    storageHost.get(PANEL_SEEN_KEY).catch(() => null),
+    storageHost.get(BOARD_PANEL_SEEN_KEY).catch(() => null)
+  ])
+  const configOpen = isPanelSeenFresh(config, nowMs, PANEL_SEEN_FRESH_MS)
+  const boardOpen = isPanelSeenFresh(board, nowMs, BOARD_PANEL_FRESH_MS)
+  scheduler.setPanelOpen(configOpen || boardOpen)
+    .catch((error) => orca.log(`panel refresh failed: ${error.message}`))
+  return configOpen
+}
+
 // ---------------------------------------------------------------------------
 // Worker heartbeat -- a panel cannot wake a reaped worker (see this module's
 // header and odd/tasks/panel-worker-wakeup.md): the only five panel-callable
@@ -1801,6 +1841,78 @@ async function attendClaudeIntegrationRescan (orca, memory, deps) {
   orca.log(`claude integration rescan: installing for ${decision.signature}`)
   await deps.install()
   await deps.publish()
+}
+
+// ---------------------------------------------------------------------------
+// Feature modules, T5 (odd/tasks/feature-modules.md): the panel's module
+// switch. The panel never writes feature-modules.json (the gate refuses every
+// other writer, and the config dir is outside its sandbox): it asks, and this
+// worker writes the file through write-secret-mirror.mjs's strict
+// `feature-modules-save`, runs the installer so the settings.json hooks follow
+// (under the 0.6.26 guard: a newer install is left alone and the panel is told
+// so), moves the scheduler at once instead of waiting for the next rescan, and
+// publishes the refreshed integration status (which carries each module's
+// `matchesState`) BEFORE the result, so the panel never reads the old state
+// after "Saved." This is base work, not a module job: the switch must work
+// with every module off.
+// ---------------------------------------------------------------------------
+
+const FEATURE_MODULES_REQUEST_KEY = 'featureModulesSaveRequest'
+const FEATURE_MODULES_RESULT_KEY = 'featureModulesSaveResult'
+
+/**
+ * Attends one pending `{ id, at, modules }` request. `options.save` replaces
+ * the sidecar, `options.runScript` the installer and `options.mirror` the
+ * secret-mirror stat in tests; `scheduler` is the module scheduler.
+ */
+async function attendFeatureModulesSaveRequest (orca, storageHost, scheduler, options = {}) {
+  const request = await storageHost.get(FEATURE_MODULES_REQUEST_KEY)
+  if (!isRecord(request) || typeof request.id !== 'string' || typeof request.at !== 'string') return
+
+  await storageHost.delete(FEATURE_MODULES_REQUEST_KEY).catch((error) =>
+    orca.log(`feature modules request cleanup failed: ${error.message}`))
+
+  const publishResult = (fields) => storageHost.set(FEATURE_MODULES_RESULT_KEY, {
+    id: request.id, at: new Date().toISOString(), ok: false, reason: null, detail: null, saved: false, skipped: false, modules: null, ...fields
+  }).catch((error) => orca.log(`feature modules result publish failed: ${error.message}`))
+
+  const age = Date.now() - Date.parse(request.at)
+  if (!(age >= 0) || age > SECRET_REQUEST_TTL_MS) {
+    await publishResult({ reason: 'expired', detail: 'the request is older than SECRET_REQUEST_TTL_MS and was never attended.' })
+    return
+  }
+  if (!isRecord(request.modules)) {
+    await publishResult({ reason: 'invalid-request', detail: 'a module switch carries { modules: { <id>: state } }.' })
+    return
+  }
+
+  const save = options.save ?? runSecretMirrorScript
+  const written = await save('feature-modules-save', JSON.stringify({ modules: request.modules }))
+  if (!written.ok) {
+    orca.log(`feature modules save refused: ${String(written.reason ?? 'unknown')} -- ${String(written.detail ?? '').slice(0, 160)}`)
+    await publishResult({ reason: written.reason ?? 'save-failed', detail: written.detail ?? null })
+    return
+  }
+  const modules = modulesFromRead(written) ?? request.modules
+
+  // The hooks follow the file, under the same guard activation uses (no force):
+  // a newer install is left alone, and `skipped` tells the panel so.
+  const installed = await installClaudeIntegration(orca, options)
+  const skipped = installed.ok === true && installed.skipped === true && installed.reason === 'newer-install-present'
+
+  // The worker's own jobs and the mod follow the file whatever the hooks did.
+  try {
+    await scheduler.apply(modules)
+  } catch (error) {
+    orca.log(`feature modules scheduler update failed: ${String(error?.message ?? error)}`)
+  }
+  await publishClaudeIntegrationStatus(orca, storageHost, options)
+
+  if (!installed.ok) {
+    await publishResult({ saved: true, modules, reason: 'install-failed', detail: installed.detail ?? installed.reason ?? null })
+    return
+  }
+  await publishResult({ ok: true, saved: true, skipped, modules, reason: skipped ? 'newer-install-present' : null, detail: skipped ? installed.detail ?? null : null })
 }
 
 // ---------------------------------------------------------------------------
@@ -2872,21 +2984,90 @@ async function cmdDoctor (orca, storageHost, secretsHost) {
 // Activation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Feature modules (odd/tasks/feature-modules.md, T4). Every job that belongs
+// to a module is registered in src/core/feature_modules.ts; this table says
+// what each one runs, and module-scheduler.mjs starts it only while a module
+// that owns it is not off. Base work (the poll loop and heartbeat, the key
+// mirror, the Claude integration install and rescan, the locale, the
+// catalog/policies mirror, the commands) is not in this table and always
+// runs. A job added to the registry without a runner here fails
+// main.test.mjs.
+// ---------------------------------------------------------------------------
+
+/** Milliseconds between ticks, by the registry's interval trigger. */
+const MODULE_PERIODS = {
+  'interval-15s': MEASUREMENTS_REFRESH_MS,
+  'interval-account-quota-10min': ACCOUNT_QUOTA_REFRESH_MS,
+  'interval-consumption-10min': CONSUMPTION_REFRESH_MS,
+  'interval-activity-10min': ACTIVITY_REFRESH_MS
+}
+
+/** A job that starts only after another of the same batch: the daily docs check reads the catalog the seed step plants. */
+const MODULE_JOB_AFTER = { 'model-docs-check': 'models-catalog' }
+
+/** What each module job runs (activation and interval jobs), and what each Orca event handler runs. */
+function buildModuleRunners (orca, storageHost) {
+  const runners = {
+    'measurements-summary': () => publishMeasurementsSummary(orca, storageHost),
+    // model-reclassifications.jsonl only grows when a real Agent tool call happens elsewhere.
+    'model-measurements': () => publishModelMeasurements(orca, storageHost, MODELS_WORKER_OPTIONS),
+    // The gate learns an authorization whenever an agent confirms a delivery.
+    'gate-authorizations': () => publishGateAuthorizations(orca, storageHost),
+    'account-quota': () => mirrorAccountQuota(orca),
+    // 0.6.2 E7: a mode set from a terminal shows up without a panel save.
+    'router-status': () => publishModelRouterStatus(orca, storageHost),
+    // Gated to once a day inside; a tick only gives it a chance to run.
+    'model-docs-check': () => refreshModelDocs(orca, storageHost, MODELS_WORKER_OPTIONS),
+    'consumption-summary': () => publishConsumptionSummary(orca, storageHost),
+    'activity-summary': () => publishActivitySummary(orca, storageHost),
+    // Model catalog: seed once, mirror it out for the Agent hooks, then check
+    // whether a newer shipped baseline has anything to offer -- the same
+    // three-step order as the policy chain in activate (a freshly-seeded
+    // catalog must reach models-catalog.json on this same activation, and
+    // the baseline notice is computed from whatever ends up stored).
+    'models-catalog': async () => {
+      await seedModelsIfEmpty(orca, storageHost)
+        .catch((error) => orca.log(`initial model seeding failed: ${error.message}`))
+      // 0.6.29: an install still on the old default simple-tier model moves
+      // to its successor before the mirror, so the hooks see it at once.
+      await upgradeLegacySimpleDefaultIfUntouched(orca, storageHost)
+        .catch((error) => orca.log(`legacy simple-tier upgrade failed: ${error.message}`))
+      await mirrorModels(orca, storageHost, MODELS_WORKER_OPTIONS)
+        .catch((error) => orca.log(`initial models mirror failed: ${error.message}`))
+      await publishModelsSeedNotice(orca, storageHost, MODELS_WORKER_OPTIONS)
+        .catch((error) => orca.log(`initial models seed notice failed: ${error.message}`))
+    },
+    'mod-skills-status': () => publishModSkillsStatus(orca, storageHost),
+    'deny-tier-status': () => publishDenyTierStatus(orca, storageHost),
+    'trusted-programs-status': () => publishTrustedPrograms(orca, storageHost),
+    'gate-defaults': () => publishGateDefaults(orca, storageHost)
+  }
+  const eventHandlers = {
+    'agent.status.changed': (payload) => onAgentStatusChanged(orca, storageHost, payload),
+    'worktree.created': (payload) => onWorktreeCreated(orca, storageHost, payload),
+    'worktree.removed': (payload) => onWorktreeRemoved(orca, storageHost, payload)
+  }
+  return { runners, eventHandlers }
+}
+
 export default function activate (orca) {
   const storageHost = makeStorageHost(orca)
   const secretsHost = makeSecretsHost(orca)
 
-  const offStatus = orca.events.on('agent.status.changed', (payload) => {
-    onAgentStatusChanged(orca, storageHost, payload)
-      .catch((error) => orca.log(`agent.status.changed handler failed: ${error.message}`))
-  })
-  const offCreated = orca.events.on('worktree.created', (payload) => {
-    onWorktreeCreated(orca, storageHost, payload)
-      .catch((error) => orca.log(`worktree.created handler failed: ${error.message}`))
-  })
-  const offRemoved = orca.events.on('worktree.removed', (payload) => {
-    onWorktreeRemoved(orca, storageHost, payload)
-      .catch((error) => orca.log(`worktree.removed handler failed: ${error.message}`))
+  // Feature modules (src/core/feature_modules.ts): every job that belongs to
+  // a module -- activation work, the interval ticks, the poll's panel
+  // requests, the Orca event handlers -- goes through this scheduler, so a
+  // module that is off starts none of them. See module-scheduler.mjs.
+  const { runners, eventHandlers } = buildModuleRunners(orca, storageHost)
+  const scheduler = createModuleScheduler({
+    initial: DEFAULT_FEATURE_MODULES,
+    runners,
+    eventHandlers,
+    periods: MODULE_PERIODS,
+    subscribe: (name, callback) => orca.events.on(name, callback),
+    log: (message) => orca.log(message),
+    after: MODULE_JOB_AFTER
   })
 
   orca.commands.register('advisor.decide', (args) => cmdDecide(orca, storageHost, secretsHost, args))
@@ -2903,38 +3084,51 @@ export default function activate (orca) {
   // minutes idle, so this timer must be (and is) cleared by teardown below.
   let secretPollStopped = false
   let secretTimer = null
+  let panelFresh = false
   const catalogPolicyMirrorSeen = { value: null }
   const policySeedNoticeSeen = { value: null }
   const modelsMirrorSeen = { value: null }
   // The activation install covers the first minute; the first look comes after it.
   const claudeRescanMemory = { lastCheckedAt: Date.now(), signature: null }
   const claudeRescanDeps = {
-    readStatus: claudeIntegrationStatus,
+    // The module states ride on the installer's status, which this rescan
+    // already spawns about once a minute: following them costs no process.
+    readStatus: followStatus(scheduler, claudeIntegrationStatus),
     install: () => installClaudeIntegration(orca),
     publish: () => publishClaudeIntegrationStatus(orca, storageHost),
     now: () => Date.now()
   }
   const runSecretPoll = () => {
     publishWorkerHeartbeat(orca, storageHost)
+      // First, so a panel that has just opened starts its refresh before the
+      // slower request handlers below.
+      .then(() => attendPanelSignals(orca, storageHost, scheduler))
+      .then((fresh) => { panelFresh = fresh })
+      .catch((error) => orca.log(`panel signal handling failed: ${error.message}`))
       .then(() => attendSecretRequest(orca, storageHost, secretsHost))
       .catch((error) => orca.log(`secret request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRequest(orca, storageHost))
       .catch((error) => orca.log(`claude integration request handling failed: ${error.message}`))
+      // Base work, outside the scheduler: the module switch must work with every module off.
+      .then(() => attendFeatureModulesSaveRequest(orca, storageHost, scheduler))
+      .catch((error) => orca.log(`feature modules request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRescan(orca, claudeRescanMemory, claudeRescanDeps))
       .catch((error) => orca.log(`claude integration rescan failed: ${error.message}`))
       .then(() => attendLocaleRequest(orca, storageHost))
       .catch((error) => orca.log(`locale request handling failed: ${error.message}`))
-      .then(() => attendModSkillsConfigRequest(orca, storageHost))
+      // The panel requests below belong to a module (src/core/feature_modules.ts
+      // "poll" jobs): with every owner off, the request is not even read.
+      .then(() => scheduler.run('mod-skills-config-request', () => attendModSkillsConfigRequest(orca, storageHost)))
       .catch((error) => orca.log(`mod-skills config request handling failed: ${error.message}`))
-      .then(() => attendModelRouterConfigRequest(orca, storageHost))
+      .then(() => scheduler.run('router-config-request', () => attendModelRouterConfigRequest(orca, storageHost)))
       .catch((error) => orca.log(`model router config request handling failed: ${error.message}`))
-      .then(() => attendModelRouterStatusRefresh(orca, storageHost))
+      .then(() => scheduler.run('router-status', () => attendModelRouterStatusRefresh(orca, storageHost)))
       .catch((error) => orca.log(`model router status refresh failed: ${error.message}`))
-      .then(() => attendDenyTierConfigRequest(orca, storageHost))
+      .then(() => scheduler.run('deny-tier-config-request', () => attendDenyTierConfigRequest(orca, storageHost)))
       .catch((error) => orca.log(`deny-tier config request handling failed: ${error.message}`))
-      .then(() => attendGateAuthorizationForgetRequest(orca, storageHost))
+      .then(() => scheduler.run('gate-authorization-forget-request', () => attendGateAuthorizationForgetRequest(orca, storageHost)))
       .catch((error) => orca.log(`gate authorization forget request handling failed: ${error.message}`))
-      .then(() => attendTrustedProgramRequest(orca, storageHost))
+      .then(() => scheduler.run('trusted-program-request', () => attendTrustedProgramRequest(orca, storageHost)))
       .catch((error) => orca.log(`trusted program request handling failed: ${error.message}`))
       .then(() => attendCatalogPolicyMirrorRequest(orca, storageHost, catalogPolicyMirrorSeen))
       .catch((error) => orca.log(`catalog/policies mirror handling failed: ${error.message}`))
@@ -2948,15 +3142,13 @@ export default function activate (orca) {
       .catch((error) => orca.log(`policy seed dismiss request handling failed: ${error.message}`))
       .then(() => attendPolicySeedNoticeRefresh(orca, storageHost, policySeedNoticeSeen))
       .catch((error) => orca.log(`policy seed notice refresh failed: ${error.message}`))
-      .then(() => attendModelsMirrorRequest(orca, storageHost, modelsMirrorSeen, MODELS_WORKER_OPTIONS))
+      .then(() => scheduler.run('models-request', () => attendModelsMirrorRequest(orca, storageHost, modelsMirrorSeen, MODELS_WORKER_OPTIONS)))
       .catch((error) => orca.log(`models mirror request handling failed: ${error.message}`))
-      .then(() => attendModelsSeedRequest(orca, storageHost, MODELS_WORKER_OPTIONS))
+      .then(() => scheduler.run('models-request', () => attendModelsSeedRequest(orca, storageHost, MODELS_WORKER_OPTIONS)))
       .catch((error) => orca.log(`models seed request handling failed: ${error.message}`))
-      .then(() => storageHost.get(PANEL_SEEN_KEY).catch(() => null))
-      .then((seen) => {
+      .then(() => {
         if (secretPollStopped) return
-        return isRecord(seen) && typeof seen.at === 'string' &&
-          (Date.now() - Date.parse(seen.at)) < PANEL_SEEN_FRESH_MS
+        return panelFresh
       })
       // Rescheduling must survive anything above it. Without this the loop
       // stops on the first unexpected error and the panel waits forever on a
@@ -3011,26 +3203,9 @@ export default function activate (orca) {
     // this chain -- a stuck CLI must not block activation.
     .then(() => publishCatalogProposalsStatus(orca, storageHost))
     .catch((error) => orca.log(`initial catalog proposals status failed: ${error.message}`))
-    // Model catalog: seed once, mirror it out for the Agent hooks, then
-    // check whether a newer shipped baseline has anything to offer -- same
-    // three-step order as the policy chain just above, for the same reason
-    // (a freshly-seeded catalog must reach models-catalog.json on this same
-    // activation, and the baseline notice must be computed from whatever
-    // ends up stored, not from a snapshot taken before seeding ran).
-    .then(() => seedModelsIfEmpty(orca, storageHost))
-    .catch((error) => orca.log(`initial model seeding failed: ${error.message}`))
-    // 0.6.29: an install still on the old default simple-tier model moves to
-    // its successor before the mirror below, so the hooks see it at once.
-    .then(() => upgradeLegacySimpleDefaultIfUntouched(orca, storageHost))
-    .catch((error) => orca.log(`legacy simple-tier upgrade failed: ${error.message}`))
-    .then(() => mirrorModels(orca, storageHost, MODELS_WORKER_OPTIONS))
-    .catch((error) => orca.log(`initial models mirror failed: ${error.message}`))
-    .then(() => publishModelsSeedNotice(orca, storageHost, MODELS_WORKER_OPTIONS))
-    .catch((error) => orca.log(`initial models seed notice failed: ${error.message}`))
-    // The daily docs check: at most once a day, so on most activations
-    // this returns without a request.
-    .then(() => refreshModelDocs(orca, storageHost, MODELS_WORKER_OPTIONS))
-    .catch((error) => orca.log(`initial model docs check failed: ${error.message}`))
+  // The model catalog (seed, mirror, baseline notice) and the daily docs
+  // check are the model-router module's activation jobs: the scheduler runs
+  // them below, in that order, unless the module is off.
   // "Al activarse, el worker debe dejar funcionando todo lo que hoy es
   // manual" (T8): every activation re-asserts the hook, the env var and the
   // mod-skills link, idempotently -- a fresh install where none of this
@@ -3047,80 +3222,28 @@ export default function activate (orca) {
     .catch((error) => orca.log(`initial orca ui language read failed: ${error.message}`))
     .then(() => publishLocaleStatus(orca, storageHost))
     .catch((error) => orca.log(`initial locale status failed: ${error.message}`))
-  publishModSkillsStatus(orca, storageHost)
-    .catch((error) => orca.log(`initial mod-skills status failed: ${error.message}`))
-  publishModelRouterStatus(orca, storageHost)
-    .catch((error) => orca.log(`initial model router status failed: ${error.message}`))
-  publishDenyTierStatus(orca, storageHost)
-    .catch((error) => orca.log(`initial deny-tier status failed: ${error.message}`))
-  publishGateAuthorizations(orca, storageHost)
-    .catch((error) => orca.log(`initial gate authorizations failed: ${error.message}`))
-  publishTrustedPrograms(orca, storageHost)
-    .catch((error) => orca.log(`initial trusted programs failed: ${error.message}`))
   publishWorkerHeartbeat(orca, storageHost)
-  publishGateDefaults(orca, storageHost)
-  runSecretPoll()
 
-  // Measurements refresh on its own light cadence -- these two JSONL files
-  // change only when a real Bash command or a real prompt happens
-  // elsewhere, never from this worker's own actions, so there is no need
-  // to tie this to the secret/panel poll's fast cadence.
-  publishMeasurementsSummary(orca, storageHost)
-    .catch((error) => orca.log(`initial measurements summary failed: ${error.message}`))
-  // Same cadence, same reasoning, for the model-reclassification log --
-  // model-reclassifications.jsonl only grows when a real Agent tool call
-  // happens elsewhere, never from this worker's own actions.
-  publishModelMeasurements(orca, storageHost, MODELS_WORKER_OPTIONS)
-    .catch((error) => orca.log(`initial model measurements failed: ${error.message}`))
-  const measurementsTimer = setInterval(() => {
-    publishMeasurementsSummary(orca, storageHost)
-      .catch((error) => orca.log(`measurements summary refresh failed: ${error.message}`))
-    publishModelMeasurements(orca, storageHost, MODELS_WORKER_OPTIONS)
-      .catch((error) => orca.log(`model measurements refresh failed: ${error.message}`))
-    // The gate learns an authorization whenever an agent confirms a delivery.
-    publishGateAuthorizations(orca, storageHost)
-      .catch((error) => orca.log(`gate authorizations refresh failed: ${error.message}`))
-  }, MEASUREMENTS_REFRESH_MS)
-  if (typeof measurementsTimer.unref === 'function') measurementsTimer.unref()
-
-  // Account quota mirror (JEV-060 slice 1) -- one call now, then every 10
-  // minutes: quota changes only as the account is actually used, so there
-  // is no need for the secret/panel poll's fast cadence, same reasoning as
-  // the measurements refresh just above.
-  mirrorAccountQuota(orca)
-    .catch((error) => orca.log(`initial account quota mirror failed: ${error.message}`))
-  const accountQuotaTimer = setInterval(() => {
-    mirrorAccountQuota(orca)
-      .catch((error) => orca.log(`account quota mirror refresh failed: ${error.message}`))
-    // 0.6.2 E7: a mode set from a terminal shows up without a panel save.
-    publishModelRouterStatus(orca, storageHost)
-      .catch((error) => orca.log(`model router status refresh failed: ${error.message}`))
-    // Gated to once a day inside; this tick only gives it a chance to run.
-    refreshModelDocs(orca, storageHost, MODELS_WORKER_OPTIONS)
-      .catch((error) => orca.log(`model docs check refresh failed: ${error.message}`))
-  }, ACCOUNT_QUOTA_REFRESH_MS)
-  if (typeof accountQuotaTimer.unref === 'function') accountQuotaTimer.unref()
-
-  // Consumption summary (JEV-060 slice 1, T4) -- one call now, then on its
-  // own CONSUMPTION_REFRESH_MS cadence (see that constant's own comment for
-  // why it is not tied to the 15s measurements cadence).
-  publishConsumptionSummary(orca, storageHost)
-    .catch((error) => orca.log(`initial consumption summary failed: ${error.message}`))
-  const consumptionTimer = setInterval(() => {
-    publishConsumptionSummary(orca, storageHost)
-      .catch((error) => orca.log(`consumption summary refresh failed: ${error.message}`))
-  }, CONSUMPTION_REFRESH_MS)
-  if (typeof consumptionTimer.unref === 'function') consumptionTimer.unref()
-
-  // Activity per project (JEVADV-63, A3) -- one call now, then on
-  // ACTIVITY_REFRESH_MS (the consumption cadence, see that constant).
-  publishActivitySummary(orca, storageHost)
-    .catch((error) => orca.log(`initial activity summary failed: ${error.message}`))
-  const activityTimer = setInterval(() => {
-    publishActivitySummary(orca, storageHost)
-      .catch((error) => orca.log(`activity summary refresh failed: ${error.message}`))
-  }, ACTIVITY_REFRESH_MS)
-  if (typeof activityTimer.unref === 'function') activityTimer.unref()
+  // The modules' state first (one read-only sidecar; a failed read keeps
+  // every module active, which is today's behaviour), then everything that
+  // belongs to a module: the activation jobs, the four shared intervals
+  // (measurements 15 s; account quota, consumption and activity 10 min), the
+  // Orca event handlers, and the poll loop's panel requests. An interval
+  // is started only while one of the modules using it is on; see
+  // module-scheduler.mjs.
+  runSecretMirrorScript('feature-modules-read')
+    .then((result) => {
+      const modules = modulesFromRead(result)
+      if (modules === null) orca.log(`feature modules read failed, every module stays active: ${String(result?.reason ?? 'unknown')}`)
+      else return scheduler.apply(modules)
+    })
+    .catch((error) => orca.log(`feature modules read failed, every module stays active: ${error.message}`))
+    .then(() => {
+      // The poll loop starts only now, so its first turn already knows which
+      // panel requests belong to a module that is off.
+      scheduler.start().catch((error) => orca.log(`module jobs failed to start: ${error.message}`))
+      runSecretPoll()
+    })
 
   // Deliberately NOT wired here: Orca reaps an idle worker (or restarts one
   // for any other reason) by calling this same teardown, and that is a
@@ -3132,15 +3255,9 @@ export default function activate (orca) {
   // advisor.uninstallClaude command -- both unambiguous regardless of what
   // triggers teardown.
   return () => {
-    for (const off of [offStatus, offCreated, offRemoved]) {
-      if (typeof off === 'function') off()
-    }
+    scheduler.close()
     secretPollStopped = true
     if (secretTimer) clearTimeout(secretTimer)
-    clearInterval(measurementsTimer)
-    clearInterval(accountQuotaTimer)
-    clearInterval(consumptionTimer)
-    clearInterval(activityTimer)
   }
 }
 
@@ -3161,6 +3278,9 @@ export {
   attendClaudeIntegrationRequest,
   attendClaudeIntegrationRescan,
   attendDenyTierConfigRequest,
+  attendFeatureModulesSaveRequest,
+  FEATURE_MODULES_RESULT_KEY,
+  secretMirrorPermissionArgs,
   attendGateAuthorizationForgetRequest,
   attendTrustedProgramRequest,
   publishTrustedPrograms,
@@ -3172,12 +3292,19 @@ export {
   publishGateAuthorizations,
   attendLocaleRequest,
   attendModelRouterConfigRequest,
+  attendPanelSignals,
+  BOARD_PANEL_FRESH_MS,
+  BOARD_PANEL_SEEN_KEY,
+  PANEL_SEEN_FRESH_MS,
+  PANEL_SEEN_KEY,
   attendModSkillsConfigRequest,
   attendPolicySeedDismissRequest,
   attendPolicySeedImportRequest,
   attendPolicySeedNoticeRefresh,
   attendSecretRequest,
   boardProjectName,
+  buildModuleRunners,
+  MODULE_PERIODS,
   CATALOG_PROPOSAL_ACCEPT_RESULT_KEY,
   CATALOG_PROPOSALS_STATUS_KEY,
   CATALOG_REFRESH_RESULT_KEY,

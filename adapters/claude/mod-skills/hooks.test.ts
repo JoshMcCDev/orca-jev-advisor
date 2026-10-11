@@ -3400,3 +3400,248 @@ test("0.6.23 T1: drawing the band never runs git", async () => {
   await settle();
   assert.equal(host.processCalls.length, before);
 });
+
+// ---------------------------------------------------------------------------
+// Feature modules (odd/tasks/feature-modules.md, T4): each mod feature reads
+// `<configDir>/feature-modules.json` on every hook call. `off` returns before
+// any Jev call and any side effect; `shadow` is the feature's measure mode;
+// a missing or corrupt file is exactly the behaviour without the file.
+// ---------------------------------------------------------------------------
+
+const FEATURE_MODULES_PATH = `${CONFIG_DIR}/feature-modules.json`;
+
+function setModules(host: FakeHost, modules: Record<string, string>): void {
+  host.files.set(FEATURE_MODULES_PATH, JSON.stringify({ modules }));
+}
+
+/** What a hook left behind: every file written and every state key set, apart from what the test seeded. */
+function leftBehind(host: FakeHost, seededFiles: ReadonlySet<string>): string[] {
+  return [...[...host.files.keys()].filter((path) => !seededFiles.has(path)), ...[...host.state.keys()].map((key) => `state:${key}`)];
+}
+
+const SKILL_PICK_ANSWERS = (): unknown[] => [
+  jevResponse({
+    which: { type: "choice", choice: "graft-helper", probabilities: { "graft-helper": 0.9 }, confidence: 0.9 },
+    skill_needed: { type: "noul", noul: 0.8 },
+  }),
+  jevResponse({
+    which: { type: "choice", choice: "graft-helper", probabilities: { "graft-helper": 0.95 }, confidence: 0.9 },
+    "fits::graft-helper": { type: "noul", noul: 0.9 },
+  }),
+];
+
+function seedSkillSelection(host: FakeHost): void {
+  seedModSkillsConfig(host, { active: true, activeTools: true });
+  seedSamplingConfig(host, { enabled: true, sampleRate: 1, dailyPromptCap: 100 });
+  seedProjectSkill(host, "graft-helper", "Explores this codebase with graft.", "Read graft_repo_map first.");
+  host.toolList = [{ name: "Bash", description: "Runs a shell command", mcp: false }];
+}
+
+test("T4 skill-selection off: a prompt makes no Jev call, injects nothing, writes nothing and keeps the listing", async () => {
+  const host = makeFakeHost();
+  seedSkillSelection(host);
+  setModules(host, { "skill-selection": "off" });
+  host.fetchQueue.push(...SKILL_PICK_ANSWERS());
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+
+  const event = await submitPromptCapture(handlers, engine, "how does the auth module work");
+  const attachment = await askAttachment(handlers, engine, REAL_LISTING);
+
+  assert.equal(host.fetchCalls.length, 0, "no Jev call");
+  assert.equal(event.context, undefined, "nothing injected");
+  assert.deepEqual(attachment, { text: REAL_LISTING });
+  assert.equal(host.processCalls.length, 0, "no orca lookup for a feature that is off");
+  assert.deepEqual(leftBehind(host, seeded).filter((entry) => !entry.startsWith("state:")), [], "no measurement file");
+});
+
+test("T4 skill-selection off: a skill or tool the model loads is not observed", async () => {
+  const host = makeFakeHost();
+  seedSkillSelection(host);
+  host.fetchQueue.push(...SKILL_PICK_ANSWERS());
+  const { handlers, engine } = loadHooks(host);
+  await submitPrompt(handlers, engine, "how does the auth module work");
+  const before = host.files.get(SKILL_MEASUREMENTS_PATH);
+  assert.ok(before, "the decision was measured while the module was on");
+
+  setModules(host, { "skill-selection": "off" });
+  await fireSkillPrompt(handlers, engine, "graft-helper");
+  await toolCallThrough(handlers, engine, "Bash", { command: "ls" }, { result: "ok" });
+
+  assert.equal(host.files.get(SKILL_MEASUREMENTS_PATH), before, "no observation row once the module is off");
+  assert.doesNotMatch(host.files.get(TOOL_MEASUREMENTS_PATH) ?? "", /"type":"observation"/);
+});
+
+test("T4 skill-selection shadow: the active switches run as measurement -- Jev is asked, nothing is injected or withheld", async () => {
+  const host = makeFakeHost();
+  seedSkillSelection(host);
+  host.toolList = [];
+  setModules(host, { "skill-selection": "shadow" });
+  host.fetchQueue.push(...SKILL_PICK_ANSWERS());
+  const { handlers, engine } = loadHooks(host);
+
+  const event = await submitPromptCapture(handlers, engine, "how does the auth module work");
+  const attachment = await askAttachment(handlers, engine, REAL_LISTING);
+
+  assert.equal(host.fetchCalls.length, 2, "measurement mode asks both stages");
+  assert.equal(event.context, undefined, "nothing injected");
+  assert.deepEqual(attachment, { text: REAL_LISTING }, "the listing is delivered");
+  const record = lastDecisionRecord(host, SKILL_MEASUREMENTS_PATH);
+  assert.equal(record.mode, "measurement");
+  assert.equal(record.listingWithheld, false);
+});
+
+test("T4 skill-selection active, and a missing or corrupt module file: exactly today's behaviour", async () => {
+  for (const content of [undefined, "{ not json", JSON.stringify({ modules: { "skill-selection": "banana" } })]) {
+    const host = makeFakeHost();
+    seedSkillSelection(host);
+    host.toolList = [];
+    if (content !== undefined) host.files.set(FEATURE_MODULES_PATH, content);
+    host.fetchQueue.push(...SKILL_PICK_ANSWERS());
+    const { handlers, engine } = loadHooks(host);
+    const event = await submitPromptCapture(handlers, engine, "how does the auth module work");
+    const attachment = await askAttachment(handlers, engine, REAL_LISTING);
+    assert.equal(host.fetchCalls.length, 2, `${content ?? "no file"}: both stages ran`);
+    assert.equal(event.context?.length, 1, `${content ?? "no file"}: the skill is injected`);
+    assert.equal(attachment.text, null, `${content ?? "no file"}: the listing is withheld`);
+  }
+});
+
+test("T4 skill-selection: a switch in the file is picked up by the loaded hooks, in both directions, with no reload", async () => {
+  const host = makeFakeHost();
+  seedSkillSelection(host);
+  host.toolList = [];
+  const { handlers, engine } = loadHooks(host);
+
+  host.fetchQueue.push(...SKILL_PICK_ANSWERS());
+  await submitPrompt(handlers, engine, "first prompt");
+  assert.equal(host.fetchCalls.length, 2, "on by default");
+
+  setModules(host, { "skill-selection": "off" });
+  host.fetchQueue.push(...SKILL_PICK_ANSWERS());
+  await submitPrompt(handlers, engine, "second prompt");
+  assert.equal(host.fetchCalls.length, 2, "off: no further call");
+
+  setModules(host, { "skill-selection": "active" });
+  await submitPrompt(handlers, engine, "third prompt");
+  assert.equal(host.fetchCalls.length, 4, "on again: asked again");
+});
+
+test("T4 model-router off: a main step is passed through -- no Jev call, no router log, no usage line, no state", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.messages = [{ role: "user", text: "hi", toolUses: [] }];
+  host.fetchQueue.push(tierAnswer("simple"));
+  setModules(host, { "model-router": "off" });
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+
+  const event = turnStepEvent(FRESH_START);
+  assert.deepEqual(await stepThrough(handlers, engine, event), event);
+
+  assert.equal(host.fetchCalls.length, 0);
+  assert.deepEqual(leftBehind(host, seeded), [], "no usage line, no decision, no sticky state");
+});
+
+test("T4 model-router off: a prompt's origin is not stamped", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "model-router": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await submitOrigin(handlers, engine, "user");
+  assert.equal(host.state.has("routerPromptOrigin"), false);
+});
+
+test("T4 model-router on: a prompt's origin is stamped, as before", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await submitOrigin(handlers, engine, "user");
+  assert.equal(host.state.has("routerPromptOrigin"), true);
+});
+
+test("T4 model-router off: a subagent spawn is passed through -- no Jev call, no row, no state, no status", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.fetchQueue.push(tierAnswer("simple"));
+  setModules(host, { "model-router": "off" });
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+
+  const event = spawnEvent();
+  assert.deepEqual(await spawnThrough(handlers, engine, event), event);
+  await startSession(handlers, engine);
+  await completeSubagent(handlers, engine, "agent-1");
+  host.agents = [{ id: "agent-1", status: "running", type: "general-purpose", description: "List files" }];
+
+  assert.equal(host.fetchCalls.length, 0);
+  assert.deepEqual(leftBehind(host, seeded), []);
+  assert.deepEqual(host.statusLines, [], "no status line");
+  assert.deepEqual(await renderBand(handlers, engine), ENGINE_DRAWING, "no band");
+});
+
+test("T4 model-router off: a teammate's step and the lead's Agent call are neither routed nor remembered", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.fetchQueue.push(tierAnswer("standard"));
+  setModules(host, { "model-router": "off" });
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+
+  await leadCallsTeammate(handlers, engine);
+  host.agents = [TEAMMATE];
+  const event = teammateStep(0);
+  assert.deepEqual(await stepThrough(handlers, engine, event), event);
+
+  assert.equal(host.fetchCalls.length, 0);
+  assert.deepEqual(leftBehind(host, seeded), []);
+});
+
+test("T4 model-router shadow: an active router only measures -- the decision is logged, nothing sent changes", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.messages = [{ role: "user", text: "hi, what time is it?", toolUses: [] }];
+  host.fetchQueue.push(tierAnswer("simple"), tierAnswer("simple"));
+  setModules(host, { "model-router": "shadow" });
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+
+  const event = turnStepEvent(FRESH_START);
+  assert.deepEqual(await stepThrough(handlers, engine, event), event, "the step is sent as it came");
+  const [decision] = routerDecisionLines(host);
+  assert.equal(decision?.proposed, "claude-haiku-4-5-20251001");
+  assert.equal(decision?.applied, false);
+  assert.equal(lastTurnUsageLine(host).agent, "main", "the usage line is still written");
+
+  const spawn = spawnEvent();
+  assert.deepEqual(await spawnThrough(handlers, engine, spawn), spawn, "a subagent keeps the model it asked for");
+});
+
+test("T4 model-router shadow: the work kind only measures too", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.files.set(`${ACCOUNT_DIR}/settings.json`, JSON.stringify({ env: {}, pluginConfigs: { "orca-jev-mod-skills@skills-dir": { options: { workKindMode: "active" } } } }));
+  host.fetchQueue.push(tierAnswer("standard"));
+  setModules(host, { "model-router": "shadow" });
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await spawnThrough(handlers, engine, spawnEvent());
+  await stepThrough(handlers, engine, turnStepEvent({ agentId: "agent-1", turnId: "sub-1", index: 0, model: "claude-opus-5-5", effort: "high" }));
+  const row = routerDecisionLines(host)[0] as { workKind?: { mode: string; applied: boolean } } | undefined;
+  assert.equal(row?.workKind?.mode, "measure");
+  assert.equal(row?.workKind?.applied, false);
+});
+
+test("T4 model-router: a switch in the file is picked up by the loaded hooks, in both directions, with no reload", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.messages = [{ role: "user", text: "hi, what time is it?", toolUses: [] }];
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "measure" });
+
+  setModules(host, { "model-router": "off" });
+  await stepThrough(handlers, engine, turnStepEvent(FRESH_START));
+  assert.equal(host.fetchCalls.length, 0);
+  assert.equal(host.files.has(TURN_USAGE_PATH), false);
+
+  setModules(host, { "model-router": "active" });
+  host.fetchQueue.push(tierAnswer("simple"));
+  await stepThrough(handlers, engine, turnStepEvent(FRESH_START));
+  assert.equal(host.fetchCalls.length, 1);
+  assert.equal(host.files.has(TURN_USAGE_PATH), true);
+});

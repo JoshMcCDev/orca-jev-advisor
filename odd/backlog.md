@@ -120,6 +120,289 @@ how you miss the tail.
 
 ---
 
+## Ideas from similar tools (reviewed 2026-10-10)
+
+Source for this group: [toolgate](https://github.com/RiskAverseTech/toolgate)
+0.16.0 (commit `87e26c1`), a Claude Code gate on Jev with the same shape as
+ours, which publishes its measurements. They are ranked by expected value.
+None of them is verified against our data yet. The first step of each one
+is that verification.
+
+### The task the person asked for softens the gate
+
+**What.** toolgate sends Jev the latest user prompt, the two before it and
+the session's first substantive request (`session_goal`). It adds an
+`authorized` question: does the task explicitly call for this action? When it
+does, each verdict softens one step, except secret exposure and explicit
+prohibitions. Our gate state (`buildActionGateState`, `src/core/decisions.ts:916`) carries
+the command, the destination and `branchEffect`, and nothing of what the person
+asked for.
+
+**Why.** Advice on work the person explicitly requested is the noise the
+owner keeps hitting. Remembered delivery authorizations (0.6.28) cover only
+five delivery classes. Their lesson is to use more than the latest prompt,
+which in a working session is usually "yes" or "go ahead". Their `off_task`
+axis caused most of their friction, so they capped it at ask.
+
+**First thing to verify.** Replay the advised commands from the 0.6.28 measurement
+set (834) with the three prompts and the session goal added to the state, and
+count how many an `authorized` answer of 0.8 or more would soften. Do the same
+for the 31 must-stop commands, which must still stop. Also measure the added
+latency and what extra text leaves the machine.
+
+### Write a file, then run it: the action ledger
+
+**What.** When the agent writes a file, toolgate's gate also asks four
+capability questions about the content: if executed, would it read secrets,
+send data out, destroy data, or change privilege? It stores the booleans
+(never the content) per session. When a later Bash call runs that path
+(`bash x.sh`, `python x.py`, `./x`, `npm run` after `package.json` changed),
+the command is judged by what the file does. A run that arrives before the
+write is confirmed is floored at ask. Our file gate
+(`adapters/claude/gate-files.ts`) only protects the plugin's own files; it
+does not judge content.
+
+**Why.** It is the one composition our gate cannot see: a freshly written
+script looks harmless when it runs. toolgate's set 7 separated every pair by
+ledger facts alone, with no dangerous allow.
+
+**First thing to verify.** How often real transcripts contain a Write or Edit
+followed by a Bash call that executes the same path, and how many of those
+our gate allowed. If it is rare, this is a security feature with low
+friction cost. If it is common, the extra Jev call on writes has a price.
+
+### Frozen challenge sets for the gate
+
+**What.** toolgate keeps small labelled sets (`docs/challenge-set-*.json`). Each
+set is labelled before it is run, built in matched pairs (inert text against
+the same effect performed), and run once per pinned build by
+`scripts/challenge.mjs`.
+
+**Why.** We measure on real logs, which finds friction, but a change to a
+question's wording has no fixed regression to pass. The 31 must-stop commands
+from 0.6.28 are already a seed set.
+
+**First thing to verify.** Whether the 0.6.28 must-stop list and the 834
+advised commands can be frozen into one JSON set and run against the gate
+with no hook process.
+
+### Project rules from CLAUDE.md as gate context
+
+**What.** toolgate's roadmap item 11 (from Abide) lifts the explicit "never"
+and "only" lines from the project's CLAUDE.md and AGENTS.md and passes them
+to Jev as `project_constraints`.
+
+**Why.** Rules stated once in the project would count on every call without
+being copied into team policies.
+
+**Caution from Abide** (coldteadotai/abide, which does exactly this for edits).
+In their replay benchmark, edit-level precision was 26% and turn-level
+precision was 73% (`benchmarks/replay/README.md`). The design that held up
+compiles the instruction files into a rubric once, scopes each rule by glob,
+and detects staleness with a hash. Only verdicts of 0.8 or more reach the
+agent; verdicts from 0.5 to 0.8 are notes for the person.
+
+**First thing to verify.** Which of our seeded policies already duplicate
+CLAUDE.md lines, and whether extracting them adds signal or only noise to
+the state. Review Abide before designing this.
+
+### A `doctor` that proves the whole chain
+
+**What.** `toolgate doctor` checks that the key is present, picks the backend,
+gets one live verdict with its latency, and confirms the hook is installed
+and answers under the minimal environment of a Dock-launched app.
+
+**We already have most of it.** `advisor.doctor` (`cmdDoctor`,
+`adapters/orca/main.mjs:2830`) checks the key against a real Jev call, CLI
+reachability, the catalog, the secret mirror and the Claude Code integration.
+What toolgate adds is running the installed hook itself under a minimal
+environment and timing the verdict.
+
+**Why.** Several of our incidents (the 0.6.10 reinstall, plugin errors that
+only appear in memory) were cases where the integration existed but the
+installed copy was the wrong one.
+
+**First thing to verify.** Whether `cmdDoctor` would have caught the 0.6.10
+reinstall. If it would not, the gap is checking the installed hook's version
+and getting a real answer from it.
+
+### The steward's harm measure: what the person asked next
+
+**What.** [compact-adviser](https://github.com/kunchenguid/compact-adviser),
+the direct competitor to our context steward, labels each checkpoint by the
+user's next request: `context_need` is `none`, `tail`, `artifact` or `older`.
+Only `older` means compacting would have hurt
+(`packages/pi-extension/eval/README.md`). Their decision is a composed score,
+P(finished) × (0.5 + 0.5 × P(hands_on)), with a floor that slides from 0.90 to
+0.50 as context fills (`packages/claude-mod/lib/judge.ts:240-299`). Ours is an
+argmax confidence of 0.7 or more plus fixed tiers
+(`src/core/context_steward.ts`, `decideSteward`).
+
+**Why.** 0.6.27 measures what a compaction saves, but nothing measures what a
+wrong one costs. Without that, the threshold cannot be tuned in either
+direction.
+
+**First thing to verify.** Whether our steward decision log plus the
+transcripts are enough to label `context_need` for the 50 compactions of the
+0.6.27 week. Consider the sliding floor only after that.
+
+### The steward stays out of non-interactive sessions
+
+**What.** compact-adviser goes inert when the session is not interactive
+(`register.ts:854`, `isInteractive`). Our steward never checks it: the field
+is declared in `adapters/claude/mod-skills/claude-code.d.ts` and used nowhere.
+
+**First thing to verify.** Whether the mod loads under `claude -p` at all. If
+it does, this is a one-line guard with a test.
+
+### Gate MCP tools, judged against the goal
+
+**What.** [jev-browser](https://github.com/Ying-Kai-Liao/jev-browser) asks
+whether the next action toward `task.goal` has an effect outside the browser
+that is hard to undo. Above 0.6 it stops with `needs_confirmation`, unless
+an explicit `allow_irreversible` flag authorizes it
+(`src/session.mjs:285, 484-487, 535-537`). Our hooks match Bash, Agent and the
+edit tools only (`adapters/orca/install-claude-integration.mjs:22-29`), so a
+Slack send, a Plane delete or a Lune page delete through MCP is never judged.
+
+**Why.** These are the actions with effects outside the machine: messages to
+other people, and deletes in shared systems. That is what the owner wants
+stopped.
+
+**First thing to verify.** How many `mcp__*` calls the last week of
+transcripts holds, and which of them are writes. A read-only MCP call should
+never cost a Jev call. This shares the goal-in-state work with the `authorized`
+idea above, so design the two together.
+
+### Shadow mode for a new gate layer
+
+**What.** [jev-belay](https://github.com/valentynkit/jev-belay) runs its full
+pipeline and lets the turn end. The would-have-blocked line goes only to the
+person (`belay.mjs:749-769`). Jev_steer_or_queue ships in shadow by default.
+
+**Why.** A new skip layer like the ones in 0.6.28 could run live for a week,
+and be measured on real work, before it decides anything.
+
+**First thing to verify.** Where the gate log already records enough to
+compare "what shadow would do" with "what happened", so shadow is only a
+switch and a log field.
+
+### A replay corpus, intervals and a pass rule
+
+**What.** Abide replays past transcripts through its judge
+(`lib/replay.ts`), and jev-belay extracts a labelled corpus. Before shipping
+as a blocker, belay requires AUROC of at least 0.6 and at least 0.08 over the
+baseline (`tools/measure.mjs:174`), and prints a bootstrap interval next to
+every figure. Belay also measured the value of facts: giving Jev the run
+facts raised AUROC from 0.777 to 0.976. That is the strongest evidence yet
+for the write-then-run ledger above.
+
+**Why.** It is the substrate the frozen challenge sets and the `authorized`
+check both need. Our measurements report bare figures with no interval.
+
+**First thing to verify.** Whether `scratchpad/mine_advise.py` (0.6.28) can
+become a committed replay script that runs the gate in-process over a frozen
+corpus.
+
+### Dead and noisy questions in `jev-health`
+
+**What.** Abide calls a rule dead when its median is at least 0.25 and its max
+stays under 0.7, and noisy when it fires on 60% or more of real items
+(`packages/cli/src/lib/calibration.ts:4-35`). We have `jev-health usage` and
+`flips` (`src/core/jev_health_usage.ts`), but no such verdict per gate
+question or policy.
+
+**First thing to verify.** Whether the gate log keeps every question's score,
+not only the deciding one.
+
+## Candidate modules from similar tools (owner decision, 2026-10-11)
+
+The owner asked that every reviewed tool be kept as a candidate module, not
+dropped. Each one becomes an entry in the feature-module registry
+(`odd/tasks/feature-modules.md`) once that registry exists. Each one enters
+in shadow mode, is measured for a week, and only then may act. They are
+ranked by expected value to the owner.
+
+### 1. Verify the "done" (from jev-belay)
+
+**What.** A Stop hook. When the agent claims the work is done without having
+verified it (no test run, no live probe), the turn is blocked with the reason
+([valentynkit/jev-belay](https://github.com/valentynkit/jev-belay)). It puts
+the run facts in Jev's state before asking: that raised AUROC from 0.777 to
+0.976 (README, "Measured"). It ships as a blocker only if AUROC is at least 0.6
+and at least 0.08 over the baseline (`tools/measure.mjs:174`).
+
+**Why.** "It said it was done and it was not" is the failure the owner's
+Rule 7 exists for.
+
+**First thing to verify.** Which run facts our hooks already record per turn
+(gate log: commands, exit status; mod: tool calls), so the state is built
+from facts we hold, not from the transcript text.
+
+### 2. Browser steps judged by Jev (from jev-browser)
+
+**What.** An MCP server in which Jev picks the element to act on and judges
+whether a browser step reached its goal. Before an action with an effect
+outside the browser that is hard to undo, it stops with `needs_confirmation`
+([Ying-Kai-Liao/jev-browser](https://github.com/Ying-Kai-Liao/jev-browser),
+`src/session.mjs:285, 476-487, 535-537`).
+
+**Why.** Agents drive Chrome and the Orca browser for QA and client sites. A
+cheap judge per step, plus a brake on purchases, sends and deletes, fits the
+"stop only real harm" direction.
+
+**First thing to verify.** Whether this is a module of ours or a separate MCP
+server we configure. Also how it relates to the existing claude-in-chrome and
+`orca` browser tools, so it wraps them instead of competing with them.
+
+### 3. Project rules on every edit (from abide)
+
+**What.** It compiles CLAUDE.md and AGENTS.md into a rubric once, scoped by
+glob and invalidated by a hash, and checks edits and turns against it
+([coldteadotai/abide](https://github.com/coldteadotai/abide)). See "Project
+rules from CLAUDE.md as gate context" above for the precision caution:
+26% at edit level, 73% at turn level.
+
+**First thing to verify.** Run it in shadow at turn level only, and label a
+week of verdicts before it may speak to the agent.
+
+### 4. Messages written mid-turn (from Jev_steer_or_queue)
+
+**What.** When the person types while the agent works, Jev classifies the
+message: steer now, queue for after the turn, or interrupt
+([Larkspur-Wang/Jev_steer_or_queue](https://github.com/Larkspur-Wang/Jev_steer_or_queue)).
+It ships in shadow by default and logs `jev: null` on a failure.
+
+**First thing to verify.** Whether Claude Code's mod API exposes a message
+typed mid-turn before the turn ends (`claude-code.d.ts`), and how often the
+owner does it.
+
+### 5. Cheap bulk classification (from quicksilver)
+
+**What.** A skill that hands bulk filtering and classification (lists, logs,
+issues) to Jev instead of the large model
+([UditAkhourii/quicksilver](https://github.com/UditAkhourii/quicksilver)).
+Its benchmark charges the skill's own tokens and subtracts a control floor
+(`bench/README.md`).
+
+**First thing to verify.** Real tasks in the owner's transcripts where the
+model read a long list only to filter it, and the token cost of those turns.
+
+### 6. Site audit (from jev-seo)
+
+**What.** A site audit with Jev judgements, plus a wording A/B against a
+blind second judge (`references/evaluation.md`)
+([AgriciDaniel/jev-seo](https://github.com/AgriciDaniel/jev-seo)).
+
+**First thing to verify.** Whether the owner's client sites (Lune and
+WordPress) would use it often enough to justify a module rather than a
+standalone skill.
+
+compact-adviser is not a candidate module: it improves the steward (see "The
+steward's harm measure" above).
+
+---
+
 ## Everything below was done on 2026-09-24 and is no longer backlog
 
 The four findings from `MEJORAS-JEV-ADVISOR.md` were verified and then fixed

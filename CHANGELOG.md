@@ -2,6 +2,17 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.7.0
+
+- **Feature modules** (`src/core/feature_modules.ts`). One typed registry of five modules (gate, model-router, steward, skill-selection, board), each with its settings.json hooks, mod features, worker jobs and the existing per-feature modes under its switch. State file `feature-modules.json` in the plugin config directory, `{ "modules": { id: "off" | "shadow" | "active" } }`; `parseFeatureModules` never throws and falls back per field; defaults are all `active` (0.6.29 behaviour). `effectiveMode`: off gives off, shadow caps active at measure, active leaves the own mode to decide.
+- **Gate:** `feature-modules.json` is in `GATE_OWN_CONFIG_FILES`, so the file guard and the Bash gate refuse writes to it.
+- **Installer:** installs the hooks of the modules that are on and removes those of the modules that are off, matching entries by event, matcher and script; idempotent, still behind the 0.6.26 never-go-back guard (a newer install is reported as `skipped`). `status()` adds `modules[id]` (`state`, `hookCount`, `installed`, `removed`, `matchesState`), `targets[i].modules` and `modCopy.needed`. The mod copy is never removed by a module change. Header comment: eight hook entries, not seven.
+- **Mod:** reads the module state on every hook call (`resolveFeatureModules`); an off feature returns before any Jev call or write, shadow caps the router, work kind, steward and skill/tool switches at measure.
+- **Agent hook** (`adapters/claude/agent-model.ts`): reads the module state per call; off asks Jev nothing and records nothing, shadow caps the legacy switch at measurement.
+- **Worker:** `adapters/orca/module-scheduler.mjs` starts each activation job, interval, poll request and event handler only while one of its modules is on; a shared timer is cleared only when every owner is off. Display-only refreshes (measurements summary, gate authorizations, router status, consumption and activity summaries) run once at activation and then only while the config panel (`configPanelSeen`, 5 s) or the board (`boardPanelSeen`, new, 17 s) is open. `model-measurements` and `account-quota` keep their cadence (decision inputs). The worker stays awake: a reaped worker could not be woken by a panel.
+- **Panel:** Modules section first on General (es/en): per-module state control, what it does, measured cost, install state from `matchesState`. Saving sends `featureModulesSaveRequest`; the worker validates it, writes the file atomically through the `feature-modules-save` sidecar mode (write grant on the config directory), runs the installer, applies the state to the scheduler and publishes the result. Controls of an off module are hidden; the router's and steward's own Off is hidden unless already stored. Shots in `odd/qa/screens-0.7.0/`.
+- **Measurement:** `npm run measure-module-cost` (`scripts/measure-module-cost.mjs`, `src/core/module_cost.ts`) counts per-module Jev calls, hook processes and worker sidecars from the logs.
+
 ## 0.6.29
 
 - **The simple tier is Haiku 5.5** (`claude-haiku-5-5`).

@@ -182,10 +182,13 @@ test('upgradeLegacySimpleDefaultIfUntouched: an unreadable baseline changes noth
 })
 
 test('activation runs the legacy simple-tier upgrade after seeding and before the first mirror, so the hooks see it at once', () => {
-  const main = readFileSync(new URL('./main.mjs', import.meta.url), 'utf8')
-  const seeding = main.indexOf('.then(() => seedModelsIfEmpty(')
-  const upgrade = main.indexOf('.then(() => upgradeLegacySimpleDefaultIfUntouched(')
-  const mirror = main.indexOf('.then(() => mirrorModels(orca, storageHost, MODELS_WORKER_OPTIONS))')
+  // Since the feature modules (T4) the catalog chain is the model-router's
+  // `models-catalog` activation job in buildModuleRunners.
+  const source = readFileSync(new URL('./main.mjs', import.meta.url), 'utf8')
+  const main = source.slice(source.indexOf("'models-catalog': async () => {"))
+  const seeding = main.indexOf('await seedModelsIfEmpty(')
+  const upgrade = main.indexOf('await upgradeLegacySimpleDefaultIfUntouched(')
+  const mirror = main.indexOf('await mirrorModels(orca, storageHost, MODELS_WORKER_OPTIONS)')
   assert.ok(seeding !== -1 && upgrade > seeding && mirror > upgrade)
 })
 

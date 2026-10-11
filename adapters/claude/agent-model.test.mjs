@@ -210,6 +210,15 @@ test('a record lands in its own hour\'s file, not in the legacy single file', ()
   assert.ok([`model-reclassifications-${before}.jsonl`, `model-reclassifications-${after}.jsonl`].includes(names[0]), names[0])
 })
 
+test('feature modules T4: with model-router off in feature-modules.json, the hook appends nothing', () => {
+  const home = makeHome()
+  const configDir = join(home, '.config', 'orca-supervisor')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'feature-modules.json'), JSON.stringify({ modules: { 'model-router': 'off' } }))
+  assert.equal(run(home, PRE_TOOL_USE_AGENT_PAYLOAD), '')
+  assert.deepEqual(logFiles(home), [])
+})
+
 // 0.6.29 T8: the mod leaves the engine's version in the cache directory
 // (src/core/engine_support.ts); the hook, which gets none in its input, reads
 // it and keeps a model the engine cannot run off the ladder.
