@@ -2886,13 +2886,15 @@ async function engramHealth($: EngineInterface, server: string): Promise<HealthO
 
 /**
  * Decides the backend. The health call is made only when the tools name a
- * server and it was not made before this session (`previous`). The config
+ * server and it was not made before this session (`previous`), or failed then
+ * (once: the turn's re-check is marked `rechecked`). The config
  * files are read only when the tools show no Engram; the binary is never
  * run (no process per session), so `binary` never decides here.
  */
 async function detectMemory($: EngineInterface, at: 'start' | 'turn', previous: MemoryShadowState | undefined): Promise<MemoryShadowState> {
   const liveServer = engramServerFromTools(await $.tool.list())
-  let health: HealthOutcome | null = previous?.health ?? null
+  // A failed start (a cold dial) is asked once more; ok and permission are kept, so the call is not repeated.
+  let health: HealthOutcome | null = previous?.health === 'failed' ? null : (previous?.health ?? null)
   if (liveServer !== null && health === null) health = await engramHealth($, liveServer)
   let userConfigured = false
   let pluginEnabled = false
@@ -3783,7 +3785,7 @@ export function register(on: On, options: PluginOptions): void {
     // Memory (memoryDetectAtStart): the backend is decided on a timer, so the start never waits on an MCP dial.
     if (moduleState(modules, 'memory') !== 'off') {
       try {
-        $.clock.after(0, () => memoryDetectAtStart($, modulesFile))
+        $.clock.after(MEMORY_DELAY_MS, () => memoryDetectAtStart($, modulesFile))
       } catch {
         // No timer: the first turn decides the backend.
       }

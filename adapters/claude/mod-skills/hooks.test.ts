@@ -5070,6 +5070,24 @@ test("M8 memory: a refused health call is live with permission refused, never do
   }
 });
 
+test("M8 memory: a health check that failed at the start (a cold dial) is asked once more at the first turn, and no more", async () => {
+  const host = memoryHost();
+  host.mcpAnswer = () => {
+    throw new Error("timed out");
+  };
+  host.modelQueue.push(GATE_SKIP, GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  host.mcpAnswer = HEALTHY;
+  await completeTurn(handlers, engine, { turnId: "turn-a" });
+  await runTimers(host);
+  await completeTurn(handlers, engine, { turnId: "turn-b" });
+  await runTimers(host);
+  assert.equal(host.mcpCalls.length, 2, "the start's, and one at the first turn");
+  assert.deepEqual(memoryRows(host).map((row) => [row.backend, row.detectedAt]), [["live", "turn"], ["live", "turn"]]);
+});
+
 test("M8 memory: what Haiku reads is the index and the redacted last exchange; a malformed answer is no verdict and no fork", async () => {
   const host = memoryHost();
   const secret = "sk-ant-api03-" + "c".repeat(40);

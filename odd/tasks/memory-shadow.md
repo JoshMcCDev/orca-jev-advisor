@@ -25,7 +25,7 @@ Out: any write (Engram or files), the `tool.call` intercept, the prompt section,
   - `policy` is a first-class type: it has its own review decay (`store.go:375`, 12 months) and is in the judge's protected set (`mcp.go:383`).
   - So feedback stays `policy`, user `learning`, project and reference `discovery`.
 - **The judge rule.** Engram's rule leaves `supersedes` on a `policy` to the person. The owner wants fewer questions, so a `supersedes` between two `policy` observations with confidence at or above 0.7 is recorded. `conflicts_with` on a policy, and anything on architecture or decision, still goes to the person.
-- **The one Engram call in Shadow** is `mem_current_project`, read only, as the health check. It is raced against a 3 s clock. A refusal is `permission`, never down.
+- **The one Engram call in Shadow** is `mem_current_project`, read only, as the health check. It is raced against a 3 s clock. A refusal is `permission`, never down. A check that failed at the start (a cold dial) is asked once more at the first gated turn, and no more.
 - **Detection timing.** The probes read `$.tool.list()` at turn end, not at session start, and MCP servers can connect late. So `session.start` detects, and the first gated turn re-detects once when start saw no Engram tools. Each row says which point decided (`start` or `turn`).
 - **Dry judge.** In Shadow the module has no Engram candidates of its own. The only real ones are in the main thread's own `mem_save` answer, seen after `next` in `tool.call`. A judge build pairs each drafted save with each candidate seen in the same turn. It builds the prompt and asks nothing: no Haiku call, no `mem_judge`. With no candidate seen, there are 0 builds.
 - **What Haiku and the fork see.**
