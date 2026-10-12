@@ -50,6 +50,7 @@ import { modSkillsProjectName } from '../../src/core/project_name.ts'
 import { guardGateDecisionRows, readGateAppendFailures, readGateDecisionLog } from './log-files.mjs'
 import { HUMAN_QUEUE_FILE, parseHumanQueue, waitingItems } from '../../src/core/human_queue.ts'
 import { measurementFilesToRead } from '../../src/core/measurement_files.ts'
+import { CI_WATCH_DECISIONS_FILE_PATTERN, summarizeCiWatchRows } from '../../src/core/ci_watch.ts'
 
 const CACHE_DIR = resolveCacheDir(normalizePlatform(process.platform), { home: homedir(), appDataDir: process.env.APPDATA, localAppDataDir: process.env.LOCALAPPDATA, xdgCacheHome: process.env.XDG_CACHE_HOME })
 const APPROVALS_LOG_PATH = join(CACHE_DIR, 'gate-approvals.jsonl')
@@ -346,6 +347,34 @@ async function readModSkillsRows () {
   return { rows, corrupt }
 }
 
+/** The CI watcher's card shows a week (odd/tasks/ci-watcher.md C6). */
+const CI_WATCH_WINDOW_MS = 7 * 24 * 3_600_000
+
+/**
+ * What the CI watcher did in the last seven days, from its hourly decision
+ * files (src/core/ci_watch.ts summarizeCiWatchRows). A day more of files is
+ * opened than the window needs, since a file is named for its hour; the rows
+ * decide what counts. No file at all is a summary of nothing, which the panel
+ * shows as "no watches yet", never as zeros.
+ */
+async function aggregateCiWatch () {
+  let names
+  try {
+    names = await readdir(CACHE_DIR)
+  } catch (error) {
+    if (error?.code === 'ENOENT') names = []
+    else throw error
+  }
+  const now = Date.now()
+  const earliestDay = new Date(now - CI_WATCH_WINDOW_MS - 24 * 3_600_000).toISOString().slice(0, 10)
+  const rows = []
+  for (const name of names.filter((file) => CI_WATCH_DECISIONS_FILE_PATTERN.test(file)).sort()) {
+    if (name.slice('ci-watch-decisions-'.length, 'ci-watch-decisions-'.length + 10) < earliestDay) continue
+    rows.push(...(await readJsonl(join(CACHE_DIR, name))).rows)
+  }
+  return summarizeCiWatchRows(rows, now, CI_WATCH_WINDOW_MS)
+}
+
 async function aggregateModSkills () {
   const { rows, corrupt } = await readModSkillsRows()
   const decisions = rows.filter((r) => r.type === 'decision')
@@ -640,13 +669,14 @@ async function aggregateAbBenchmark () {
 async function main () {
   let result
   try {
-    const [gate, modSkills, approvals, abBenchmark] = await Promise.all([
+    const [gate, modSkills, approvals, abBenchmark, ciWatch] = await Promise.all([
       aggregateGate(),
       aggregateModSkills(),
       aggregateApprovals(),
       aggregateAbBenchmark(),
+      aggregateCiWatch(),
     ])
-    result = { ok: true, gate, modSkills, approvals, abBenchmark }
+    result = { ok: true, gate, modSkills, approvals, abBenchmark, ciWatch }
   } catch (error) {
     result = { ok: false, reason: 'excepcion', detail: String(error?.message ?? error).slice(0, 300) }
   }

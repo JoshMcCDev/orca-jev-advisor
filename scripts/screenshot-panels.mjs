@@ -41,6 +41,7 @@ import { EMPTY_AUTHORIZATIONS, authorizationRows, recordAuthorization } from '..
 import { parseTrustedPrograms } from '../src/core/trusted_programs.ts'
 import { DEFAULT_FEATURE_MODULES } from '../src/core/feature_modules.ts'
 import { summarizeTypingLeadTime, TYPING_WINDOW_MS } from '../src/core/typing_lead_time.ts'
+import { summarizeCiWatchRows } from '../src/core/ci_watch.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PANELS_DIR = join(ROOT, 'adapters/orca/panels')
@@ -465,6 +466,10 @@ const READY = {
       },
       corruptLines: 0,
     },
+    // 0.9.0 C6: the CI watcher's week, as read-measurements.mjs's aggregateCiWatch
+    // publishes it. Unlike the figures above these are illustrative literals, not
+    // the author's logs: the module is new and has measured nothing yet.
+    ciWatch: { watches: 14, finished: 12, failed: 2, ghCalls: 310, pollsReplaced: 38, sleepsReplaced: 27, injected: 0 },
     approvals: {
       asked: 43,
       approved: 27,
@@ -552,6 +557,7 @@ const EMPTY = {
     modSkills: READY.measurementsSummary.modSkills,
     approvals: { ...emptyWindow('all').approvals, corruptLines: 0 },
     abBenchmark: { ...foldAbResults([]), corruptLines: 0 },
+    ciWatch: summarizeCiWatchRows([], 0, 0),
   },
 }
 

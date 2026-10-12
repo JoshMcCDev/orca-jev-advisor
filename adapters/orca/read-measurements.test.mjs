@@ -755,3 +755,32 @@ test('T4: the gate aggregate reads the legacy file and every hourly file, and re
   result = run(home)
   assert.deepEqual(result.gate.health.appendFailures, { count: 4, lastAt: '2026-09-30T11:06:00.000Z' })
 })
+
+// 0.9.0 C6 (odd/tasks/ci-watcher.md): the CI watcher's own log reaches the
+// panel's card as a week of figures, folded here like every other log.
+function ciRow (at, extra = {}) {
+  return { at, account: 'acct', project: 'app', sessionId: 's', mode: 'shadow', trigger: 'push', outcome: 'success', watchedSeconds: 120, ghCalls: 9, agentPolls: 4, agentSleeps: 3, notified: true, injected: false, ...extra }
+}
+
+test('ciWatch: no log at all is a summary of nothing, not an error', () => {
+  const result = run(makeHome())
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.ciWatch, { watches: 0, finished: 0, failed: 0, ghCalls: 0, pollsReplaced: 0, sleepsReplaced: 0, injected: 0 })
+})
+
+test('ciWatch: the last seven days of the hourly files are folded; older rows, other logs and a corrupt line are not', () => {
+  const home = makeHome()
+  const dir = join(home, '.cache', 'orca-supervisor')
+  mkdirSync(dir, { recursive: true })
+  const hoursAgo = (hours) => new Date(Date.now() - hours * 3_600_000).toISOString()
+  const file = (at) => `ci-watch-decisions-${at.slice(0, 13)}.jsonl`
+  const recent = hoursAgo(2)
+  const earlier = hoursAgo(60)
+  const old = hoursAgo(24 * 20)
+  writeFileSync(join(dir, file(recent)), `${JSON.stringify(ciRow(recent))}\n{ corrupt\n${JSON.stringify(ciRow(recent, { outcome: 'failure', agentPolls: 2, agentSleeps: 0, injected: true }))}\n`)
+  writeFileSync(join(dir, file(earlier)), `${JSON.stringify(ciRow(earlier, { outcome: 'no-runs', ghCalls: 8, agentPolls: 0, agentSleeps: 0 }))}\n`)
+  writeFileSync(join(dir, file(old)), `${JSON.stringify(ciRow(old))}\n`)
+  writeFileSync(join(dir, `verify-done-decisions-${recent.slice(0, 13)}.jsonl`), `${JSON.stringify(ciRow(recent))}\n`)
+  const result = run(home)
+  assert.deepEqual(result.ciWatch, { watches: 3, finished: 2, failed: 1, ghCalls: 26, pollsReplaced: 6, sleepsReplaced: 3, injected: 1 })
+})

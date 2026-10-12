@@ -4446,7 +4446,7 @@ test('every trusted.* key in one language catalog exists in the other', { skip: 
 // status().modules shape (fixture_shape.test.mjs).
 // ---------------------------------------------------------------------------
 
-const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board', 'verify-done']
+const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board', 'verify-done', 'ci-watch']
 const SECRET_MIRROR_SCRIPT = join(ROOT, 'adapters', 'orca', 'write-secret-mirror.mjs')
 
 /**
@@ -4489,17 +4489,17 @@ async function moduleCards (page) {
   }))
 }
 
-test('Modules: the first section of General lists the six modules with what they do and cost; the five earlier ones active by default, verify-done in shadow', MODULES_SKIP, async () => {
+test('Modules: the first section of General lists the seven modules with what they do and cost; the five earlier ones active by default, verify-done and ci-watch in shadow', MODULES_SKIP, async () => {
   const { browser, page, errors } = await openPanel(SCENARIOS.ready)
   try {
     const first = await page.evaluate(() => document.querySelector('#panel-general section').id)
     assert.equal(first, 'modules-section')
     const cards = await moduleCards(page)
     assert.deepEqual(cards.map((c) => c.id), MODULE_IDS)
-    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board', 'Verify done'])
+    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board', 'Verify done', 'CI watcher'])
     // The registry decides the states: no shadow where the module has no measure mode of its own, no active where it only measures.
-    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active'], ['off', 'shadow']])
-    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['shadow']])
+    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active'], ['off', 'shadow'], ['off', 'shadow', 'active']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['shadow'], ['shadow']])
     assert.deepEqual(cards[5].labels, ['Off', 'Shadow'])
     const verify = cards[5].text
     assert.match(verify, /turns that edited files with no test passing/)
@@ -4509,6 +4509,14 @@ test('Modules: the first section of General lists the six modules with what they
     assert.match(verify, /about 0\.1 Jev calls per prompt/)
     assert.match(verify, /Background: nothing of its own\./)
     assert.match(verify, /follows the switch directly/)
+    assert.deepEqual(cards[6].labels, ['Off', 'Shadow', 'Active'])
+    const ci = cards[6].text
+    assert.match(ci, /watches the CI run with gh and tells you here when it ends/)
+    assert.match(ci, /In Shadow it sends nothing to the agent/)
+    assert.match(ci, /In Active it also tells the agent once, when it is idle/)
+    assert.match(ci, /at most 45 gh calls per watch \(the ceiling of its polling schedule, not a measurement\), no Jev or model calls/)
+    assert.match(ci, /Background: nothing of its own\./)
+    assert.match(ci, /follows the switch directly/)
     assert.deepEqual(cards[1].labels, ['Off', 'Shadow', 'Active'])
     const gate = cards[0].text
     assert.match(gate, /Checks every Bash command and file edit/)
@@ -4532,7 +4540,7 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
     assert.equal(typeof request.id, 'string')
-    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow' })
+    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow' })
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, 'the real writer takes the map the panel sent')
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="gate"]').textContent), undefined, { timeout: 25000 })
     assert.equal(await page.evaluate(() => document.querySelector('[data-module-said="steward"]').textContent), '', 'only the pressed card answers')
@@ -4541,13 +4549,13 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
   }
 })
 
-test('Modules: verify-done offers Off and Shadow only, and switching it off sends a six-module map the real writer accepts', MODULES_SKIP, async () => {
+test('Modules: verify-done offers Off and Shadow only, and switching it off sends a seven-module map the real writer accepts', MODULES_SKIP, async () => {
   const { browser, page, errors } = await openPanel(SCENARIOS.ready)
   try {
     await page.click('[data-module-states="verify-done"] button[data-value="off"]')
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
-    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off' })
+    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off', 'ci-watch': 'shadow' })
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="verify-done"]').textContent), undefined, { timeout: 25000 })
     assert.deepEqual(errors, [])
@@ -4571,6 +4579,102 @@ test('Modules: the verify-done card in Spanish says what it measures, that it bl
   }
 })
 
+test('Modules: ci-watch offers Off, Shadow and Active, and every state it offers goes through the real writer', MODULES_SKIP, async () => {
+  for (const state of ['off', 'active']) {
+    const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+    try {
+      await page.click(`[data-module-states="ci-watch"] button[data-value="${state}"]`)
+      await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+      const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+      assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': state })
+      assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, `the real writer takes ci-watch ${state}`)
+      await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="ci-watch"]').textContent), undefined, { timeout: 25000 })
+      assert.deepEqual(errors, [])
+    } finally {
+      await browser.close()
+    }
+  }
+  // Shadow, the state it starts in, is pressed already: pressing it again sends nothing, and pressing it from Active sends it.
+  const active = withModuleStates({ 'ci-watch': 'active' })
+  const { browser, page } = await openPanel(active)
+  try {
+    assert.deepEqual((await moduleCards(page))[6].pressed, ['active'])
+    await page.click('[data-module-states="ci-watch"] button[data-value="shadow"]')
+    await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+    assert.equal(request.modules['ci-watch'], 'shadow')
+    assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the ci-watch card in Spanish says what it watches, that Shadow tells the agent nothing and what it costs', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS.ready, 'es')
+  try {
+    const card = (await moduleCards(page))[6]
+    assert.equal(card.name, 'Vigía de CI')
+    assert.deepEqual(card.labels, ['Apagado', 'Sombra', 'Activo'])
+    assert.match(card.text, /vigila con gh la ejecución de CI y te avisa aquí cuando termina/)
+    assert.match(card.text, /En Sombra no le envía nada al agente/)
+    assert.match(card.text, /En Activo, además, le avisa al agente una vez, cuando está libre/)
+    assert.match(card.text, /como máximo 45 llamadas a gh por cada vigilancia \(el tope de su calendario de consultas, no una medición\), sin llamadas a Jev ni a ningún modelo/)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the ci-watch card shows a week of figures from the log, and says "not measured yet" - never zeros - when it has none', MODULES_SKIP, async () => {
+  // The week's figures, as the measurements summary carries them.
+  const measured = await openPanel(SCENARIOS.ready)
+  try {
+    const text = (await moduleCards(measured.page))[6].text
+    assert.match(text, /Last 7 days: watches 14, CI checks by the agent meanwhile 38, long sleeps 27 \(what a note would replace\)\./)
+    assert.doesNotMatch(text, /notes sent/, 'Shadow sends none, so the card does not mention them')
+  } finally {
+    await measured.browser.close()
+  }
+  // Active, with notes sent.
+  const notes = await openPanel({ ...SCENARIOS.ready, measurementsSummary: { ...SCENARIOS.ready.measurementsSummary, ciWatch: { ...SCENARIOS.ready.measurementsSummary.ciWatch, injected: 9 } } })
+  try {
+    assert.match((await moduleCards(notes.page))[6].text, /long sleeps 27, notes sent 9 \(what a note would replace\)\./)
+  } finally {
+    await notes.browser.close()
+  }
+  // A worker older than the card sends no figure: unknown, not zero.
+  const { ciWatch: _ignored, ...older } = SCENARIOS.ready.measurementsSummary
+  const unknown = await openPanel({ ...SCENARIOS.ready, measurementsSummary: older })
+  try {
+    const text = (await moduleCards(unknown.page))[6].text
+    assert.match(text, /Last 7 days: not measured yet\./)
+    assert.doesNotMatch(text, /watches 0|CI checks by the agent meanwhile 0/)
+  } finally {
+    await unknown.browser.close()
+  }
+  // The log exists but holds no watch: say so, in words.
+  const none = await openPanel({ ...SCENARIOS.ready, measurementsSummary: { ...SCENARIOS.ready.measurementsSummary, ciWatch: { watches: 0, finished: 0, failed: 0, ghCalls: 0, pollsReplaced: 0, sleepsReplaced: 0, injected: 0 } } })
+  try {
+    const text = (await moduleCards(none.page))[6].text
+    assert.match(text, /Last 7 days: no watches yet\./)
+    assert.doesNotMatch(text, /long sleeps 0/)
+  } finally {
+    await none.browser.close()
+  }
+  // Spanish.
+  const es = await openPanel(SCENARIOS.ready, 'es')
+  try {
+    assert.match((await moduleCards(es.page))[6].text, /Últimos 7 días: vigilancias 14, consultas de CI del agente mientras tanto 38, esperas largas 27 \(lo que un aviso habría reemplazado\)\./)
+  } finally {
+    await es.browser.close()
+  }
+  const esUnknown = await openPanel({ ...SCENARIOS.ready, measurementsSummary: older }, 'es')
+  try {
+    assert.match((await moduleCards(esUnknown.page))[6].text, /Últimos 7 días: aún sin medir\./)
+  } finally {
+    await esUnknown.browser.close()
+  }
+})
+
 test('Modules: a state the card already shows sends nothing', MODULES_SKIP, async () => {
   const { browser, page } = await openPanel(SCENARIOS.ready)
   try {
@@ -4591,6 +4695,8 @@ test('Modules: an install left alone by a newer one is named on the card and in 
     // verify-done has no hooks, so a newer install in the way changes nothing on its card.
     assert.deepEqual(cards[5].pressed, ['shadow'])
     assert.match(cards[5].text, /follows the switch directly/)
+    assert.deepEqual(cards[6].pressed, ['shadow'])
+    assert.match(cards[6].text, /follows the switch directly/)
     assert.match(gate.text, /Skipped: a newer install \(version 0\.7\.1\) keeps its own hooks\. Press "Set up" to replace it\./)
     assert.deepEqual(gate.pressed, ['off'])
     await page.click('[data-module-states="skill-selection"] button[data-value="shadow"]')
@@ -4629,7 +4735,7 @@ test('Modules: with the gate off its settings are hidden, a note says why, and i
   const { browser, page, errors } = await openPanel(SCENARIOS['modules-mixed'])
   try {
     const cards = await moduleCards(page)
-    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active'], ['off']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active'], ['off'], ['shadow']])
     assert.match(cards[0].text, /Hooks removed from Claude Code, as you chose\./)
     assert.match(cards[0].text, /With the gate off, nothing checks Bash commands or file edits/)
     const lines = await page.evaluate(() => document.getElementById('claude-integration-status').innerText)

@@ -137,6 +137,13 @@ test('the panel offers a card for every registered module, with exactly the stat
   assert.deepEqual(panelModuleRows(), FEATURE_MODULES.map((module) => ({ id: module.id, states: [...module.states] })))
 })
 
+test("the ci-watch card's gh-call ceiling is the schedule's own (CI_WATCH_MAX_POLLS)", async () => {
+  const { CI_WATCH_MAX_POLLS } = await import('../../src/core/ci_watch.ts')
+  const html = readFileSync(join(__dirname, 'panels', 'config.html'), 'utf8')
+  const polls = /\{ id: 'ci-watch',[^}]*cost: \{ polls: (\d+) \}/.exec(html)?.[1]
+  assert.equal(Number(polls), CI_WATCH_MAX_POLLS)
+})
+
 test('feature-modules-save: the map the panel sends, for every state its cards offer, is accepted by the real sidecar', () => {
   const rows = panelModuleRows()
   // What the panel holds when nothing was chosen yet: each card at the state the status reports, the defaults.

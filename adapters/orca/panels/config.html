@@ -724,6 +724,10 @@
           'modules.cost.board': 'En uso: ninguna llamada a Jev ni hooks.',
           'modules.cost.verify-done': 'En uso: una llamada a Jev por turno candidato, unas {{jev}} llamadas a Jev por prompt.',
           'modules.cost.ci-watch': 'En uso: como máximo {{polls}} llamadas a gh por cada vigilancia (el tope de su calendario de consultas, no una medición), sin llamadas a Jev ni a ningún modelo.',
+          'modules.weekly.ci-watch.unknown': 'Últimos 7 días: aún sin medir.',
+          'modules.weekly.ci-watch.none': 'Últimos 7 días: ninguna vigilancia todavía.',
+          'modules.weekly.ci-watch': 'Últimos 7 días: vigilancias {{watches}}, consultas de CI del agente mientras tanto {{polls}}, esperas largas {{sleeps}}{{notes}} (lo que un aviso habría reemplazado).',
+          'modules.weekly.ci-watch.notes': ', avisos enviados {{injected}}',
           'modules.bg.none': 'Segundo plano: nada propio.',
           'modules.bg.processes': 'Segundo plano: unos {{n}} procesos de node por hora.',
           'modules.bg.cli': 'Segundo plano: unas {{n}} ejecuciones por hora del comando orca.',
@@ -1132,6 +1136,10 @@
           'modules.cost.board': 'In use: no Jev calls and no hooks.',
           'modules.cost.verify-done': 'In use: one Jev call per candidate turn, about {{jev}} Jev calls per prompt.',
           'modules.cost.ci-watch': 'In use: at most {{polls}} gh calls per watch (the ceiling of its polling schedule, not a measurement), no Jev or model calls.',
+          'modules.weekly.ci-watch.unknown': 'Last 7 days: not measured yet.',
+          'modules.weekly.ci-watch.none': 'Last 7 days: no watches yet.',
+          'modules.weekly.ci-watch': 'Last 7 days: watches {{watches}}, CI checks by the agent meanwhile {{polls}}, long sleeps {{sleeps}}{{notes}} (what a note would replace).',
+          'modules.weekly.ci-watch.notes': ', notes sent {{injected}}',
           'modules.bg.none': 'Background: nothing of its own.',
           'modules.bg.processes': 'Background: about {{n}} node processes an hour.',
           'modules.bg.cli': 'Background: about {{n}} runs an hour of the orca command.',
@@ -4017,7 +4025,7 @@
       // in odd/tasks/panel-worker-wakeup.md).
       function renderClaudeIntegrationStatus (status, heartbeat, measurements, modSkillsStatus) {
         lastClaudeIntegrationStatus = status
-        renderModules(status)
+        renderModules(status, measurements)
         claudeIntegrationStatusEl.innerHTML = ''
         if (status === null) {
           claudeIntegrationStatusEl.appendChild(li(
@@ -4179,7 +4187,7 @@
         { id: 'verify-done', states: ['off', 'shadow'], cost: { jev: 0.1 }, background: { open: 0, closed: 0, kind: 'processes' } },
         // 0.9.0 (odd/tasks/ci-watcher.md): its cost is gh calls, not Jev calls. 45 is CI_WATCH_MAX_POLLS (src/core/ci_watch.ts), the
         // ceiling of one watch's schedule over the 60-minute cap; config_html_ci_watch.test.mjs holds the two together.
-        { id: 'ci-watch', states: ['off', 'shadow', 'active'], cost: { polls: 45 }, background: { open: 0, closed: 0, kind: 'processes' } }
+        { id: 'ci-watch', states: ['off', 'shadow', 'active'], cost: { polls: 45 }, weekly: true, background: { open: 0, closed: 0, kind: 'processes' } }
       ]
       var moduleStates = null
       var moduleRowsBuilt = false
@@ -4230,7 +4238,7 @@
           head.appendChild(name)
           head.appendChild(group)
           card.appendChild(head)
-          ;['desc', 'cost', 'background', 'install'].forEach(function (part) {
+          ;(row.weekly ? ['desc', 'cost', 'weekly', 'background', 'install'] : ['desc', 'cost', 'background', 'install']).forEach(function (part) {
             var line = elMake('p', 'hint module-' + part)
             line.setAttribute('data-module-' + part, row.id)
             card.appendChild(line)
@@ -4263,8 +4271,22 @@
         return t('modules.install.pending')
       }
 
-      /** Paints the cards from the integration status (null while it is still being read). */
-      function renderModules (status) {
+      /**
+       * The ci-watch card's week, from the measurements summary (the log the
+       * module writes, folded by read-measurements.mjs). A summary that is not
+       * there, or has no figure for it (a worker older than the card), is
+       * "not measured yet" - never zeros; a log with no watch says so in words.
+       */
+      function ciWatchWeeklyText (measurements) {
+        var week = measurements && measurements.ok && measurements.ciWatch && typeof measurements.ciWatch === 'object' ? measurements.ciWatch : null
+        if (week === null || typeof week.watches !== 'number') return t('modules.weekly.ci-watch.unknown')
+        if (week.watches === 0) return t('modules.weekly.ci-watch.none')
+        var notes = week.injected > 0 ? t('modules.weekly.ci-watch.notes', { injected: String(week.injected) }) : ''
+        return t('modules.weekly.ci-watch', { watches: String(week.watches), polls: String(week.pollsReplaced), sleeps: String(week.sleepsReplaced), notes: notes })
+      }
+
+      /** Paints the cards from the integration status (null while it is still being read) and the week's measurements. */
+      function renderModules (status, measurements) {
         buildModuleRows()
         var all = status && status.ok && status.modules && typeof status.modules === 'object' ? status.modules : null
         var states = {}
@@ -4276,6 +4298,7 @@
           moduleQuery('name', row.id).textContent = t('modules.name.' + row.id)
           moduleQuery('desc', row.id).textContent = t('modules.desc.' + row.id)
           moduleQuery('cost', row.id).textContent = moduleCostText(row)
+          if (row.id === 'ci-watch') moduleQuery('weekly', row.id).textContent = ciWatchWeeklyText(measurements)
           moduleQuery('background', row.id).textContent = moduleBackgroundText(row)
           moduleQuery('install', row.id).textContent = status === null ? t('modules.install.reading') : moduleInstallText(row.id, info, status)
           var group = moduleQuery('states', row.id)
