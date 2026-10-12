@@ -2189,6 +2189,7 @@ async function armPreCold($: EngineInterface, host: StewardHost, modulesFile: Fe
     if (preColdMode(settings.mode, settings.coldMode) === 'off') return
     if ((await readStewardColdState($)).headless) return
     host.cold.timer?.cancel()
+    host.cold.autoCompactRunning = false
     host.cold.armedAt = endedAt
     host.cold.timer = $.clock.after(preColdEarliestMs(PRE_COLD_TTL_MS), () => preColdWake($, host, modulesFile, endedAt, 1))
   } catch {
@@ -3158,6 +3159,8 @@ export function register(on: On, options: PluginOptions): void {
     preColdIdle.timer?.cancel()
     preColdIdle.timer = null
     preColdIdle.armedAt = null
+    // A PreCompact whose PostCompact never came (blocked, failed) must not hold the tier off for good.
+    preColdIdle.autoCompactRunning = false
     return next(e)
   })
 

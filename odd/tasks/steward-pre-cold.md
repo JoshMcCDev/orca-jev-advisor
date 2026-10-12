@@ -41,7 +41,7 @@ Observation of the engine: a classic `PostCompact` with `trigger: "auto"` for th
 - **Measure mode touches no steward state.** It logs `wouldFire: "pre-cold"` and does not move the turn-end cooldown, so upgrading changes nothing the existing steward does. Only an applied pre-cold compaction sets `lastCompactionTurn`.
 - **Headless.** `$.session.compact` is refused in `-p`/SDK sessions: the row says `notApplied: "headless"` and the session stops arming.
 - **Rows.** Only a due wake at or above the threshold writes a row, in the steward's existing hourly log, with `trigger: "pre-cold"`, `decision: "pre-cold"` (fires or would) or `"pre-cold-skip"` with `coldSkip`, and, when applied, the compaction's own `usage` reduced to `compactCost`. `summarizeStewardDecisions` leaves pre-cold rows out of the turn-end counts. `verifyStewardSaving` keeps counting an applied pre-cold compaction: it is a real compaction whose drop shows in the real usage.
-- **Returned within 24 h, measured offline.** `summarizePreCold` joins the fire rows with the main steps of `turn-usage-*.jsonl` by session and time (as `verifyStewardSaving` does), so a `--resume` in a new process still counts. Returned: a main step of that session within 24 h of the fire. Not returned: none and the fire is older than 24 h. Pending: neither yet. The router writes those usage rows; with the router module Off no return can be seen.
+- **Returned within 24 h, measured offline.** `summarizePreCold` joins the fire rows with the main steps of `turn-usage-*.jsonl` by session and time (as `verifyStewardSaving` does), so a `--resume` in a new process still counts. Returned: the first main step of that session after the fire came within 24 h and at least one TTL after the idle period began (`at − idleMs`), so the cold rewrite was, or would have been, avoided. Returned early: it came before that, the cache was still warm, and an applied compaction there is waste. Not returned: none and the fire is older than 24 h. Pending: neither yet. The router writes those usage rows; with the router module Off no return can be seen.
 - **Money in input-token equivalents.** A 1h cache write is 2× the input price, a cache read 0.1×, output 5×. Cost of an applied compaction = input + 0.1×cacheRead + 2×cacheWrite + 5×output of its own usage. Realized saving of an applied one that came back = 2 × (context before − the first returning step's cache write) − its cost. Waste = the cost of applied ones nobody resumed in 24 h. For a measured one, the first returning step's cache write is the cold rewrite active mode would have avoided (measured, not estimated).
 - **Pays for itself.** With about 0.1× of a 120k context plus about 2k output tokens (≈22k input-equivalents) against a 2× rewrite of about 110k saved (220k), it breaks even when about 1 in 10 compacted sessions comes back; the measured rate is about 65 of 139 (47%).
 
@@ -75,6 +75,10 @@ Strict TDD for each: RED observed, then GREEN, then a Conventional Commit on thi
 3. Above 180k: whether the engine's own idle compaction fires at 54 min (an `engine-idle-compact` row and the `$.store` key `engineIdleCompactSeenAt`), with which classic trigger. If the engine reports something other than `auto`, the observation rule needs that trigger.
 4. A `-p` session: no compaction, a `headless` row at most, no error.
 5. With Measure: a `wouldFire: "pre-cold"` row and the steward's `lastCompactionTurn` unchanged.
+6. A 51-minute `$.clock.after` really fires in an idle interactive session (the probe proved 5 s only).
+7. The compaction itself writes no main `turn-usage` row; if it does, every Active fire reads as returned seconds later. Compare row times with the fire's `at`.
+8. `--resume` keeps the same `sessionId`, which the return join depends on.
+9. After a plugin hot reload, a timer armed by the old load does nothing harmful (its `activeTurnId` is stale; the engine's refusal to compact under a turn is the backstop).
 
 ## Memory
 

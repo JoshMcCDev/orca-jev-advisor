@@ -210,6 +210,7 @@ test("summarizePreCold: measured fires, returned within 24 h from the session's 
     wouldFire: 4,
     skipped: 1,
     returned: 1,
+    returnedEarly: 0,
     notReturned: 2,
     pending: 1,
     coldRewriteOnReturn: 140_000,
@@ -244,4 +245,26 @@ test("summarizePreCold: malformed rows are skipped, never thrown on", () => {
   const summary = summarizePreCold(rows, [null, { at: 5 }, { agent: "main" }], NOW, WEEK);
   assert.equal(summary?.wouldFire, 1);
   assert.equal(summary?.pending, 1);
+});
+
+test("summarizePreCold: a return before the TTL ran out from the start of the idle period found a warm cache: its own count, never a saving", () => {
+  const idleMs = 52 * MIN;
+  const fireAt = NOW - 30 * HOUR;
+  const idleStart = fireAt - idleMs;
+  const rows = [
+    // Active: back 5 minutes after the fire, before the hour from the idle start: the compaction was pure cost.
+    fireRow(fireAt, "s-early", { applied: true, mode: "active", wouldFire: null, contextBefore: 150_000, compactCost: 20_000, idleMs }),
+    // Active: back exactly an hour after the idle start: the cold rewrite was avoided.
+    fireRow(fireAt, "s-edge", { applied: true, mode: "active", wouldFire: null, contextBefore: 150_000, compactCost: 20_000, idleMs }),
+    // Measured: back early, so it is not a cold rewrite active mode would have avoided.
+    fireRow(fireAt, "s-measured-early", { idleMs }),
+  ];
+  const usage = [step(fireAt + 5 * MIN, "s-early", 140_000), step(idleStart + HOUR, "s-edge", 10_000), step(fireAt + 2 * MIN, "s-measured-early", 150_000)];
+  const summary = summarizePreCold(rows, usage, NOW, WEEK);
+  assert.ok(summary);
+  assert.equal(summary.returned, 1);
+  assert.equal(summary.returnedEarly, 2);
+  assert.equal(summary.realizedSaving, 2 * (150_000 - 10_000) - 20_000);
+  assert.equal(summary.waste, 20_000, "the early return's compaction is waste");
+  assert.equal(summary.coldRewriteOnReturn, null);
 });

@@ -4806,18 +4806,18 @@ test('steward: the pre-cold switch reads in Spanish too', { skip: chromium ? fal
 
 // Track S: the pre-cold tier's weekly numbers under the steward's, both locales.
 test('steward: the pre-cold tier shows fired, would fire, returned within 24 h, realized saving and waste for 7 days', { skip: chromium ? false : 'playwright is not installed' }, async () => {
-  const preCold = { fired: 3, wouldFire: 5, skipped: 2, returned: 4, notReturned: 2, pending: 2, coldRewriteOnReturn: 410000, realizedSaving: 250000, waste: 44000, engineIdleCompactions: 0 }
+  const preCold = { fired: 3, wouldFire: 5, skipped: 2, returned: 3, returnedEarly: 1, notReturned: 2, pending: 2, coldRewriteOnReturn: 410000, realizedSaving: 250000, waste: 44000, engineIdleCompactions: 0 }
   const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold } }
   for (const locale of ['en', 'es']) {
     const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward }, locale)
     try {
       const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
       if (locale === 'en') {
-        assert.match(text, /Before the cache goes cold \(7 days\): compacted 3 · would have compacted 5 \(measuring only\) · back within 24 h: 4 · not back: 2 · still waiting: 2/)
-        assert.match(text, /Realized saving: 250,000 · waste on sessions nobody resumed: 44,000 \(input-token equivalents\)/)
+        assert.match(text, /Before the cache goes cold \(7 days\): compacted 3 · would have compacted 5 \(measuring only\) · back within 24 h, cache already cold: 3 · back while still warm: 1 · not back: 2 · still waiting: 2/)
+        assert.match(text, /Realized saving: 250,000 · waste \(nobody came back, or came back while warm\): 44,000 \(input-token equivalents\)/)
         assert.match(text, /Cold rewrite when the measured sessions came back: 410,000 tokens/)
       } else {
-        assert.match(text, /Antes de que se enfríe la caché \(7 días\): compactó 3 · habría compactado 5 \(solo mide\) · retomadas en 24 h: 4 · no retomadas: 2 · aún en espera: 2/)
+        assert.match(text, /Antes de que se enfríe la caché \(7 días\): compactó 3 · habría compactado 5 \(solo mide\) · retomadas en 24 h, con la caché ya fría: 3 · retomadas aún tibia: 1 · no retomadas: 2 · aún en espera: 2/)
         assert.match(text, /Ahorro realizado: 250,000|Ahorro realizado: 250.000/)
         assert.match(text, /Reescritura en frío/)
       }
@@ -4843,7 +4843,7 @@ test('steward: with no pre-cold row the board says so, and no saving line is inv
 })
 
 test('steward: measured only, the pre-cold line shows no saving or waste line', { skip: chromium ? false : 'playwright is not installed' }, async () => {
-  const preCold = { fired: 0, wouldFire: 2, skipped: 0, returned: 1, notReturned: 0, pending: 1, coldRewriteOnReturn: 150000, realizedSaving: null, waste: null, engineIdleCompactions: 0 }
+  const preCold = { fired: 0, wouldFire: 2, skipped: 0, returned: 1, returnedEarly: 0, notReturned: 0, pending: 1, coldRewriteOnReturn: 150000, realizedSaving: null, waste: null, engineIdleCompactions: 0 }
   const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold } }
   const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward })
   try {

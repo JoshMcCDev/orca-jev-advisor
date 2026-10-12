@@ -866,3 +866,20 @@ test("S2 pre-cold: every hook returns what it was given; a failing host never th
     assert.equal(await hook(engine, given, async (e: unknown) => e), given);
   }
 });
+
+test("S2 engine observed: an auto PreCompact with no PostCompact (blocked or failed) does not hold the tier off after the next turn", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await personPrompt(host, engine, "uno");
+  await turnStart(host, engine, "turn-uno");
+  await classicCompact(host, engine, "PreCompact", "auto");
+  host.fetchQueue.push(verdict("mid-task", 0.5));
+  await turnComplete(host, engine, { turnId: "turn-uno" });
+  await runDueOnce(host);
+  host.timers = [];
+  host.clockNow += 5 * MINUTE;
+  await idleAfterTurn(host, engine, "dos", verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 1);
+  assert.equal(preColdRows(host)[0]?.applied, true);
+});

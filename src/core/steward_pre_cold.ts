@@ -178,8 +178,10 @@ export interface PreColdSummary {
   readonly wouldFire: number;
   /** Due wakes that stood down (engine, cooldown, mid-task, too late). */
   readonly skipped: number;
-  /** Fired or would-fire sessions with a main step within 24 h after. */
+  /** Fired or would-fire sessions whose first main step after came within 24 h and after the cache had expired: the cold rewrite was (or would have been) avoided. */
   readonly returned: number;
+  /** Ones whose first main step after came before the TTL ran out from the start of the idle period: the cache was still warm, so the compaction saved nothing. */
+  readonly returnedEarly: number;
   /** Ones with none, older than 24 h. */
   readonly notReturned: number;
   /** Ones younger than 24 h with no return yet. */
@@ -188,7 +190,7 @@ export interface PreColdSummary {
   readonly coldRewriteOnReturn: number | null;
   /** Input-token equivalents: 2x the write each returned applied fire avoided, less its cost; null with none of known cost. */
   readonly realizedSaving: number | null;
-  /** Input-token equivalents: the cost of applied fires nobody resumed in 24 h; null with none of known cost. */
+  /** Input-token equivalents: the cost of applied fires nobody resumed in 24 h, or resumed while the cache was still warm; null with none of known cost. */
   readonly waste: number | null;
   /** Engine idle compactions observed. */
   readonly engineIdleCompactions: number;
@@ -220,13 +222,14 @@ function mainStepsBySession(usageRows: readonly unknown[]): Map<string, ReturnSt
  * (`turn-usage-*.jsonl`) by session and time, as `verifyStewardSaving` does.
  * Rows are parsed tolerantly. null when the window holds no pre-cold row.
  */
-export function summarizePreCold(stewardRows: readonly unknown[], usageRows: readonly unknown[], nowMs: number, windowMs: number, returnWindowMs: number = PRE_COLD_RETURN_WINDOW_MS): PreColdSummary | null {
+export function summarizePreCold(stewardRows: readonly unknown[], usageRows: readonly unknown[], nowMs: number, windowMs: number, returnWindowMs: number = PRE_COLD_RETURN_WINDOW_MS, ttlMs: number = PRE_COLD_TTL_MS): PreColdSummary | null {
   const steps = mainStepsBySession(usageRows);
   let rows = 0;
   let fired = 0;
   let wouldFire = 0;
   let skipped = 0;
   let returned = 0;
+  let returnedEarly = 0;
   let notReturned = 0;
   let pending = 0;
   let coldRewrite: number | null = null;
@@ -254,7 +257,12 @@ export function summarizePreCold(stewardRows: readonly unknown[], usageRows: rea
     const sessionId = typeof row.sessionId === "string" ? row.sessionId : null;
     const back = sessionId === null ? undefined : (steps.get(sessionId) ?? []).find((step) => step.atMs > atMs && step.atMs <= atMs + returnWindowMs);
     const cost = count(row.compactCost);
-    if (back !== undefined) {
+    // The idle period began `idleMs` before the row; without it, at the row.
+    const idleStartMs = atMs - (count(row.idleMs) ?? 0);
+    if (back !== undefined && back.atMs - idleStartMs < ttlMs) {
+      returnedEarly += 1;
+      if (applied && cost !== null) waste = (waste ?? 0) + cost;
+    } else if (back !== undefined) {
       returned += 1;
       if (!applied) coldRewrite = (coldRewrite ?? 0) + back.cacheWrite;
       const before = count(row.contextBefore);
@@ -267,5 +275,5 @@ export function summarizePreCold(stewardRows: readonly unknown[], usageRows: rea
     }
   }
   if (rows === 0 && engineIdleCompactions === 0) return null;
-  return { fired, wouldFire, skipped, returned, notReturned, pending, coldRewriteOnReturn: coldRewrite, realizedSaving: saving, waste, engineIdleCompactions };
+  return { fired, wouldFire, skipped, returned, returnedEarly, notReturned, pending, coldRewriteOnReturn: coldRewrite, realizedSaving: saving, waste, engineIdleCompactions };
 }
