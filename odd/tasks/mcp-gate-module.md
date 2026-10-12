@@ -2,6 +2,10 @@
 
 Branch `feat/mcp-gate-module`, from `main` at 0.8.1. Candidate M2 of `odd/tasks/feature-modules.md`; idea in `odd/backlog.md`, "Gate MCP tools, judged against the goal".
 
+## Status: parked (2026-10-12)
+
+The owner reports no case, so far, of an agent sending or writing to an external service without being asked. With about 174 external writes a week and no known bad one, a gate on them would cost Jev calls and processes to catch nothing. Revisit only if such a case happens; the first check below stays valid as the starting point.
+
 ## Objective
 
 Make the gate judge an MCP call that has an effect outside the machine (a Slack message, a Jira comment or transition, a Plane or Tambora write, an image generation or upload) before it runs, the way it already judges a Bash command. Today the gate's hooks match Bash, Agent and the edit tools only, so none of those is ever judged. Reads, and the local memory server, must never cost a Jev call.
