@@ -42,3 +42,12 @@ Strict TDD for each: test written, RED observed, then GREEN, then a Conventional
 ## Checks
 
 `npm run typecheck`, `npm test`, and `npm run test:panels` if anything the panels read changed.
+
+## Hand-off to the wiring tracks
+
+- M7 must ship together with M8 and later, not alone. It adds `modules.memory` to the installer status, keeps the mod copy "needed" while memory is not off, and makes `config.html` carry the state of a module with no card (`uncardedModuleStates`) so the strict writer still receives the whole map. Track M14 adds the card, then removes `memory` from `UNCARDED` in `write-secret-mirror.feature-modules.test.mjs` and the passthrough in `config.html`, and adds the `memory-status` worker job.
+- `src/core/module_cost.ts` keeps its own six ids on purpose: memory uses Haiku, not Jev, so a row there would read zero. Track M15 adds it.
+- Once M8 schedules a turn-end timer, the tests that count timers (`steward.test.ts`, `hooks.test.ts`) need `memory: "off"`, as verify-done needed.
+- The spool item does not persist `candidates[]` from `mem_save`; M9 must store them or query Engram again.
+- Feedback is saved to Engram as type `policy`, so a `supersedes` or `conflicts_with` on feedback is always left to the person. The owner should confirm this mapping.
+- The engine's hash for project slugs over 200 characters is not modelled in `autoMemoryDir`.
