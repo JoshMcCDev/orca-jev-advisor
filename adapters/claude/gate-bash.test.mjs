@@ -4288,14 +4288,45 @@ test('secret guard G2: commit -a with a modified tracked .env asks', () => {
   assertSecretAsk(home, answerFor(home, 'git commit -am rotate', repo), '.env')
 })
 
-test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', { todo: 'G3' }, () => {
+test('secret guard G3: a .env added and then deleted inside the outgoing range still asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  git(['rm', '-q', '--cached', '.env'], repo)
+  git(['commit', '-q', '-m', 'remove env'], repo)
+  assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), '.env')
+})
+
+test('secret guard G3: a new branch with no upstream is read from where it left origin\'s default branch', () => {
+  const home = makeHome()
+  const repo = secretRepo({ upstream: false })
+  commitSecret(repo)
+  assertSecretAsk(home, answerFor(home, 'git push -u origin feat/x', repo), '.env')
+})
+
+test('secret guard G3: a secret already on origin\'s default branch is not this push\'s, and a clean push stays a local allow', () => {
+  const home = makeHome()
+  const repo = secretRepo({ upstream: false })
+  git(['checkout', '-q', 'main'], repo)
+  writeFileSync(join(repo, 'old.pem'), '-----BEGIN PRIVATE KEY-----\n')
+  commitSecret(repo, 'old.pem')
+  git(['update-ref', 'refs/remotes/origin/main', 'main'], repo)
+  git(['checkout', '-q', 'feat/x'], repo)
+  git(['rebase', '-q', 'main'], repo)
+  writeFileSync(join(repo, 'a.ts'), 'a\n')
+  git(['add', 'a.ts'], repo)
+  git(['commit', '-q', '-m', 'a'], repo)
+  assertAllowedByOwnBranchPush(home, 'git push -u origin feat/x', repo)
+})
+
+test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', () => {
   const home = makeHome()
   const repo = secretRepo()
   commitSecret(repo)
   assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), '.env')
 })
 
-test('secret guard G0: with push-branch authorized for the repository, a push carrying .env still asks', { todo: 'G3' }, () => {
+test('secret guard G0: with push-branch authorized for the repository, a push carrying .env still asks', () => {
   const home = makeHome()
   const repo = secretRepo()
   commitSecret(repo)
@@ -4306,7 +4337,7 @@ test('secret guard G0: with push-branch authorized for the repository, a push ca
   assertSecretAsk(home, keyedAnswerFor(home, command, repo, 'secret-authorized'), '.env')
 })
 
-test('secret guard G0: a cached allow for the push shape is never replayed over a push carrying .env', { todo: 'G3' }, () => {
+test('secret guard G0: a cached allow for the push shape is never replayed over a push carrying .env', () => {
   const home = makeHome()
   const repo = secretRepo()
   commitSecret(repo)

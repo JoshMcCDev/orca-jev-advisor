@@ -2064,6 +2064,17 @@ const SECRET_PUBLISH_READER: SecretPublishReader = {
     const root = gitOutput(['rev-parse', '--show-toplevel'], dir)?.trim()
     return root === undefined || root.length === 0 ? null : readSecretCandidate(join(root, path))
   },
+  // Not yet on the remote: every commit no remote-tracking branch of it has.
+  // With an upstream that is `@{u}..`; for a new branch it starts where the
+  // branch left origin's default branch; a commit already on any branch of
+  // that remote is not sent again. A file added then deleted in the range
+  // still shows, in the commit that added it. A source that names nothing
+  // (`--ignore-missing`) and a directory that is no repository send nothing:
+  // that push fails on its own.
+  outgoingLog: (dir, sources, remote) =>
+    gitOutput(['-c', 'core.quotePath=false', 'log', '--ignore-missing', '--format=commit %h', '--name-status', '--no-renames', ...sources, '--not', remote === null ? '--remotes' : `--remotes=${remote}`, '--'], dir) ??
+    (gitOutput(['rev-parse', '--git-dir'], dir) === null ? '' : null),
+  commitContent: (dir, commit, path) => gitOutput(['show', `${commit}:${path}`], dir),
 }
 
 /** A small file's text, or null when it is missing, unreadable or too large to be a credential file. */
@@ -2099,7 +2110,7 @@ function emitSecretPublishAsk(finding: SecretPublishFinding, command: string, ac
   appendGateRecord(actingCwd, command, 'local-rule', 'ask', null, 'secret-publish', null, teamInternal)
   appendPendingApproval(toolUseId, actingCwd, command, null, null, { reversible: null, external: null, consequence: null }, GATE_CONSEQUENCE_CEILING, 'secret-publish', null)
   const segment = truncateForPersonLine(affectedSegments(command)[0] ?? command)
-  emit('ask', t(`secretPublish.${finding.kind}`, { file: finding.path }), t('secretPublishLine', { file: finding.path, segment }))
+  emit('ask', t(`secretPublish.${finding.kind}`, { file: finding.path, commit: finding.commit ?? '' }), t('secretPublishLine', { file: finding.path, segment }))
 }
 
 /** A command that qualifies for a local allow, which kind, and the trusted programs it runs (T7) -- see src/core/local_allow.ts. */

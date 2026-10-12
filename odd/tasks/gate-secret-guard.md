@@ -49,9 +49,22 @@ Ships Active (no Shadow): it is a deterministic path check.
   one, or a secret pathspec) is not own-tree work and asks. The hook reads
   the staged names. Proof: 3 unit tests and 2 e2e tests RED (e2e: `own-tree`
   allow), GREEN after.
-- [ ] G3 A push asks when any outgoing commit touched a secret path
+- [x] G3 A push asks when any outgoing commit touched a secret path
   (`git log --name-only <range>`, add-then-delete caught). A new branch with
   no upstream is read from the merge-base with origin's default branch.
+  Range: `git log --name-status --no-renames <sources> --not --remotes=<remote>`
+  -- commits no remote-tracking branch of that remote has. With an upstream
+  that is `@{u}..`; for a new branch it starts at the merge-base with
+  `origin/HEAD` (and also skips commits already on any other branch of that
+  remote). Deletions publish nothing and are skipped; the commit that added
+  the file is what asks. Outside a repository, or for a source that names
+  nothing, the push sends nothing. Proof: 5 unit tests and 2 e2e tests RED
+  (e2e: `local-allow`), GREEN after; the 3 G0 push tests GREEN; the
+  no-regression e2e (secret already on origin/main, clean push stays
+  `local-allow`) GREEN before and after. The 7 existing own-branch push tests
+  run from a non-repository went RED on the first cut (unknown read turned
+  the local allow off) and GREEN once "no repository / missing source sends
+  nothing" was read as clean.
 - [ ] G4 Precedence: runs before the 0.6.28 remembered authorizations and the
   shape cache replay; a policy deny stays a deny; a local-rule deny stays a deny.
 - [ ] G5 Visibility: es/en ask text names the file and the reason; distinct

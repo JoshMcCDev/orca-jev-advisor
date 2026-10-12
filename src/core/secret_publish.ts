@@ -24,6 +24,8 @@ export interface SecretPublishFinding {
   readonly kind: SecretPublishKind;
   /** The secret path, as git or the command names it. */
   readonly path: string;
+  /** A push only: the outgoing commit that added or changed it. */
+  readonly commit?: string;
 }
 
 export type SecretPublishResult = { readonly kind: "found"; readonly finding: SecretPublishFinding } | { readonly kind: "clean" } | { readonly kind: "unknown" };
@@ -41,6 +43,15 @@ export interface SecretPublishReader {
   readonly indexContent: (dir: string, path: string) => string | null;
   /** The working-tree text of `path`, relative to the root; null when it cannot be read. */
   readonly treeContent: (dir: string, path: string) => string | null;
+  /**
+   * `git log --format='commit %h' --name-status --no-renames <sources> --not
+   * --remotes[=<remote>]`: every commit `sources` would send that no
+   * remote-tracking branch of `remote` (of any remote, when null) already
+   * has, with the paths each one touched; null when git fails.
+   */
+  readonly outgoingLog: (dir: string, sources: readonly string[], remote: string | null) => string | null;
+  /** The text of `path` (relative to the root) in `commit`; null when it cannot be read. */
+  readonly commitContent: (dir: string, commit: string, path: string) => string | null;
 }
 
 const CLEAN: SecretPublishResult = { kind: "clean" };
@@ -184,6 +195,96 @@ function commitResult(args: readonly string[], dir: string | null, reader: Secre
   return fromTree === null ? CLEAN : { kind: "found", finding: { kind: "commit", path: fromTree } };
 }
 
+/** `git push` options that take the next word as their value when no `=` is attached. */
+const PUSH_LONG_WITH_VALUE: ReadonlySet<string> = new Set(["--repo", "--push-option", "--receive-pack", "--exec"]);
+
+interface PushShape {
+  /** What git log reads as the commits sent: refspec sources, `HEAD`, or `--branches`/`--all`/`--tags`. */
+  readonly sources: readonly string[];
+  /** The remote by name, or null for git's default or a URL (then every remote-tracking branch counts as already there). */
+  readonly remote: string | null;
+  /** A source that is not a plain revision: never handed to git. */
+  readonly unreadable: boolean;
+}
+
+/** A refspec source git log may read as a revision, never as an option. */
+const PLAIN_REVISION = /^[A-Za-z0-9_@][A-Za-z0-9_./@{}^~-]*$/;
+const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function pushShape(args: readonly string[]): PushShape | null {
+  let deletes = false;
+  let dryRun = false;
+  let everyBranch = false;
+  let mirror = false;
+  let tags = false;
+  let repo: string | null = null;
+  const positionals: string[] = [];
+  let afterSeparator = false;
+  for (let at = 0; at < args.length; at += 1) {
+    const word = args[at] ?? "";
+    if (afterSeparator) positionals.push(word);
+    else if (word === "--") afterSeparator = true;
+    else if (word.startsWith("--")) {
+      const name = word.includes("=") ? word.slice(0, word.indexOf("=")) : word;
+      const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : PUSH_LONG_WITH_VALUE.has(name) ? (args[(at += 1)] ?? "") : null;
+      if (name === "--repo") repo = value;
+      deletes ||= name === "--delete";
+      dryRun ||= name === "--dry-run";
+      everyBranch ||= name === "--all" || name === "--branches";
+      mirror ||= name === "--mirror";
+      tags ||= name === "--tags";
+    } else if (/^-[A-Za-z]+$/.test(word)) {
+      deletes ||= word.includes("d");
+      dryRun ||= word.includes("n");
+      if (word.endsWith("o")) at += 1;
+    } else positionals.push(word);
+  }
+  if (deletes || dryRun) return null;
+  const named = positionals[0] ?? repo;
+  const remote = named !== null && REMOTE_NAME.test(named) ? named : null;
+  const refSources = positionals.slice(1).flatMap((refspec) => {
+    const spec = refspec.startsWith("+") ? refspec.slice(1) : refspec;
+    const source = spec.includes(":") ? spec.slice(0, spec.indexOf(":")) : spec;
+    return source.length === 0 ? [] : [source];
+  });
+  const unreadable = refSources.some((source) => !PLAIN_REVISION.test(source));
+  if (mirror) return { sources: ["--all"], remote, unreadable };
+  if (everyBranch) return { sources: ["--branches"], remote, unreadable };
+  if (tags) return { sources: ["--tags", ...refSources], remote, unreadable };
+  // A refspec list made only of deletions (`:feat/x`) sends nothing.
+  if (positionals.length > 1 && refSources.length === 0) return null;
+  return { sources: refSources.length > 0 ? refSources : ["HEAD"], remote, unreadable };
+}
+
+/** A path as git prints it: a name with unusual characters comes quoted. */
+function unquoted(path: string): string {
+  return path.startsWith('"') && path.endsWith('"') ? path.slice(1, -1).replace(/\\(["\\])/g, "$1") : path;
+}
+
+/** Every path an outgoing commit added or changed (a deletion publishes nothing), newest commit first. */
+function outgoingChanges(log: string): readonly { readonly commit: string; readonly path: string }[] {
+  const out: { commit: string; path: string }[] = [];
+  let commit = "";
+  for (const line of log.split("\n")) {
+    if (line.startsWith("commit ")) commit = line.slice("commit ".length).trim();
+    const change = /^([ACMTUXB])\d*\t(.+)$/.exec(line);
+    if (change !== null && commit.length > 0) out.push({ commit, path: unquoted(change[2] ?? "") });
+  }
+  return out;
+}
+
+function pushResult(args: readonly string[], dir: string | null, reader: SecretPublishReader): SecretPublishResult {
+  const shape = pushShape(args);
+  if (shape === null) return CLEAN;
+  if (dir === null || shape.unreadable) return UNKNOWN;
+  const log = reader.outgoingLog(dir, shape.sources, shape.remote);
+  if (log === null) return UNKNOWN;
+  for (const { commit, path } of outgoingChanges(log)) {
+    if (secretPathKind(path) !== null && isSecretPath(path, () => reader.commitContent(dir, commit, path))) return { kind: "found", finding: { kind: "push", path, commit } };
+  }
+  return CLEAN;
+}
+
 /** What one git segment stages, commits or pushes. */
 function segmentResult(subcommand: string | null, args: readonly string[], dir: string | null, reader: SecretPublishReader): SecretPublishResult {
   switch (subcommand) {
@@ -191,6 +292,8 @@ function segmentResult(subcommand: string | null, args: readonly string[], dir: 
       return addResult(args, dir, reader);
     case "commit":
       return commitResult(args, dir, reader);
+    case "push":
+      return pushResult(args, dir, reader);
     default:
       return CLEAN;
   }

@@ -170,7 +170,7 @@ export const GATE_CATALOG: Catalog<GateKey> = {
     // (permissionDecisionReason), naming the file and why it matters.
     "secretPublish.add": "Esto prepara {{file}} para un commit. Parece un archivo secreto (claves, tokens o contraseñas): si llega a un remoto, no se puede retirar.",
     "secretPublish.commit": "Este commit incluye {{file}}. Parece un archivo secreto (claves, tokens o contraseñas): si llega a un remoto, no se puede retirar.",
-    "secretPublish.push": "Este push sube {{file}}, en un commit que el remoto aún no tiene. Parece un archivo secreto (claves, tokens o contraseñas): una vez subido, no se puede retirar.",
+    "secretPublish.push": "Este push sube {{file}}, del commit {{commit}}, que el remoto aún no tiene. Parece un archivo secreto (claves, tokens o contraseñas): una vez subido, no se puede retirar.",
     secretPublishLine: "jev · {{file}} parece un archivo secreto, decide tú: `{{segment}}`",
     // 0.5.2's own concrete-effect line (gate_person_effect.ts), in priority
     // order: named files first, then deploy/publish, then leaves-this-
@@ -249,7 +249,7 @@ export const GATE_CATALOG: Catalog<GateKey> = {
     "reason.trusted": "runs a program on your trusted list: {{programs}}",
     "secretPublish.add": "This stages {{file}} for a commit. It looks like a secret file (keys, tokens or passwords): once it reaches a remote, it cannot be taken back.",
     "secretPublish.commit": "This commit includes {{file}}. It looks like a secret file (keys, tokens or passwords): once it reaches a remote, it cannot be taken back.",
-    "secretPublish.push": "This push sends {{file}}, in a commit the remote does not have yet. It looks like a secret file (keys, tokens or passwords): once pushed, it cannot be taken back.",
+    "secretPublish.push": "This push sends {{file}}, from commit {{commit}}, which the remote does not have yet. It looks like a secret file (keys, tokens or passwords): once pushed, it cannot be taken back.",
     secretPublishLine: "jev · {{file}} looks like a secret file, you decide: `{{segment}}`",
     "effect.namedFiles": "deletes unsaved work: {{files}}",
     "effect.deploy": "triggers a deploy",
