@@ -83,6 +83,19 @@ function emptyCounts(): TierCounts {
   return { simple: 0, standard: 0, complex: 0, frontier: 0 };
 }
 
+/**
+ * Track R (odd/tasks/router-cold-switch.md): the switches that passed
+ * break-even only because the prompt cache was cold, in the window --
+ * applied (`appliedCold`) or, in measure mode, not (`wouldApplyCold`).
+ */
+export function countColdSwitches(decisionRows: readonly unknown[], nowMs: number, windowMs: number): number {
+  return decisionRows.filter((raw) => {
+    if (!isRecord(raw) || (raw.wouldApplyCold !== true && raw.appliedCold !== true) || typeof raw.at !== "string") return false;
+    const atMs = Date.parse(raw.at);
+    return Number.isFinite(atMs) && atMs >= nowMs - windowMs && atMs <= nowMs;
+  }).length;
+}
+
 export function summarizeRouterDecisions(decisionRows: readonly unknown[], usageRows: readonly unknown[], nowMs: number, windowMs: number): RouterDecisionSummary {
   const decisions = decisionRows.map(parseDecision).filter((row): row is DecisionRow => row !== null && row.atMs >= nowMs - windowMs && row.atMs <= nowMs);
   const usage = usageRows.map(parseUsage).filter((row): row is UsageRow => row !== null);

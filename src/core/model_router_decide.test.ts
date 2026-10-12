@@ -577,3 +577,27 @@ test("0.6.22 T1 record: margin and workKindMargin are written when given, and th
   assert.ok(!("workKindMargin" in without));
   assert.ok(!JSON.stringify(without).includes("margin"));
 });
+
+test("R1: a stage row says whether the cache was warm (null unknown), and a row given none carries no field", () => {
+  const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, applied: false, quotaBand: "normal" } as const;
+  assert.equal(routerDecisionRecord({ ...base, cacheWarm: false }).cacheWarm, false);
+  assert.equal(routerDecisionRecord({ ...base, cacheWarm: true }).cacheWarm, true);
+  assert.equal(routerDecisionRecord({ ...base, cacheWarm: null }).cacheWarm, null);
+  assert.equal("cacheWarm" in routerDecisionRecord(base), false);
+});
+
+test("R2: a cold switch logs wouldApplyCold in measure and appliedCold in active; no other row carries either", () => {
+  const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, quotaBand: "normal", cacheWarm: false } as const;
+  const measured = routerDecisionRecord({ ...base, applied: false, coldSwitch: true });
+  assert.equal(measured.wouldApplyCold, true);
+  assert.equal("appliedCold" in measured, false);
+  const applied = routerDecisionRecord({ ...base, applied: true, coldSwitch: true });
+  assert.equal(applied.appliedCold, true);
+  assert.equal("wouldApplyCold" in applied, false);
+  for (const record of [routerDecisionRecord({ ...base, applied: true, coldSwitch: false }), routerDecisionRecord({ ...base, applied: false })]) {
+    assert.equal("wouldApplyCold" in record, false);
+    assert.equal("appliedCold" in record, false);
+  }
+});

@@ -85,20 +85,36 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function createJevPseudonyms(): JevNames {
+export interface JevPseudonymOptions {
+  /**
+   * Gate secret guard G6: absolute temp roots (contained_effect.ts's
+   * tempRootsFromEnvironment). A path inside one reads `$TMPDIR/<path-N>`:
+   * still no name in clear, but Jev knows the file is a temporary one --
+   * a scratchpad on another volume used to read as an opaque `<path-1>`,
+   * and a Python edit of it was refused as a write on main.
+   */
+  readonly tempRoots?: readonly string[];
+}
+
+export function createJevPseudonyms(options: JevPseudonymOptions = {}): JevNames {
   const placeholders = new Map<string, string>();
   const counts: Record<JevNameKind, number> = { repo: 0, branch: 0, path: 0 };
+  const tempRoots = (options.tempRoots ?? []).map((root) => root.replace(/\/+$/, "")).filter((root) => root.startsWith("/") && root.length > 1);
+
+  /** How a registered value reads: its placeholder, behind `$TMPDIR/` for a path inside a temp root. */
+  const shown = (kind: JevNameKind, value: string, placeholder: string): string =>
+    kind === "path" && tempRoots.some((root) => value === root || value.startsWith(`${root}/`)) ? `$TMPDIR/${placeholder}` : placeholder;
 
   const name = (kind: JevNameKind, value: string): string => {
     if (value.length === 0) return value;
     if (kind === "branch" && CLEAR_BRANCH_NAMES.includes(value)) return value;
     const key = `${kind}\u0000${value}`;
     const existing = placeholders.get(key);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) return shown(kind, value, existing);
     counts[kind] += 1;
     const placeholder = `<${kind}-${counts[kind]}>`;
     placeholders.set(key, placeholder);
-    return placeholder;
+    return shown(kind, value, placeholder);
   };
 
   const redactText = (text: string): string => {
@@ -110,9 +126,9 @@ export function createJevPseudonyms(): JevNames {
       .filter(([value, , kind]) => value.length >= MIN_FREE_TEXT_LENGTH[kind])
       .sort((a, b) => b[0].length - a[0].length);
     let result = text;
-    for (const [value, placeholder] of entries) {
+    for (const [value, placeholder, kind] of entries) {
       const pattern = new RegExp(`(?<![${TOKEN_CHAR}])${escapeRegExp(value)}(?![A-Za-z0-9_\\-])`, "g");
-      result = result.replace(pattern, placeholder);
+      result = result.replace(pattern, shown(kind, value, placeholder));
     }
     return result.replace(PATH_WORD, (word) => {
       // A sentence's own full stop or comma is not part of the path.

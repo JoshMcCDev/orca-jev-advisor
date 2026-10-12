@@ -21,6 +21,7 @@ import {
   shiftForPressure,
   summarizePreviousTurn,
   summarizeSinceLastPrompt,
+  switchedByColdCache,
 } from "./model_router_stage.ts";
 import type { ActivityMessage } from "./model_router_stage.ts";
 
@@ -358,20 +359,21 @@ test("previous-failure: which failed calls are read-only probes (their errors do
 
 const USAGE = { contextTokens: 80_000, avgOutput: 700, medianStepsPerTurn: 4 };
 
+const STAGE_BASE: Parameters<typeof decideStage>[0] = {
+  tiers: TIERS,
+  jev: { tier: "simple", confidence: 0.9 },
+  currentModel: "claude-opus-5-5",
+  currentEffort: "high",
+  configuredModel: "claude-opus-5-5",
+  configuredEffort: "high",
+  guards: CALM,
+  band: "normal",
+  pending: null,
+  usage: USAGE,
+};
+
 function stage(overrides: Partial<Parameters<typeof decideStage>[0]>): ReturnType<typeof decideStage> {
-  return decideStage({
-    tiers: TIERS,
-    jev: { tier: "simple", confidence: 0.9 },
-    currentModel: "claude-opus-5-5",
-    currentEffort: "high",
-    configuredModel: "claude-opus-5-5",
-    configuredEffort: "high",
-    guards: CALM,
-    band: "normal",
-    pending: null,
-    usage: USAGE,
-    ...overrides,
-  });
+  return decideStage({ ...STAGE_BASE, ...overrides });
 }
 
 test("stage: Jev failure changes nothing", () => {
@@ -824,4 +826,64 @@ test("context floor: an unknown window (a gateway) or an unknown context applies
   assert.notEqual(gateway.guard, "context-window");
   const unknown = stage({ jev: { tier: "simple", confidence: 0.95 }, usage: null });
   assert.equal(unknown.proposed, "claude-haiku-4-5-20251001");
+});
+
+// ---------------------------------------------------------------------------
+// Track R (odd/tasks/router-cold-switch.md): a cold cache makes the switch free
+// ---------------------------------------------------------------------------
+
+test("R1 break-even: a cold cache costs the switch nothing, so any real saving pays", () => {
+  const warm = breakEven({ contextTokens: 80_000, avgOutput: 700, current: OPUS, proposed: HAIKU, medianStepsPerTurn: 3 });
+  assert.equal(warm?.worthIt, false, "held while warm: the rewrite is charged");
+  const cold = breakEven({ contextTokens: 80_000, avgOutput: 700, current: OPUS, proposed: HAIKU, medianStepsPerTurn: 3, cacheWarm: false });
+  assert.equal(cold?.switchCost, 0);
+  assert.equal(cold?.worthIt, true);
+  assert.deepEqual(breakEven({ contextTokens: 80_000, avgOutput: 700, current: OPUS, proposed: HAIKU, medianStepsPerTurn: 3, cacheWarm: true }), warm, "warm is today's answer");
+  // No saving is still no switch, cold or not.
+  assert.equal(breakEven({ contextTokens: 80_000, avgOutput: 700, current: OPUS, proposed: OPUS, medianStepsPerTurn: 10, cacheWarm: false })?.worthIt, false);
+});
+
+test("R1 effort break-even: a cold cache costs the effort switch nothing", () => {
+  assert.ok(OPUS !== null);
+  const warm = effortBreakEven({ contextTokens: 80_000, currentOutput: 2000, targetOutput: 1500, prices: OPUS, medianStepsPerTurn: 4 });
+  assert.equal(warm.worthIt, false);
+  const cold = effortBreakEven({ contextTokens: 80_000, currentOutput: 2000, targetOutput: 1500, prices: OPUS, medianStepsPerTurn: 4, cacheWarm: false });
+  assert.equal(cold.switchCost, 0);
+  assert.equal(cold.worthIt, true);
+});
+
+test("R1 stage: a downgrade held by break-even passes on a cold cache; hysteresis still holds", () => {
+  const held = stage({ pending: { tier: "simple", turns: 1 }, usage: { ...USAGE, medianStepsPerTurn: 1 } });
+  assert.equal(held.reason, "break-even");
+  const cold = stage({ pending: { tier: "simple", turns: 1 }, usage: { ...USAGE, medianStepsPerTurn: 1 }, cacheWarm: false });
+  assert.equal(cold.reason, "downgrade");
+  assert.equal(cold.changed, true);
+  assert.equal(cold.breakEven?.switchCost, 0);
+  assert.equal(stage({ usage: { ...USAGE, medianStepsPerTurn: 1 }, cacheWarm: false }).reason, "hysteresis");
+  assert.deepEqual(stage({ pending: { tier: "simple", turns: 1 }, usage: { ...USAGE, medianStepsPerTurn: 1 }, cacheWarm: true }), held);
+});
+
+test("R1 stage: an effort lowering held by break-even passes on a cold cache", () => {
+  const input = { ...ON_OPUS_XHIGH, jev: { tier: "complex", confidence: 0.9 }, effortOutput: OUTPUTS_THIN, pending: { tier: "complex", turns: 1, effort: "high" } } as const;
+  assert.equal(stage(input).reason, "effort-break-even");
+  const cold = stage({ ...input, cacheWarm: false });
+  assert.equal(cold.reason, "effort-lower");
+  assert.equal(cold.effort, "high");
+});
+
+test("R2: a cold switch is one the warm cache would have held", () => {
+  const coldInput = { ...STAGE_BASE, pending: { tier: "simple", turns: 1 }, usage: { ...USAGE, medianStepsPerTurn: 1 }, cacheWarm: false } as const;
+  assert.equal(switchedByColdCache(coldInput, decideStage(coldInput)), true);
+  // A switch that pays even while warm is not the cold cache's doing.
+  const paysAnyway = { ...coldInput, usage: USAGE };
+  assert.equal(decideStage(paysAnyway).changed, true);
+  assert.equal(switchedByColdCache(paysAnyway, decideStage(paysAnyway)), false);
+  // Warm, unknown, or no switch at all: never a cold switch.
+  const warmInput = { ...coldInput, cacheWarm: true };
+  assert.equal(switchedByColdCache(warmInput, decideStage(warmInput)), false);
+  const { cacheWarm: _unknown, ...unknownInput } = coldInput;
+  void _unknown;
+  assert.equal(switchedByColdCache(unknownInput, decideStage(unknownInput)), false);
+  const held = { ...coldInput, pending: null };
+  assert.equal(switchedByColdCache(held, decideStage(held)), false);
 });

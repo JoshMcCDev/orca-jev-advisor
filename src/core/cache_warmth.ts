@@ -1,0 +1,89 @@
+// ---------------------------------------------------------------------------
+// Prompt-cache warmth for the model router (odd/tasks/router-cold-switch.md,
+// R0). A model or effort switch rewrites the whole context, because the
+// cache is per model and per effort. After a gap longer than the cache TTL
+// that rewrite happens anyway, so the switch costs nothing extra.
+//
+// The engine's step usage has no 1h/5m split, so the TTL is read the way
+// cache-clock's `readTtl` reads it: the transcript tail's newest main-thread
+// (`!isSidechain`) assistant row says which bucket it wrote
+// (`message.usage.cache_creation.ephemeral_1h_input_tokens` or
+// `ephemeral_5m_input_tokens`). A pure cache read says neither, so the walk
+// looks further back.
+//
+// Unknown is warm: no TTL, no last request, or a malformed row keeps the
+// router exactly as it was before this file.
+//
+// Pure: no I/O, no clock (the caller passes `nowMs`).
+// ---------------------------------------------------------------------------
+
+import { isRecord } from "../guards.ts";
+
+export const CACHE_TTL_1H_MS = 60 * 60_000;
+export const CACHE_TTL_5M_MS = 5 * 60_000;
+
+/** The main thread's cache TTL and the time of its last request; null where unknown. */
+export interface CacheClock {
+  readonly ttlMs: number | null;
+  readonly lastMainAt: number | null;
+}
+
+function positive(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+/** The bucket one assistant row wrote, or null when it wrote none (a pure read, or no usage). */
+function bucketOf(message: unknown): number | null {
+  if (!isRecord(message) || !isRecord(message.usage) || !isRecord(message.usage.cache_creation)) return null;
+  const creation = message.usage.cache_creation;
+  if (positive(creation.ephemeral_1h_input_tokens)) return CACHE_TTL_1H_MS;
+  if (positive(creation.ephemeral_5m_input_tokens)) return CACHE_TTL_5M_MS;
+  return null;
+}
+
+/** Reads `tail -n <N> <transcript>`'s output, newest row last. */
+export function readCacheTail(tail: string): CacheClock {
+  let ttlMs: number | null = null;
+  let lastMainAt: number | null = null;
+  let sawMain = false;
+  const rows = tail.split("\n").reverse();
+  for (const row of rows) {
+    if (!row.includes('"assistant"')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed.type !== "assistant" || parsed.isSidechain === true) continue;
+    if (!sawMain) {
+      sawMain = true;
+      const at = typeof parsed.timestamp === "string" ? Date.parse(parsed.timestamp) : Number.NaN;
+      lastMainAt = Number.isFinite(at) ? at : null;
+    }
+    ttlMs = bucketOf(parsed.message);
+    if (ttlMs !== null) break;
+  }
+  return { ttlMs, lastMainAt };
+}
+
+/** true warm, false cold, null unknown (no TTL or no last request). */
+export function cacheWarmth(clock: CacheClock, nowMs: number): boolean | null {
+  if (clock.ttlMs === null || clock.lastMainAt === null) return null;
+  return nowMs - clock.lastMainAt < clock.ttlMs;
+}
+
+/** Whether a switch now would forfeit a warm cache. Unknown counts as warm. */
+export function cacheWarm(clock: CacheClock, nowMs: number): boolean {
+  return cacheWarmth(clock, nowMs) ?? true;
+}
+
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** A stored clock read back from `$.state`; anything malformed is unknown. */
+export function parseCacheClock(raw: unknown): CacheClock {
+  if (!isRecord(raw)) return { ttlMs: null, lastMainAt: null };
+  return { ttlMs: finiteOrNull(raw.ttlMs), lastMainAt: finiteOrNull(raw.lastMainAt) };
+}

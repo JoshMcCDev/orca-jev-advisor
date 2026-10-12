@@ -170,6 +170,42 @@ test("probe: more shapes, each read the way the rule says", () => {
   for (const [command, expected] of cases) assert.equal(own(command), expected, command);
 });
 
+// Gate secret guard G1 (odd/tasks/gate-secret-guard.md): staging past
+// .gitignore, or naming a secret path, is never plain own-tree work. `add -A`
+// and `add .` stay: they skip ignored files, and the push is the backstop.
+test("secret guard: a forced add, or an add naming a secret path, is not own-tree work", () => {
+  for (const command of [
+    "git add -f .env",
+    "git add --force .env",
+    "git add -fA",
+    "git add -Af .",
+    "git add -f -- config/x.json",
+    "git add .env && git commit -qm x",
+    "git add ./.env",
+    "git add -- config/.env.production",
+    "git add src/a.ts certs/server.pem",
+    "git add id_rsa",
+    "git add .npmrc",
+    `git -C ${PROJECT} add .env.local`,
+  ]) {
+    assert.equal(own(command), false, command);
+  }
+});
+
+test("secret guard: ordinary adds stay own-tree work", () => {
+  for (const command of [
+    "git add -A && git commit -qm wip",
+    "git add . && git commit -qm wip",
+    "git add -u",
+    "git add .env.example src/a.ts",
+    "git add .env.sample .env.template",
+    "git add -v src/a.ts",
+    "git add id_rsa.pub",
+  ]) {
+    assert.equal(own(command), true, command);
+  }
+});
+
 // 0.6.28 pre-release C: the agent must never rewrite its own harness through
 // a local allow -- Claude Code's settings and hooks, its agents, the MCP list.
 test("must stop: Claude Code's own configuration, in the tree or anywhere else", () => {

@@ -52,6 +52,18 @@ export type RouterSessionStats = {
 }
 
 /**
+ * Track R (odd/tasks/router-cold-switch.md): the main thread's prompt-cache
+ * clock. `ttlMs` is the bucket the newest main response wrote (1h or 5m, read
+ * from the transcript tail at `classic.Stop`); `lastMainAt` is when the last
+ * main-loop step answered. null where unknown, which counts as warm. Read
+ * back through `parseCacheClock` (src/core/cache_warmth.ts).
+ */
+export type RouterCacheState = {
+  ttlMs: number | null
+  lastMainAt: number | null
+}
+
+/**
  * JEV-061: the `kind` of the most recently submitted prompt's origin
  * (`PromptOrigin`, claude-code.d.ts), stamped by `prompt.submit` on every
  * submission -- before that hook's own early returns, so an empty prompt or
@@ -102,6 +114,6 @@ export type RunningSubagentsState = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; steward: StewardState; runningSubagents: RunningSubagentsState }
+    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; runningSubagents: RunningSubagentsState }
   }
 }

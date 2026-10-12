@@ -164,7 +164,8 @@ import { PENDING_ISOLATION_PLACE, absolutePath, agentPlace, cachedGitPlace, call
 import type { GitPlace, PlaceCache } from '../../../../src/core/agent_place.ts'
 import { subagentBand } from '../../../../src/core/subagent_band.ts'
 import type { KeptDecision } from '../../../../src/core/model_router_status.ts'
-import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt } from '../../../../src/core/model_router_stage.ts'
+import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt, switchedByColdCache } from '../../../../src/core/model_router_stage.ts'
+import { cacheWarmth, parseCacheClock, readCacheTail } from '../../../../src/core/cache_warmth.ts'
 import type { ActivityMessage, LiveRateLimit, EffortOutputs, SessionUsage, StageDecision, StageDecisionInput } from '../../../../src/core/model_router_stage.ts'
 import type { DestinationKind, QuotaBand, QuotaSource, SessionEffort, TeammateTaskSeen, TierEffort, TierEffortMap, TurnActivity } from '../../../../src/core/model_router_decide.ts'
 import { isTeammateCall, matchTeammateTask, rememberTeammateTask } from '../../../../src/core/teammate_route.ts'
@@ -174,7 +175,7 @@ import type { RouterDestination } from '../../../../src/core/model_router_destin
 import { decideSubagent, subagentStepEffort } from '../../../../src/core/model_router_subagent.ts'
 import type { SubagentDecision } from '../../../../src/core/model_router_subagent.ts'
 import { isPersonPromptOrigin } from '../../../../src/core/model_router_origin.ts'
-import type { RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardState } from '../types/index.d.ts'
+import type { RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardState } from '../types/index.d.ts'
 import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
 import type { StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
 import { stewardFromSettings } from '../../../../src/core/model_router_mode.ts'
@@ -1412,6 +1413,7 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
   const { tiers, band, quotaSource, tierEffort } = await resolveRouterAccount($, account)
   const destination = await resolveSessionDestination($, await $.session.cwd())
   const jev = await askTierJudgment($, options, promptText, activity, band, destination.destinationKind)
+  const cacheWarm = cacheWarmth(await readCacheClock($), await $.clock.now())
   const stageInput: StageDecisionInput = {
     tiers,
     tierEffort,
@@ -1424,17 +1426,23 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
     band,
     pending: sticky.pendingLower,
     usage: sessionUsageOf(sticky.stats),
+    // Track R: a known cold cache makes the switch's rewrite free; unknown counts as warm.
+    cacheWarm: cacheWarm ?? true,
   }
+  let decided: StageDecisionInput = stageInput
   let decision: StageDecision = decideStage(stageInput)
   // The account's real output medians are read only when an effort
   // lowering has come this far (0.6.2 E2): no file is read otherwise.
   if (decision.reason === 'effort-unknown-savings') {
     const effortOutput = await loadEffortOutputs($, account, sticky.model)
-    if (effortOutput !== null) decision = decideStage({ ...stageInput, effortOutput })
+    if (effortOutput !== null) {
+      decided = { ...stageInput, effortOutput }
+      decision = decideStage(decided)
+    }
   }
   const applied = mode === 'active' && decision.changed
   const at = new Date(await $.clock.now()).toISOString()
-  const record = routerDecisionRecord({ at, account, point: 'stage', decision, applied, quotaBand: band, quotaSource, breakEven: decision.breakEven, origin: originKind, effort: decision.effortTarget, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed), ...(jev?.margin === undefined ? {} : { margin: jev.margin }) })
+  const record = routerDecisionRecord({ at, account, point: 'stage', decision, applied, quotaBand: band, quotaSource, breakEven: decision.breakEven, origin: originKind, effort: decision.effortTarget, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed), cacheWarm, coldSwitch: switchedByColdCache(decided, decision), ...(jev?.margin === undefined ? {} : { margin: jev.margin }) })
   await appendRouterDecision($, at, `${JSON.stringify(record)}\n`)
 
   const next: RouterSticky = decision.changed
@@ -1474,6 +1482,35 @@ async function recordRouterStats($: EngineInterface, e: Frozen<TurnStepInput>, r
     outputSteps: stats.outputSteps + (usage === null ? 0 : 1),
   }
   await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' }, { ...sticky, stats: next })
+}
+
+/** Track R: the main loop's cache clock, as kept in `$.state`. */
+async function readCacheClock($: EngineInterface): Promise<RouterCacheState> {
+  return parseCacheClock((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'routerCache' })).value)
+}
+
+/** Track R: after each main step, when the main loop's cache was last refreshed (its response, never earlier than the request). */
+async function stampMainStep($: EngineInterface): Promise<void> {
+  const clock = await readCacheClock($)
+  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerCache' }, { ttlMs: clock.ttlMs, lastMainAt: await $.clock.now() })
+}
+
+/**
+ * Track R: at `classic.Stop`, the bucket the newest main response wrote
+ * (1h or 5m), read from the transcript tail the way cache-clock does. A
+ * tail with no answer keeps what is known; the later of the two request
+ * times is kept. Best-effort: any failure leaves the cache as it was.
+ */
+async function readCacheTtl($: EngineInterface, transcriptPath: string | undefined): Promise<void> {
+  if (transcriptPath === undefined || transcriptPath.length === 0) return
+  const result = await makeProcessRun($)(['tail', '-n', '300', transcriptPath])
+  if (result.exitCode !== 0) return
+  const tail = readCacheTail(result.stdout)
+  const stored = await readCacheClock($)
+  const lastMainAt = stored.lastMainAt === null ? tail.lastMainAt : tail.lastMainAt === null ? stored.lastMainAt : Math.max(stored.lastMainAt, tail.lastMainAt)
+  const ttlMs = tail.ttlMs ?? stored.ttlMs
+  if (ttlMs === stored.ttlMs && lastMainAt === stored.lastMainAt) return
+  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerCache' }, { ttlMs, lastMainAt })
 }
 
 /**
@@ -1822,6 +1859,11 @@ async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, nex
       await recordRouterStats($, e, r)
     } catch {
       // Best-effort: without stats a downgrade simply cannot pass break-even.
+    }
+    try {
+      await stampMainStep($)
+    } catch {
+      // Best-effort: with no stamp the cache reads unknown, which is warm.
     }
   }
   return r
@@ -2722,6 +2764,18 @@ export function register(on: On, options: PluginOptions): void {
       }
     }
     return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }))
+  })
+
+  // Track R: after each turn, which cache bucket (1h or 5m) the main thread wrote.
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const routerState = moduleState(await resolveFeatureModules($, modulesFile), 'model-router')
+      if (effectiveMode(routerState, routerMode) !== 'off') await readCacheTtl($, e.transcript_path)
+    } catch {
+      // The cache stays as known; the Stop is never held by it.
+    }
+    return result
   })
 
   on('agent.spawn', async ($, e, next) => {

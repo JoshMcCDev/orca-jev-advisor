@@ -16,6 +16,13 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.8.1
+
+- **A secret file no longer reaches a remote silently.** Until now, `git add -f .env`, `git add .env && git commit` and a push of a commit carrying `.env` went through with no question. The command gate now asks before staging, committing or pushing a file that looks like a secret (`.env`, private keys, `credentials*.json`, `.netrc`, `.git-credentials`, and `.npmrc`/`.pypirc` holding a literal token), and the question names the file. `.env.example`, `.env.sample` and `.env.template` are not secrets. A push is checked commit by commit, so a `.env` added and deleted again before the push is still caught. This check is always on while the Gate module is on; a remembered authorization or a cached answer never skips it.
+- **Model switches after a break are no longer held back.** Switching model or effort normally costs a cache rewrite, so the router waits until a switch pays for itself. After an idle gap longer than the prompt cache's lifetime the cache is cold anyway, so the router now treats that switch as free. The board's Model router card shows how many switches this allowed in the last 7 days.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.8.0
 
 A sixth module, **Verify done**, measures how often an agent ends a turn saying the work is done when the turn itself shows nothing verified it: it edited files and no test passed. It only measures. Nothing is blocked and no answer changes; what you get is a local log and a count, so that a week of data can decide whether a version that stops such a turn is worth building.

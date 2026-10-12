@@ -460,6 +460,12 @@ export interface RouterDecisionRecord {
   readonly fallbackReason?: EngineFallbackReason;
   /** 0.6.29 T8: the model named has a minimum engine version and the engine's own could not be read (it is then taken to support it). */
   readonly engineVersionUnknown?: true;
+  /** Track R: whether the prompt cache was warm when a stage decision weighed a switch; null unknown (which counts as warm). */
+  readonly cacheWarm?: boolean | null;
+  /** Track R, measure mode: a switch only the cold cache made pay, not applied. */
+  readonly wouldApplyCold?: true;
+  /** Track R, active mode: a switch only the cold cache made pay, applied. */
+  readonly appliedCold?: true;
 }
 
 export interface RouterDecisionRecordInput {
@@ -486,6 +492,10 @@ export interface RouterDecisionRecordInput {
   readonly workKindMargin?: number;
   /** 0.6.29 T8: `engineNotesOf(tiers, decision.proposed)`. */
   readonly engine?: EngineNotes;
+  /** Track R: whether the prompt cache was warm at a stage decision; null unknown; absent on rows that never weigh it. */
+  readonly cacheWarm?: boolean | null;
+  /** Track R: `switchedByColdCache` -- the switch passed break-even only because the cache was cold. */
+  readonly coldSwitch?: boolean;
 }
 
 export function routerDecisionRecord(input: RouterDecisionRecordInput): RouterDecisionRecord {
@@ -519,5 +529,7 @@ export function routerDecisionRecord(input: RouterDecisionRecordInput): RouterDe
     ...(input.workKindMargin === undefined ? {} : { workKindMargin: input.workKindMargin }),
     ...(input.engine?.fallbackReason === undefined ? {} : { fallbackReason: input.engine.fallbackReason }),
     ...(input.engine?.engineVersionUnknown === undefined ? {} : { engineVersionUnknown: input.engine.engineVersionUnknown }),
+    ...(input.cacheWarm === undefined ? {} : { cacheWarm: input.cacheWarm }),
+    ...(input.coldSwitch !== true ? {} : input.applied ? { appliedCold: true as const } : { wouldApplyCold: true as const }),
   };
 }

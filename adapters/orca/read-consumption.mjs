@@ -51,7 +51,7 @@ import {
   parseQuota,
   subagentShareTrigger,
 } from '../../src/core/consumption.ts'
-import { summarizeRouterDecisions } from '../../src/core/model_router_summary.ts'
+import { countColdSwitches, summarizeRouterDecisions } from '../../src/core/model_router_summary.ts'
 import {
   listHourlyFiles,
   MODEL_ROUTER_DECISIONS_FILE_PATTERN,
@@ -86,6 +86,7 @@ const CLAUDE_JSON_PATH = join(HOME, '.claude.json')
 
 const MODEL_ROUTER_WINDOW_MS = 24 * 60 * 60 * 1000
 const STEWARD_VERIFIED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const COLD_SWITCH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const PRUNE_AFTER_MS = 8 * 24 * 60 * 60 * 1000
 
 /**
@@ -197,9 +198,10 @@ async function main () {
     // toTurnUsageRecord) is exactly what summarizeRouterDecisions' own
     // usageRows parameter expects: it parses `agent`/`at`/`account`/`model`
     // itself.
+    // Track R: the switches a cold cache made free, over 7 days (they are rare).
     const modelRouter = decisionFiles.length === 0
       ? null
-      : summarizeRouterDecisions(decisionRows, rows, now, MODEL_ROUTER_WINDOW_MS)
+      : { ...summarizeRouterDecisions(decisionRows, rows, now, MODEL_ROUTER_WINDOW_MS), coldSwitches: countColdSwitches(decisionRows, now, COLD_SWITCH_WINDOW_MS) }
 
     const steward = stewardFiles.length === 0
       ? null

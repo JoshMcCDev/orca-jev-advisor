@@ -25,6 +25,7 @@ import { parseSeedPolicies } from '../../src/core/policy_seed.ts'
 import { gatePolicyFingerprint } from '../../src/core/gate_policy_fingerprint.ts'
 import { adviceRetryKey } from '../../src/core/gate_advice_retry.ts'
 import { gateDecisionFileName, gateDecisionFilesToRead } from '../../src/core/measurement_files.ts'
+import { parseGateDecisionRecords } from '../../src/core/gate_measurement.ts'
 import { GATE_CATALOG } from '../../src/core/i18n_gate.ts'
 import { translate } from '../../src/core/i18n.ts'
 
@@ -4177,4 +4178,281 @@ test("feature modules T2: a heredoc, sed -i, cp, mv or rm of the module state fi
   const records = gateLogRecords(home)
   assert.equal(records.length, 5)
   assert.ok(records.every((r) => r.source === 'local-rule' && r.verdict === 'deny'))
+})
+
+// ---------------------------------------------------------------------------
+// Gate secret guard (odd/tasks/gate-secret-guard.md). A secret file never
+// reaches a remote silently: staging one by force or by name, committing one,
+// or pushing a commit that touched one asks the person, naming the file. It
+// runs before the local allows, the remembered authorizations and the verdict
+// cache, and a policy or local-rule deny stays a deny. The origin is
+// GitHub-shaped but never contacted: its branches exist only as
+// remote-tracking refs written here.
+// ---------------------------------------------------------------------------
+
+/** A repository on `feat/x` with `main` on origin, `.env` gitignored and present; `upstream` also gives `feat/x` an upstream at its start. */
+function secretRepo ({ upstream = true } = {}) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'orca-jev-secret-')))
+  tempDirs.push(dir)
+  initRepo(dir)
+  git(['branch', '-M', 'main'], dir)
+  git(['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], dir)
+  writeFileSync(join(dir, '.gitignore'), '.env\n')
+  git(['add', '.gitignore'], dir)
+  git(['commit', '-q', '-m', 'ignore env'], dir)
+  git(['update-ref', 'refs/remotes/origin/main', 'main'], dir)
+  git(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'], dir)
+  git(['checkout', '-q', '-b', 'feat/x'], dir)
+  if (upstream) {
+    git(['update-ref', 'refs/remotes/origin/feat/x', 'feat/x'], dir)
+    git(['config', 'branch.feat/x.remote', 'origin'], dir)
+    git(['config', 'branch.feat/x.merge', 'refs/heads/feat/x'], dir)
+  }
+  writeFileSync(join(dir, '.env'), 'API_KEY=sk-test-0000\n')
+  return dir
+}
+
+/** Commits `path` on the current branch the way an agent would have, by force past .gitignore. */
+function commitSecret (dir, path = '.env') {
+  git(['add', '-f', path], dir)
+  git(['commit', '-q', '-m', `add ${path}`], dir)
+}
+
+/** Seeds one verdict for `command` under the key the hook computes from `cwd`, for a command that qualifies as an own-branch push today. */
+function seedOwnBranchPushVerdict (home, cwd, command, policies, entry) {
+  const existing = existsSync(verdictCachePath(home)) ? JSON.parse(readFileSync(verdictCachePath(home), 'utf8')) : {}
+  existing[computeCacheKey(command, cwd, home, { repoContext: computeRepoContextForTest(cwd), policies, localAllowKind: 'ownBranchPush' })] = entry
+  writeVerdictCacheEntries(home, existing)
+}
+
+/** The hook's answer with a key and a session, for the cache and authorization paths. */
+function keyedAnswerFor (home, command, cwd, sessionId) {
+  const payload = JSON.parse(run(home, command, { cwd, apiKey: 'test-key-unused-on-cache-hit', sessionId }))
+  return { permissionDecision: payload.hookSpecificOutput?.permissionDecision ?? 'none', reason: payload.hookSpecificOutput?.permissionDecisionReason ?? '', message: payload.systemMessage ?? '' }
+}
+
+function assertSecretAsk (home, answer, file) {
+  const record = gateLogExists(home) ? lastGateRecord(home) : null
+  assert.equal(answer.permissionDecision, 'ask', `expected a secret ask, got ${answer.permissionDecision} (${record?.stopReason}): ${answer.reason}`)
+  assert.ok(answer.reason.includes(file), `the ask names ${file}: ${answer.reason}`)
+  assert.equal(record.stopReason, 'secret-publish')
+  assert.equal(record.verdict, 'ask')
+  assert.equal(record.source, 'local-rule')
+}
+
+test('secret guard G0: git add -f .env asks, naming the file', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  assertSecretAsk(home, answerFor(home, 'git add -f .env', repo), '.env')
+})
+
+test('secret guard G0: git add .env && git commit asks, naming the file', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  assertSecretAsk(home, answerFor(home, 'git add .env && git commit -qm x', repo), '.env')
+})
+
+test('secret guard G1: git add -f . stages the ignored .env, and asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  assertSecretAsk(home, answerFor(home, 'git add -f . && git commit -qm all', repo), '.env')
+})
+
+test('secret guard G1: templates and add -A with an ignored .env stay own-tree work, with no ask', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  for (const name of ['.env.example', '.env.sample', '.env.template']) writeFileSync(join(repo, name), 'API_KEY=\n')
+  for (const command of ['git add .env.example .env.sample .env.template && git commit -qm templates', 'git add -A && git commit -qm wip']) {
+    const answer = answerFor(home, command, repo)
+    assert.equal(answer.permissionDecision, 'allow', `${command}: ${answer.reason}`)
+    assert.equal(lastGateRecord(home).stopReason, 'own-tree', command)
+  }
+})
+
+test('secret guard G2: a commit with .env already staged asks, naming the file; a clean one stays own-tree work', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  writeFileSync(join(repo, 'a.ts'), 'a\n')
+  git(['add', 'a.ts'], repo)
+  const clean = answerFor(home, 'git commit -qm a', repo)
+  assert.equal(clean.permissionDecision, 'allow', clean.reason)
+  assert.equal(lastGateRecord(home).stopReason, 'own-tree')
+  git(['add', '-f', '.env'], repo)
+  assertSecretAsk(home, answerFor(home, 'git commit -qm x', repo), '.env')
+})
+
+test('secret guard G2: commit -a with a modified tracked .env asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeFileSync(join(repo, '.env'), 'API_KEY=sk-test-1111\n')
+  assertSecretAsk(home, answerFor(home, 'git commit -am rotate', repo), '.env')
+})
+
+test('secret guard G3: a .env added and then deleted inside the outgoing range still asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  git(['rm', '-q', '--cached', '.env'], repo)
+  git(['commit', '-q', '-m', 'remove env'], repo)
+  assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), '.env')
+})
+
+test('secret guard G3: an outgoing range too large to list in full still asks about the secret in it', () => {
+  const home = makeHome()
+  const repo = secretRepo({ upstream: false })
+  // Over a mebibyte of `A\t<path>` lines, the size of a first push of a
+  // generated or vendored tree: git must list only the candidate names.
+  const bulk = join(repo, 'generated', 'a-deeply-nested-directory-of-generated-sources-for-the-gate-test')
+  mkdirSync(bulk, { recursive: true })
+  for (let index = 0; index < 13000; index += 1) writeFileSync(join(bulk, `generated-source-file-number-${String(index).padStart(5, '0')}.ts`), '')
+  git(['add', '-A'], repo)
+  git(['commit', '-q', '-m', 'generated'], repo)
+  commitSecret(repo)
+  assertSecretAsk(home, answerFor(home, 'git push -u origin feat/x', repo), '.env')
+})
+
+test('secret guard G3: each kind of secret file in an outgoing range asks, read through real git', () => {
+  const cases = [
+    ['config/.env.production', 'API_KEY=1\n'],
+    ['certs/x.pem', '-----BEGIN PRIVATE KEY-----\n'],
+    ['.ssh/id_ed25519', '-----BEGIN OPENSSH PRIVATE KEY-----\n'],
+    ['.npmrc', '//registry.npmjs.org/:_authToken=npm_abcdef0123456789\n'],
+  ]
+  for (const [path, content] of cases) {
+    const home = makeHome()
+    const repo = secretRepo()
+    mkdirSync(dirname(join(repo, path)), { recursive: true })
+    writeFileSync(join(repo, path), content)
+    commitSecret(repo, path)
+    assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), path)
+  }
+})
+
+test('secret guard G3: a new branch with no upstream is read from where it left origin\'s default branch', () => {
+  const home = makeHome()
+  const repo = secretRepo({ upstream: false })
+  commitSecret(repo)
+  assertSecretAsk(home, answerFor(home, 'git push -u origin feat/x', repo), '.env')
+})
+
+test('secret guard G3: a secret already on origin\'s default branch is not this push\'s, and a clean push stays a local allow', () => {
+  const home = makeHome()
+  const repo = secretRepo({ upstream: false })
+  git(['checkout', '-q', 'main'], repo)
+  writeFileSync(join(repo, 'old.pem'), '-----BEGIN PRIVATE KEY-----\n')
+  commitSecret(repo, 'old.pem')
+  git(['update-ref', 'refs/remotes/origin/main', 'main'], repo)
+  git(['checkout', '-q', 'feat/x'], repo)
+  git(['rebase', '-q', 'main'], repo)
+  writeFileSync(join(repo, 'a.ts'), 'a\n')
+  git(['add', 'a.ts'], repo)
+  git(['commit', '-q', '-m', 'a'], repo)
+  assertAllowedByOwnBranchPush(home, 'git push -u origin feat/x', repo)
+})
+
+const NO_SECRETS_OUT = { id: 'no_secrets_out', rule: 'Nothing leaves this repository without review.', kind: 'prohibits', scope: 'command' }
+
+/** Seeds one verdict for `command` under the key the hook computes once the secret guard has switched the local allows off. */
+function seedSecretPushVerdict (home, cwd, command, policies, entry) {
+  const existing = existsSync(verdictCachePath(home)) ? JSON.parse(readFileSync(verdictCachePath(home), 'utf8')) : {}
+  existing[computeCacheKey(command, cwd, home, { repoContext: computeRepoContextForTest(cwd), policies })] = entry
+  writeVerdictCacheEntries(home, existing)
+}
+
+test('secret guard G4: a policy deny of a push carrying .env stays a deny', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const command = 'git push origin feat/x'
+  writePoliciesMirror(home, [NO_SECRETS_OUT])
+  seedSecretPushVerdict(home, repo, command, [NO_SECRETS_OUT], { decision: 'deny', reason: 'forbidden by no_secrets_out', policyId: 'no_secrets_out', at: Date.now() })
+  const answer = keyedAnswerFor(home, command, repo, 'secret-policy-deny')
+  assert.equal(answer.permissionDecision, 'deny', answer.reason)
+  assert.match(answer.message, /no_secrets_out/)
+})
+
+test('secret guard G4: with a prohibiting policy that does not stop it, or no key to ask, the push still asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const command = 'git push origin feat/x'
+  writePoliciesMirror(home, [NO_SECRETS_OUT])
+  assertSecretAsk(home, answerFor(home, command, repo), '.env')
+  seedSecretPushVerdict(home, repo, command, [NO_SECRETS_OUT], { decision: 'allow', reason: 'not covered', at: Date.now() })
+  assertSecretAsk(home, keyedAnswerFor(home, command, repo, 'secret-policy-allow'), '.env')
+})
+
+test('secret guard G4: a local-rule deny stays a deny', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const answer = answerFor(home, 'git push origin feat/x:main', repo)
+  assert.equal(answer.permissionDecision, 'deny', answer.reason)
+  assert.equal(lastGateRecord(home).stopReason, 'local-rule')
+})
+
+test('secret guard G4: a local rule switched off to an advice never lets a secret through on its retry', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeDenyTierConfig(home, { denyForcePush: false })
+  for (let attempt = 0; attempt < 2; attempt += 1) assertSecretAsk(home, keyedAnswerFor(home, 'git push --force origin feat/x', repo, 'secret-advice-retry'), '.env')
+})
+
+test('secret guard G4: the ask is never cached or remembered, and a retry in the same session asks again', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeAuthorizations(home, {})
+  for (let attempt = 0; attempt < 2; attempt += 1) assertSecretAsk(home, keyedAnswerFor(home, 'git push origin feat/x', repo, 'secret-retry'), '.env')
+  assert.equal(existsSync(verdictCachePath(home)), false, 'no verdict is cached for a finding that depends on the repository')
+  assert.deepEqual(readAuthorizations(home).repos, {}, 'nothing is remembered')
+})
+
+test('secret guard G5: the ask names the file, the commit and why, in Spanish and in English, and its row parses', () => {
+  const repo = secretRepo()
+  commitSecret(repo)
+  const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+  const es = makeHome()
+  writeLocale(es, 'es')
+  const spanish = answerFor(es, 'git push origin feat/x', repo)
+  assertSecretAsk(es, spanish, '.env')
+  assert.match(spanish.reason, new RegExp(`Este push sube \\.env, del commit ${commit},.*no se puede retirar`))
+  assert.match(spanish.message, /^jev · \.env parece un archivo secreto, decide tú: `git push origin feat\/x`$/)
+  const en = makeHome()
+  const english = answerFor(en, 'git add -f .env', repo)
+  assert.match(english.reason, /^This stages \.env for a commit\. It looks like a secret file \(keys, tokens or passwords\): once it reaches a remote, it cannot be taken back\.$/)
+  assert.match(english.message, /^jev · \.env looks like a secret file, you decide: `git add -f \.env`$/)
+  const parsed = parseGateDecisionRecords(gateLogText(en))
+  assert.equal(parsed.length, 1, 'the panel and the measurements read the row, never drop it')
+  assert.equal(parsed[0].stopReason, 'secret-publish')
+})
+
+test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), '.env')
+})
+
+test('secret guard G0: with push-branch authorized for the repository, a push carrying .env still asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const command = 'git push origin feat/x'
+  writePoliciesMirror(home, [QUEUE_POLICY])
+  writeAuthorizations(home, { [WIDGETS]: { 'push-branch': { firstAt: new Date().toISOString(), lastAt: new Date().toISOString(), uses: 1 } } })
+  seedOwnBranchPushVerdict(home, repo, command, [QUEUE_POLICY], { decision: 'advise', reason: 'it publishes to the shared remote', at: Date.now() })
+  assertSecretAsk(home, keyedAnswerFor(home, command, repo, 'secret-authorized'), '.env')
+})
+
+test('secret guard G0: a cached allow for the push shape is never replayed over a push carrying .env', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const command = 'git push origin feat/x'
+  writePoliciesMirror(home, [QUEUE_POLICY])
+  seedOwnBranchPushVerdict(home, repo, command, [QUEUE_POLICY], { decision: 'allow', reason: 'clean', at: Date.now() })
+  assertSecretAsk(home, keyedAnswerFor(home, command, repo, 'secret-cache'), '.env')
 })

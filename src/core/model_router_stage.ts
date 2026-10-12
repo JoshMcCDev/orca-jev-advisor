@@ -140,6 +140,8 @@ export interface BreakEvenInput {
   readonly current: ModelPrices | null;
   readonly proposed: ModelPrices | null;
   readonly medianStepsPerTurn: number | null;
+  /** Track R: false only when the cache is known cold, so the rewrite happens anyway and the switch costs nothing. Absent: warm. */
+  readonly cacheWarm?: boolean;
 }
 
 export interface BreakEven {
@@ -156,7 +158,7 @@ export function breakEven(input: BreakEvenInput): BreakEven | null {
   // A model priced by prompt length is read on the card the context falls on.
   const current = ratesForPrompt(input.current, input.contextTokens);
   const proposed = ratesForPrompt(input.proposed, input.contextTokens);
-  const switchCost = input.contextTokens * proposed.cacheWrite * PER_TOKEN;
+  const switchCost = input.cacheWarm === false ? 0 : input.contextTokens * proposed.cacheWrite * PER_TOKEN;
   const stepSaving = input.contextTokens * (current.cacheRead - proposed.cacheRead) * PER_TOKEN + input.avgOutput * (current.output - proposed.output) * PER_TOKEN;
   const steps = expectedSteps(input.medianStepsPerTurn);
   return { contextTokens: input.contextTokens, switchCost, stepSaving, expectedSteps: steps, worthIt: stepSaving * steps > BREAK_EVEN_MARGIN * switchCost };
@@ -169,6 +171,8 @@ export interface EffortBreakEvenInput {
   readonly targetOutput: number;
   readonly prices: ModelPrices;
   readonly medianStepsPerTurn: number | null;
+  /** Track R: false only when the cache is known cold (the switch then costs nothing). Absent: warm. */
+  readonly cacheWarm?: boolean;
 }
 
 /**
@@ -180,7 +184,7 @@ export interface EffortBreakEvenInput {
  */
 export function effortBreakEven(input: EffortBreakEvenInput): BreakEven {
   const rates = ratesForPrompt(input.prices, input.contextTokens);
-  const switchCost = input.contextTokens * rates.cacheWrite * PER_TOKEN;
+  const switchCost = input.cacheWarm === false ? 0 : input.contextTokens * rates.cacheWrite * PER_TOKEN;
   const stepSaving = (input.currentOutput - input.targetOutput) * rates.output * PER_TOKEN;
   const steps = expectedSteps(input.medianStepsPerTurn);
   return { contextTokens: input.contextTokens, switchCost, stepSaving, expectedSteps: steps, worthIt: stepSaving * steps > BREAK_EVEN_MARGIN * switchCost };
@@ -396,6 +400,8 @@ export interface StageDecisionInput {
   readonly tierEffort?: TierEffortMap;
   /** Real output medians per effort on the current model; null or absent: unknown, so no effort lowering (0.6.2 E2). */
   readonly effortOutput?: EffortOutputs | null;
+  /** Track R: false only when the prompt cache is known cold, which makes a switch's rewrite free; absent or true: warm (unknown counts as warm). */
+  readonly cacheWarm?: boolean;
 }
 
 export type StageReason =
@@ -432,6 +438,11 @@ function effortBelowOwn(input: StageDecisionInput): boolean {
   if (own === null) return false;
   const current = effortRank(input.currentEffort);
   return current === null || current < own;
+}
+
+/** Track R: the break-even inputs' cache flag, set only when the cache is known cold. */
+function coldOf(input: StageDecisionInput): { readonly cacheWarm?: false } {
+  return input.cacheWarm === false ? { cacheWarm: false } : {};
 }
 
 /** A decision the context-window floor shaped names it, unless another guard already explains it. */
@@ -528,13 +539,23 @@ export function decideStage(input: StageDecisionInput): StageDecision {
   const result =
     input.usage === null
       ? null
-      : breakEven({ contextTokens: input.usage.contextTokens, avgOutput: input.usage.avgOutput, current: prices.current, proposed: prices.proposed, medianStepsPerTurn: input.usage.medianStepsPerTurn });
+      : breakEven({ contextTokens: input.usage.contextTokens, avgOutput: input.usage.avgOutput, current: prices.current, proposed: prices.proposed, medianStepsPerTurn: input.usage.medianStepsPerTurn, ...coldOf(input) });
   if (result === null || !result.worthIt) return out({ ...stay, ...base, reason: "break-even", guard: null, pending, breakEven: result });
   // Back down to the session's own model: its exact id (a `[1m]` suffix
   // included) and its own effort, so nothing is rewritten any more (N1).
   const model = exactModelId(target.modelId, input.configuredModel);
   const effort = model === input.configuredModel ? input.configuredEffort : targetEffort;
   return out({ ...base, current, model, effort, changed: true, reason: "downgrade", guard: null, pending: null, breakEven: result, effortTarget: null });
+}
+
+/**
+ * Track R: whether `decision` switches only because the cache is known
+ * cold -- the same input with a warm cache would have held. Hysteresis and
+ * every guard are the same on both sides, so this is break-even alone.
+ */
+export function switchedByColdCache(input: StageDecisionInput, decision: StageDecision): boolean {
+  if (input.cacheWarm !== false || !decision.changed) return false;
+  return !decideStage({ ...input, cacheWarm: true }).changed;
 }
 
 /**
@@ -573,7 +594,7 @@ function decideEffort(input: StageDecisionInput, base: Pick<StageDecision, "tier
   const result =
     input.usage === null
       ? null
-      : effortBreakEven({ contextTokens: input.usage.contextTokens, currentOutput, targetOutput, prices, medianStepsPerTurn: input.usage.medianStepsPerTurn });
+      : effortBreakEven({ contextTokens: input.usage.contextTokens, currentOutput, targetOutput, prices, medianStepsPerTurn: input.usage.medianStepsPerTurn, ...coldOf(input) });
   if (result === null || !result.worthIt) return { ...stay, reason: "effort-break-even", pending, breakEven: result, effortTarget: targetEffort };
   return { ...stay, effort: targetEffort, changed: true, reason: "effort-lower", pending: null, breakEven: result, effortTarget: targetEffort };
 }

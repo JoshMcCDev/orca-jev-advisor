@@ -103,6 +103,9 @@ import type { HumanQueueEntry } from '../../src/core/human_queue.ts'
 import { TEAM_OWNERS_MIRROR_FILE, parseTeamOwners } from '../../src/core/team_owners.ts'
 import { TRUSTED_PROGRAMS_MIRROR_FILE, parseTrustedPrograms } from '../../src/core/trusted_programs.ts'
 import { qualifiesForLocalGitAllow } from '../../src/core/push_own_branch.ts'
+import { findSecretPublish } from '../../src/core/secret_publish.ts'
+import { SECRET_PATH_GLOBS } from '../../src/core/secret_paths.ts'
+import type { SecretPublishFinding, SecretPublishReader, SecretPublishResult } from '../../src/core/secret_publish.ts'
 import { deliveryClassesOf } from '../../src/core/delivery_class.ts'
 import type { DeliveryClass } from '../../src/core/delivery_class.ts'
 import { AUTHORIZATIONS_FILE, EMPTY_AUTHORIZATIONS, isAuthorized, parseAuthorizations, pruneExpired, recordAuthorization, repoIdentity, repoSpecIdentity, touchAuthorization } from '../../src/core/gate_authorizations.ts'
@@ -1996,6 +1999,24 @@ function containedEffectInput(cwd: string): ContainedEffectInput {
   }
 }
 
+/**
+ * Gate secret guard G6: the temp roots as the environment names them and as
+ * they really are, for the copy Jev reads -- a command spells a scratchpad
+ * either way. Never a Windows path.
+ */
+function jevTempRoots(): readonly string[] {
+  if (PLATFORM === 'win32') return []
+  const named = tempRootsFromEnvironment(process.env, tmpdir(), process.getuid?.() ?? null)
+  const real = named.flatMap((root) => {
+    try {
+      return [realpathSync(root)]
+    } catch {
+      return []
+    }
+  })
+  return [...new Set([...named, ...real])]
+}
+
 /** The own-tree reading of this process's filesystem (0.6.28 T6), shared with the trusted reading. */
 function ownTreeInput(): OwnTreeInput {
   return {
@@ -2035,6 +2056,83 @@ function commandIsOwnTreeWork(command: string, cwd: string): boolean {
   } catch {
     return false
   }
+}
+
+/** git lists only the candidate names (secret_paths.ts), from the repository root wherever the command runs: a large range stays small. */
+const SECRET_PATHSPECS: readonly string[] = SECRET_PATH_GLOBS.map((glob) => `:(top,glob,icase)${glob}`)
+
+/** Larger than this, a file is not read for a credential: no `.npmrc` or `.pypirc` is. */
+const SECRET_CONTENT_MAX_BYTES = 64 * 1024
+
+/**
+ * Gate secret guard: what src/core/secret_publish.ts reads from this
+ * process's repositories -- `git add --dry-run` for a forced add, and a
+ * by-content file's text. Every read fails to null ("unknown").
+ */
+const SECRET_PUBLISH_READER: SecretPublishReader = {
+  forcedAddPaths: (dir, args) => {
+    const out = gitOutput(['add', '--dry-run', '--force', ...args], dir)
+    if (out === null) return null
+    return out.split('\n').flatMap((line) => {
+      const match = /^add '(.*)'$/.exec(line)
+      return match === null ? [] : [match[1] ?? '']
+    })
+  },
+  workingContent: (dir, path) => readSecretCandidate(resolve(dir, path)),
+  stagedPaths: (dir) => nulSeparated(gitOutput(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=d', '-z', '--', ...SECRET_PATHSPECS], dir)),
+  modifiedTrackedPaths: (dir) => nulSeparated(gitOutput(['diff', '--name-only', '--no-renames', '--diff-filter=d', '-z', '--', ...SECRET_PATHSPECS], dir)),
+  indexContent: (dir, path) => gitOutput(['show', `:${path}`], dir),
+  treeContent: (dir, path) => {
+    const root = gitOutput(['rev-parse', '--show-toplevel'], dir)?.trim()
+    return root === undefined || root.length === 0 ? null : readSecretCandidate(join(root, path))
+  },
+  // Not yet on the remote: every commit no remote-tracking branch of it has.
+  // With an upstream that is `@{u}..`; for a new branch it starts where the
+  // branch left origin's default branch; a commit already on any branch of
+  // that remote is not sent again. A file added then deleted in the range
+  // still shows, in the commit that added it. A source that names nothing
+  // (`--ignore-missing`) and a directory that is no repository send nothing:
+  // that push fails on its own.
+  outgoingLog: (dir, sources, remote) =>
+    gitOutput(['-c', 'core.quotePath=false', 'log', '--ignore-missing', '--format=commit %h', '--name-status', '--no-renames', ...sources, '--not', remote === null ? '--remotes' : `--remotes=${remote}`, '--', ...SECRET_PATHSPECS], dir) ??
+    (gitOutput(['rev-parse', '--git-dir'], dir) === null ? '' : null),
+  commitContent: (dir, commit, path) => gitOutput(['show', `${commit}:${path}`], dir),
+}
+
+/** A small file's text, or null when it is missing, unreadable or too large to be a credential file. */
+function readSecretCandidate(file: string): string | null {
+  try {
+    return statSync(file).size > SECRET_CONTENT_MAX_BYTES ? null : readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+/** git's `-z` output as its paths; null stays null ("unknown"). */
+function nulSeparated(out: string | null): readonly string[] | null {
+  return out === null ? null : out.split('\0').filter((path) => path.length > 0)
+}
+
+/** Whether `command` stages, commits or pushes a secret path; an unexpected throw is "unknown", never a silent clean. */
+function readSecretPublish(command: string, cwd: string): SecretPublishResult {
+  try {
+    return findSecretPublish(command, cwd, homedir(), SECRET_PUBLISH_READER)
+  } catch {
+    return { kind: 'unknown' }
+  }
+}
+
+/**
+ * The secret guard's ask: the person decides, with the file and the reason
+ * in front of them. Recorded as a local rule (`secret-publish`), never
+ * cached and never remembered as an authorization -- the finding depends on
+ * the repository's state, not on the command's shape.
+ */
+function emitSecretPublishAsk(finding: SecretPublishFinding, command: string, actingCwd: string, toolUseId: string | null, teamInternal: boolean): void {
+  appendGateRecord(actingCwd, command, 'local-rule', 'ask', null, 'secret-publish', null, teamInternal)
+  appendPendingApproval(toolUseId, actingCwd, command, null, null, { reversible: null, external: null, consequence: null }, GATE_CONSEQUENCE_CEILING, 'secret-publish', null)
+  const segment = truncateForPersonLine(affectedSegments(command)[0] ?? command)
+  emit('ask', t(`secretPublish.${finding.kind}`, { file: finding.path, commit: finding.commit ?? '' }), t('secretPublishLine', { file: finding.path, segment }))
 }
 
 /** A command that qualifies for a local allow, which kind, and the trusted programs it runs (T7) -- see src/core/local_allow.ts. */
@@ -2141,6 +2239,18 @@ async function main(): Promise<void> {
       return
     }
     if (firstAdvice === null) firstAdvice = { why, kind: 'toggle-off', evaluate }
+  }
+  // Gate secret guard (odd/tasks/gate-secret-guard.md): whether the command
+  // stages, commits or pushes a secret path, read once the local deny rules
+  // have had their say. A rule switched off (or matched only in interpreter
+  // code) would only advise, and its identical retry passes -- so a finding
+  // turns that advice into the secret ask. Read only after the rules: a deny
+  // that stands needs no git read.
+  const secretPublish: SecretPublishResult = mentionOnly ? { kind: 'clean' } : readSecretPublish(inspected, cwd)
+  const secretFinding = secretPublish.kind === 'found' ? secretPublish.finding : null
+  if (firstAdvice !== null && secretFinding !== null) {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, false)
+    return
   }
   if (firstAdvice !== null) {
     const { why, kind, evaluate } = firstAdvice
@@ -2296,16 +2406,36 @@ async function main(): Promise<void> {
   // tree on a working branch -- the effect of Claude Code's own Edit and
   // Write tools, which never reach this gate -- qualify the same way, when
   // nothing in the text names a shared branch (src/core/local_allow.ts).
-  const localGitAllow: LocalGitAllowResult = mentionOnly ? { qualifies: false } : qualifiesForLocalGitAllow({ command, cwd })
+  //
+  // Gate secret guard (odd/tasks/gate-secret-guard.md): a command that
+  // stages, commits or pushes a secret path asks the person, naming the
+  // file, before any local allow, the advice retry pass, the remembered
+  // authorizations or the verdict cache could let it through -- a pushed key
+  // cannot be taken back. The local deny rules above already had their say.
+  // A read git could not answer is no evidence of a secret: it only keeps
+  // the command off the local allows, so the ordinary path judges it.
+  //
+  // A team policy that prohibits is the one thing stronger than this ask: when
+  // one survives filtering, the cache and Jev still judge the command, and
+  // only their policy deny is kept -- anything else, no key or no answer,
+  // becomes this ask (secretFinding, read above after the local rules).
+  if (secretFinding !== null && !commandScopedPolicies.some((policy) => migratePolicyKind(policy.kind) === 'prohibits')) {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+    return
+  }
+  const localAllowsOff = secretPublish.kind !== 'clean'
+  const localGitAllow: LocalGitAllowResult = mentionOnly || localAllowsOff ? { qualifies: false } : qualifiesForLocalGitAllow({ command, cwd })
   // 0.6.28 T7: so does a line of programs the person trusted in the panel.
-  const trustedRun = localGitAllow.qualifies || namesProtected ? null : trustedProgramsInCommand(command, cwd)
-  const localAllow: LocalAllow = localGitAllow.qualifies
-    ? { qualifies: true, kind: localGitAllow.reasonKind ?? 'ownBranchPush', programs: [] }
-    : !namesProtected && commandIsOwnTreeWork(command, cwd)
-      ? { qualifies: true, kind: 'ownTree', programs: [] }
-      : trustedRun !== null
-        ? { qualifies: true, kind: 'trusted', programs: trustedRun }
-        : { qualifies: false }
+  const trustedRun = localGitAllow.qualifies || namesProtected || localAllowsOff ? null : trustedProgramsInCommand(command, cwd)
+  const localAllow: LocalAllow = localAllowsOff
+    ? { qualifies: false }
+    : localGitAllow.qualifies
+      ? { qualifies: true, kind: localGitAllow.reasonKind ?? 'ownBranchPush', programs: [] }
+      : !namesProtected && commandIsOwnTreeWork(command, cwd)
+        ? { qualifies: true, kind: 'ownTree', programs: [] }
+        : trustedRun !== null
+          ? { qualifies: true, kind: 'trusted', programs: trustedRun }
+          : { qualifies: false }
   if (localAllow.qualifies && commandScopedPolicies.length === 0) {
     appendGateRecord(actingCwd, command, 'local-rule', 'allow', null, localAllowStopReason(localAllow.kind), null, teamInternal)
     emit('allow', localAllowReason(localAllow))
@@ -2323,13 +2453,17 @@ async function main(): Promise<void> {
   // costs neither a wasted network round trip nor even the no-key notice
   // machinery below -- true for an uncacheable command shape exactly as much
   // as a cacheable one.
-  if (tryAdviceRetryPass(command, cwd, actingCwd, sessionId, 'jev', null, teamInternal)) return
+  if (secretFinding === null && tryAdviceRetryPass(command, cwd, actingCwd, sessionId, 'jev', null, teamInternal)) return
 
   const apiKey = await resolveApiKey()
   const previouslyWarnedNoKey = readNoKeyWarned()
   const noKeyNotice = decideNoKeyNotice(apiKey !== null, previouslyWarnedNoKey)
   if (noKeyNotice.nextWarned !== previouslyWarnedNoKey) writeNoKeyWarned(noKeyNotice.nextWarned)
   if (apiKey === null) {
+    if (secretFinding !== null) {
+      emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+      return
+    }
     if (noKeyNotice.shouldWarn) passThroughWithNotice(t('noApiKey'))
     passThrough()
   }
@@ -2353,7 +2487,8 @@ async function main(): Promise<void> {
   // keeps it literal) and the repository and branch it is pushed from.
   const repoFacts = readRepoFacts(actingCwd)
   const context = renderRepoContext(repoFacts, IDENTITY_NAMES) + (crossRepoSentence !== null ? ` ${crossRepoSentence}` : '')
-  const jevNames = createJevPseudonyms()
+  // G6 (odd/tasks/gate-secret-guard.md): a temp-root path reads as one.
+  const jevNames = createJevPseudonyms({ tempRoots: jevTempRoots() })
   const jevCrossRepoSentence = targetLocations.length > 0 ? buildCrossRepoSentence(sessionLocation, targetLocations, jevNames) : null
   const pushSentence = mentionOnly || !/\bpush\b/.test(inspected) ? null : buildPushDestinationSentence(pushes, jevNames)
   // 0.6.17 T1 (JEVADV-93): a `gh` merge says what it goes through -- a pull
@@ -2384,6 +2519,11 @@ async function main(): Promise<void> {
   const key = cacheKey(command, context, cwd, matchedDestination?.id ?? null, catalogMatch?.treeRoot ?? null, commandScopedPolicies, matchedDestination?.autonomy?.consequenceCeiling, localAllow.qualifies ? localAllow.kind : null)
   const cache = key === null ? {} : readCache()
   const hit = key === null ? undefined : cache[key]
+  // Secret guard: only a cached policy deny is replayed over a secret.
+  if (secretFinding !== null && hit !== undefined && hit.decision !== 'deny') {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+    return
+  }
   if (hit !== undefined) {
     // An 'advise' hit is never replayed as a canned line: recoverability
     // depends on the CURRENT git status, which the shape-only cache key
@@ -2455,6 +2595,13 @@ async function main(): Promise<void> {
   const jevStartedAt = Date.now()
   const outcome = await askJev(apiKey, command, jevContext, jevNames, localAllow, matchedDestination, commandScopedPolicies, cwd)
   const jevLatencyMs = Date.now() - jevStartedAt
+
+  // Secret guard: only a policy deny from Jev is stronger than the ask; no
+  // answer, an allow, an advice or a policy ask all become the ask, uncached.
+  if (secretFinding !== null && !(outcome.kind === 'verdict' && outcome.decision === 'deny' && outcome.policyId !== null)) {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+    return
+  }
 
   if (outcome.kind === 'none') {
     // The decision is a truthful 'allow' (failing open is correct and must
