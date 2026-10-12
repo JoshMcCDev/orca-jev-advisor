@@ -257,6 +257,41 @@ export function detectCiTriggers(call: CiBashCall, base: string | null, home: st
   return triggers;
 }
 
+/** A cheap test, before any lookup, of whether a Bash call can start a watch at all: a push or pull-request command in it, or the engine reporting a git operation. */
+export function couldStartCiWatch(command: string, hasGitOperation: boolean): boolean {
+  return hasGitOperation || /\bgit\b[^\n]*\bpush\b/.test(command) || /\bgh\b[^\n]*\bpr\b[^\n]*\b(create|merge)\b/.test(command);
+}
+
+/**
+ * A finished Bash call from what `next(e)` resolved to (`{ result, text,
+ * isError }` from core); null when the call was refused or the answer is not
+ * a tool result at all. The model's own text is the output; failing that,
+ * the result's stdout and stderr.
+ */
+export function ciBashCallFrom(command: string, outcome: unknown): CiBashCall | null {
+  if (!isRecord(outcome) || typeof outcome["deny"] === "string") return null;
+  const result = outcome["result"];
+  const body = isRecord(result) ? result : null;
+  const output = typeof outcome["text"] === "string" ? outcome["text"] : body === null ? "" : [body["stdout"], body["stderr"]].filter((part): part is string => typeof part === "string").join("\n");
+  return { command, isError: outcome["isError"] === true, output, gitOperation: body === null ? undefined : body["gitOperation"] };
+}
+
+/** The merge commit and the branch it landed on, from `gh pr view --json mergeCommit,baseRefName`; null while there is no merge commit (a merge still queued). */
+export function parsePrMergeView(stdout: string): { readonly sha: string; readonly branch: string | null } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const merge = parsed["mergeCommit"];
+  const oid = isRecord(merge) ? merge["oid"] : undefined;
+  if (typeof oid !== "string" || oid.length === 0) return null;
+  const branch = parsed["baseRefName"];
+  return { sha: oid, branch: typeof branch === "string" && branch.length > 0 ? branch : null };
+}
+
 // ---------------------------------------------------------------------------
 // The agent's own waiting: what a notice would replace
 // ---------------------------------------------------------------------------

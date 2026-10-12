@@ -84,10 +84,20 @@ interface FakeHost {
   engineVersion: { version: string; base?: string } | null;
   /** 0.8.0 V3: what `$.clock.after` scheduled, in order; a test runs them with runTimers. */
   timers: (() => unknown)[];
-  /** Track R: added to every `$.clock.now()`, so a test can leave a gap between two turns. */
+  /** Track R and 0.9.0 C3: added to every `$.clock.now()` (on top of the usual millisecond tick), so a test can leave a gap between two turns. */
   clockOffsetMs: number;
   /** Track R: what `tail -n 300 <transcript>` prints, by transcript path; any other path exits 1. */
   readonly transcripts: Map<string, string>;
+  /** 0.9.0 C2: the delay each `$.clock.after` was asked for, in order. */
+  readonly timerDelays: number[];
+  /** 0.9.0 C2: the `init` of every `$.process.run`, parallel to `processCalls`. */
+  readonly processInits: ({ cwd?: string } | undefined)[];
+  /** 0.9.0 C2: answers a `$.process.run` before the defaults; undefined leaves it to them. It may throw, like a binary that cannot start. */
+  processHandler: ((argv: readonly string[], init?: { cwd?: string }) => { exitCode: number; stdout: string; stderr: string } | undefined) | null;
+  /** 0.9.0 C3: every `$.ui.toast` text. */
+  readonly toasts: string[];
+  /** 0.9.0 C5: every `$.prompt.submit` input. */
+  readonly submits: { text: string; asUser?: true }[];
 }
 
 function makeFakeHost(): FakeHost {
@@ -113,6 +123,11 @@ function makeFakeHost(): FakeHost {
     timers: [],
     clockOffsetMs: 0,
     transcripts: new Map<string, string>(),
+    timerDelays: [],
+    processInits: [],
+    processHandler: null,
+    toasts: [],
+    submits: [],
   };
 }
 
@@ -202,8 +217,9 @@ function makeFakeEngine(host: FakeHost): unknown {
       // sleep that never resolves never wins and never introduces flakiness.
       sleep: async () => new Promise<void>(() => {}),
       // Held, never run on its own: a test that wants a timer's work runs it (runTimers).
-      after: (_ms: number, fn: () => unknown) => {
+      after: (ms: number, fn: () => unknown) => {
         host.timers.push(fn);
+        host.timerDelays.push(ms);
         return { cancel: () => undefined };
       },
     },
@@ -219,9 +235,12 @@ function makeFakeEngine(host: FakeHost): unknown {
     process: {
       // No real `orca` binary: resolveOrcaContext falls back to its
       // cwd-only shape, deterministically, on any non-success exit.
-      run: async (argv: readonly string[]) => {
+      run: async (argv: readonly string[], init?: { cwd?: string }) => {
         host.processCalls.push(argv.join(" "));
+        host.processInits.push(init);
         if (host.failProcess) throw new Error("fake host: process.run failed");
+        const scripted = host.processHandler?.(argv, init);
+        if (scripted !== undefined) return scripted;
         // 0.6.23 T1: a seeded repository answers git's top level and branch.
         const repo = argv[0] === "git" && argv[1] === "-C" ? host.gitRepos.get(argv[2] ?? "") : undefined;
         if (repo !== undefined && argv[3] === "rev-parse") return { exitCode: 0, stdout: `${repo.toplevel}\n`, stderr: "" };
@@ -233,6 +252,12 @@ function makeFakeEngine(host: FakeHost): unknown {
       },
     },
     tool: { list: async () => host.toolList },
+    prompt: {
+      submit: async (input: { text: string; asUser?: true }) => {
+        host.submits.push(input);
+        return { turnId: "turn-ci" };
+      },
+    },
     agent: {
       list: async () => {
         if (host.agents === null) throw new Error("fake host: agent.list unavailable");
@@ -241,6 +266,7 @@ function makeFakeEngine(host: FakeHost): unknown {
     },
     ui: {
       status: (text: string | undefined) => { host.statusLines.push(text); },
+      toast: (text: string) => { host.toasts.push(text); },
       // The terminal's element table (0.6.14 T2): each constructor makes the plain-data element the engine would.
       resolve: () => ({
         Box: (props: Record<string, unknown>) => ({ type: "Box", props }),
@@ -4114,4 +4140,168 @@ test("K0b a subagent's run writes no typing row and leaves the person's draft al
   assert.equal(host.files.has(TYPING_PATH), false);
   await submitFrom(handlers, engine, "my own prompt", "composer");
   assert.deepEqual(typingRows(host).map((row) => [row.kind, row.edits]), [["composer", 1]]);
+});
+
+// ---------------------------------------------------------------------------
+// The CI watcher (odd/tasks/ci-watcher.md). C2: a push, a pull request or a
+// merge in the MAIN thread starts a watch, after `next`, on a timer, and the
+// call's result is never touched. The pure rules are covered in
+// src/core/ci_watch.test.ts.
+// ---------------------------------------------------------------------------
+
+const CI_SHA = "0123456789abcdef0123456789abcdef01234567";
+const CI_MERGE_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+const CI_LOG_PATH = `${CACHE_DIR}/ci-watch-decisions-2026-09-25T10.jsonl`;
+const OK = (stdout: string): { exitCode: number; stdout: string; stderr: string } => ({ exitCode: 0, stdout, stderr: "" });
+const FAILED = { exitCode: 1, stdout: "", stderr: "fatal" };
+
+interface CiRepoScript {
+  /** git's top level for any directory; null answers "not a repository". */
+  toplevel: string | null;
+  sha: string;
+  /** What `git branch --show-current` answers (empty on a detached HEAD). */
+  branch: string;
+  /** `gh pr view` answers, in order; the last repeats. */
+  prView: string[];
+}
+
+/** Answers git for a repository: its top level, the sha of any ref and the branch checked out; `gh pr view` from `script.prView`. */
+function seedCiRepo(host: FakeHost, script: Partial<CiRepoScript> = {}): CiRepoScript {
+  const repo: CiRepoScript = { toplevel: CWD, sha: CI_SHA, branch: "feat/x", prView: [], ...script };
+  const prViews = [...repo.prView];
+  const previous = host.processHandler;
+  host.processHandler = (argv, init) => {
+    if (argv[0] === "git" && argv[1] === "-C") {
+      const rest = argv.slice(3);
+      if (rest[0] === "rev-parse" && rest[1] === "--show-toplevel") return repo.toplevel === null ? FAILED : OK(`${repo.toplevel}\n`);
+      if (rest[0] === "rev-parse") return OK(`${repo.sha}\n`);
+      if (rest[0] === "branch") return OK(`${repo.branch}\n`);
+    }
+    if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "view") return OK(prViews.length > 1 ? (prViews.shift() ?? "") : (prViews[0] ?? ""));
+    return previous?.(argv, init);
+  };
+  return repo;
+}
+
+/** A Bash outcome as core resolves it: `{ result, text }`, with the engine's own gitOperation when given. */
+function bashOutcome(text: string, gitOperation?: Record<string, unknown>, isError = false): Record<string, unknown> {
+  return { ref: 1, result: { stdout: text, stderr: "", interrupted: false, ...(gitOperation === undefined ? {} : { gitOperation }) }, text, ...(isError ? { isError: true } : {}) };
+}
+
+/** One Bash `tool.call` through the hook; returns what the hook handed back and how often `next` ran. */
+async function bashThrough(handlers: Map<string, Hook>, engine: unknown, command: string, outcome: Record<string, unknown>, agentId?: string): Promise<{ returned: unknown; nexts: number }> {
+  const hook = handlers.get("tool.call");
+  assert.ok(hook, "tool.call was never registered");
+  let nexts = 0;
+  const returned = await hook(engine, { command, tool: "Bash", tool_use_id: `toolu_${command.length}`, ...(agentId === undefined ? {} : { agentId }) }, async () => {
+    nexts += 1;
+    return outcome;
+  });
+  return { returned, nexts };
+}
+
+function gitCalls(host: FakeHost): string[] {
+  return host.processCalls.filter((call) => call.startsWith("git "));
+}
+
+test("C2 ci-watch: a push in the main thread is resolved on a timer, after next; the call's result is the one next gave", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host);
+  const { handlers, engine } = loadHooks(host);
+  const outcome = bashOutcome("To github.com:a/b.git\n   abc..def  feat/x -> feat/x", { push: { branch: "feat/x" } });
+
+  const { returned, nexts } = await bashThrough(handlers, engine, "git push -u origin feat/x", outcome);
+  assert.equal(returned, outcome, "the very object next resolved to");
+  assert.equal(nexts, 1);
+  assert.deepEqual(host.processCalls, [], "nothing runs inside the call");
+  assert.equal(host.timers.length, 1, "one timer carries the start");
+
+  await runTimers(host);
+  // The branch is the engine's, so git is asked for its sha and the repository, not for the branch.
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`, `git -C ${CWD} rev-parse --verify feat/x^{commit}`]);
+});
+
+test("C2 ci-watch: a push that names no branch is resolved from HEAD and the branch checked out", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host);
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "git push", bashOutcome("pushed"));
+  await runTimers(host);
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`, `git -C ${CWD} rev-parse --verify HEAD^{commit}`, `git -C ${CWD} branch --show-current`]);
+});
+
+test("C2 ci-watch: the repository asked is the one the command ran in (cd and git -C)", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { toplevel: "/home/dev/Projects/other" });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "cd /home/dev/Projects/other && git push origin feat/x", bashOutcome("pushed"));
+  await runTimers(host);
+  assert.ok(gitCalls(host).length >= 2, "the repository was looked up");
+  assert.ok(gitCalls(host).every((call) => call.startsWith("git -C /home/dev/Projects/other ")), gitCalls(host).join("\n"));
+});
+
+test("C2 ci-watch: what starts nothing - a subagent's push, a failed or dry or empty push, any other command, a merge only queued", async () => {
+  const cases: { name: string; command: string; outcome: Record<string, unknown>; agentId?: string }[] = [
+    { name: "a subagent's push", command: "git push", outcome: bashOutcome("pushed", { push: { branch: "feat/x" } }), agentId: "agent-1" },
+    { name: "a failed push", command: "git push", outcome: bashOutcome("rejected", undefined, true) },
+    { name: "a dry run", command: "git push --dry-run", outcome: bashOutcome("would push") },
+    { name: "a push that changed nothing", command: "git push", outcome: bashOutcome("Everything up-to-date") },
+    { name: "another command", command: "ls -la", outcome: bashOutcome("files") },
+    { name: "a merge queued for later", command: "gh pr merge 9 --auto", outcome: bashOutcome("auto-merge enabled", { pr: { number: 9, action: "auto-merge-enabled" } }) },
+    { name: "a refused call", command: "git push", outcome: { deny: "blocked" } },
+  ];
+  for (const { name, command, outcome, agentId } of cases) {
+    const host = makeFakeHost();
+    seedCiRepo(host);
+    const { handlers, engine } = loadHooks(host);
+    const { returned } = await bashThrough(handlers, engine, command, outcome, agentId);
+    assert.equal(returned, outcome, name);
+    await runTimers(host);
+    assert.deepEqual(host.processCalls, [], name);
+    assert.equal(host.timers.length, 0, name);
+  }
+});
+
+test("C2 ci-watch off: a push starts nothing - no timer, no process; the result is unchanged", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host);
+  setModules(host, { "ci-watch": "off" });
+  const { handlers, engine } = loadHooks(host);
+  const outcome = bashOutcome("pushed", { push: { branch: "feat/x" } });
+  const { returned } = await bashThrough(handlers, engine, "git push", outcome);
+  assert.equal(returned, outcome);
+  await runTimers(host);
+  assert.deepEqual(host.processCalls, []);
+  assert.equal(host.timerDelays.length, 0);
+  assert.equal(host.state.size, 0, "no state written");
+});
+
+test("C2 ci-watch: a merged pull request asks gh for its merge commit; a merge with none yet starts nothing more", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { prView: [JSON.stringify({ mergeCommit: { oid: CI_MERGE_SHA }, baseRefName: "main" })] });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "gh pr merge 53 --squash", bashOutcome("merged", { pr: { number: 53, action: "merged" } }));
+  await runTimers(host);
+  const view = host.processCalls.findIndex((call) => call.startsWith("gh pr view"));
+  assert.equal(host.processCalls[view], "gh pr view 53 --json mergeCommit,baseRefName");
+  assert.equal(host.processInits[view]?.cwd, CWD);
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`]);
+
+  const queued = makeFakeHost();
+  seedCiRepo(queued, { prView: [JSON.stringify({ mergeCommit: null, baseRefName: "main" })] });
+  const second = loadHooks(queued);
+  await bashThrough(second.handlers, second.engine, "gh pr merge 53", bashOutcome("merged", { pr: { number: 53, action: "merged" } }));
+  await runTimers(queued);
+  assert.deepEqual(gitCalls(queued), [], "no merge commit: nothing to resolve");
+});
+
+test("C2 ci-watch: a directory that is no repository starts nothing", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { toplevel: null });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "git push", bashOutcome("pushed", { push: { branch: "feat/x" } }));
+  await runTimers(host);
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`], "asked once, then stopped");
+  assert.equal(host.state.size, 0);
+  assert.equal(host.timers.length, 0);
 });

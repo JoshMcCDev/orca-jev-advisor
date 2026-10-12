@@ -185,6 +185,8 @@ import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, inter
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
 import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
 import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
+import { ciBashCallFrom, couldStartCiWatch, detectCiTriggers, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
+import type { CiTriggerKind } from '../../../../src/core/ci_watch.ts'
 
 const DEFAULT_BUDGET_MS = 800
 const DEFAULT_SHORTLIST = 3
@@ -2492,6 +2494,98 @@ async function recordTypingAtSubmit($: EngineInterface, typing: TypingTracking, 
 }
 
 // ---------------------------------------------------------------------------
+// The CI watcher (odd/tasks/ci-watcher.md). After a successful push, pull
+// request or merge in the MAIN thread, a watch is started for that repository
+// and head sha: C2 resolves them, on a timer and after `next`, so the call's
+// result is never held or changed. A watch is plain data (no `$`); every
+// function that takes `$` is declared here at the top level (JEVADV-43).
+// Fails open at every step: whatever goes wrong, the call has already
+// returned and the watch is dropped without a word.
+// ---------------------------------------------------------------------------
+
+const CI_START_DELAY_MS = 200
+
+/** One watch. Its identity (repository and sha) is known only once `ciWatchStart` has asked git. */
+interface CiWatch {
+  readonly id: string
+  readonly trigger: CiTriggerKind
+  /** Where the command ran, from the command; the session's own directory when it said nothing. */
+  readonly dir: string
+  readonly pr: number | null
+  /** The branch the command or the engine named; resolved from git when null. */
+  branch: string | null
+  repo: string | null
+  sha: string | null
+  startedAtMs: number
+}
+
+interface CiWatchHost {
+  readonly watches: CiWatch[]
+  readonly modulesFile: FeatureModulesFile
+}
+
+/** One command's answer, trimmed; null when it fails, prints nothing or cannot start. Never throws. */
+async function ciAsk($: EngineInterface, argv: readonly string[], cwd: string | null): Promise<string | null> {
+  try {
+    const result = cwd === null ? await $.process.run(argv) : await $.process.run(argv, { cwd })
+    const out = result.stdout.trim()
+    return result.exitCode === 0 && out.length > 0 ? out : null
+  } catch {
+    return null
+  }
+}
+
+/** The tool.call hook's part, after `next`: which watches this finished Bash call starts. Each one is resolved on its own timer. Never throws. */
+async function ciWatchObserve($: EngineInterface, host: CiWatchHost, command: string, outcome: unknown, toolUseId: string): Promise<void> {
+  try {
+    const call = ciBashCallFrom(command, outcome)
+    if (call === null || call.isError || !couldStartCiWatch(command, call.gitOperation !== undefined)) return
+    const base = await $.session.root()
+    const triggers = detectCiTriggers(call, base, await resolveHomeDir($))
+    triggers.forEach((trigger, index) => {
+      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0 }
+      host.watches.push(watch)
+      $.clock.after(CI_START_DELAY_MS, () => ciWatchStart($, host, watch))
+    })
+  } catch {
+    // The watcher never touches the call.
+  }
+}
+
+function ciWatchDrop(host: CiWatchHost, watch: CiWatch): void {
+  const at = host.watches.indexOf(watch)
+  if (at >= 0) host.watches.splice(at, 1)
+}
+
+/** The timer a trigger arms: finds the repository and the head sha. A directory that is no repository, a merge with no merge commit yet and any failure drop the watch quietly. */
+async function ciWatchStart($: EngineInterface, host: CiWatchHost, watch: CiWatch): Promise<void> {
+  try {
+    if (moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch') === 'off') return ciWatchDrop(host, watch)
+    let sha: string | null = null
+    if (watch.trigger === 'pr-merge') {
+      const view = await ciAsk($, watch.pr === null ? ['gh', 'pr', 'view', '--json', 'mergeCommit,baseRefName'] : ['gh', 'pr', 'view', String(watch.pr), '--json', 'mergeCommit,baseRefName'], watch.dir)
+      const merged = view === null ? null : parsePrMergeView(view)
+      if (merged === null) return ciWatchDrop(host, watch)
+      sha = merged.sha
+      watch.branch = merged.branch
+    }
+    const repo = await ciAsk($, ['git', '-C', watch.dir, 'rev-parse', '--show-toplevel'], null)
+    if (repo === null) return ciWatchDrop(host, watch)
+    if (sha === null) {
+      sha = await ciAsk($, ['git', '-C', watch.dir, 'rev-parse', '--verify', `${watch.branch ?? 'HEAD'}^{commit}`], null)
+      if (watch.branch === null) watch.branch = await ciAsk($, ['git', '-C', watch.dir, 'branch', '--show-current'], null)
+    }
+    if (sha === null) return ciWatchDrop(host, watch)
+    if (host.watches.some((other) => other !== watch && other.repo === repo && other.sha === sha)) return ciWatchDrop(host, watch)
+    watch.repo = repo
+    watch.sha = sha
+    watch.startedAtMs = await $.clock.now()
+  } catch {
+    ciWatchDrop(host, watch)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Active-mode switches -- hoisted out of `register` (JEVADV-43): the engine
 // refuses `$` passed into a closure declared INSIDE register, only a
 // top-level function. These take the option value already resolved from
@@ -2557,6 +2651,8 @@ export function register(on: On, options: PluginOptions): void {
   const routerMode = parseRouterMode(options.routerMode)
   // Where the feature module file lives, worked out on the first hook call that reads it (resolveFeatureModules).
   const modulesFile: FeatureModulesFile = { path: undefined }
+  // The CI watcher's watches (plain data; a reload starts with none).
+  const ciWatch: CiWatchHost = { watches: [], modulesFile }
 
   const budgetMs = number('budgetMs', DEFAULT_BUDGET_MS)
   const gateThreshold = number('gateThreshold', DEFAULT_GATE_THRESHOLD)
@@ -3294,6 +3390,8 @@ export function register(on: On, options: PluginOptions): void {
       }
     }
     const result = await next(e)
+    // The CI watcher: a push, pull request or merge in the main thread starts a watch. After `next`; the result below is `next`'s, untouched.
+    if (e.agentId === undefined && e.tool === 'Bash' && moduleState(modules, 'ci-watch') !== 'off') await ciWatchObserve($, ciWatch, e.command, result, e.tool_use_id)
     // 0.6.16 T4: a failed main-loop call marks its step for the measure-only hold rule.
     if (routerOn && e.agentId === undefined && phaseHolder.turn !== null) {
       try {

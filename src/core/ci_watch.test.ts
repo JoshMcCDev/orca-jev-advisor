@@ -12,11 +12,13 @@ import {
   CI_WATCH_DECISIONS_FILE_PATTERN,
   CI_WATCH_MAX_POLLS,
   ciBandRows,
+  ciBashCallFrom,
   ciNoteText,
   ciWatchDecisionFileName,
   ciWatchRecord,
   ciWatchStep,
   classifyAgentCall,
+  couldStartCiWatch,
   detectCiTriggers,
   extendCiWatch,
   isCiPollCommand,
@@ -24,6 +26,7 @@ import {
   newCiWatchProgress,
   parseCiBandRows,
   parseCiRuns,
+  parsePrMergeView,
   sleepSeconds,
   summarizeCiWatchRows,
 } from "./ci_watch.ts";
@@ -465,4 +468,41 @@ test("the summary counts watches, finished runs, gh calls, the agent's polls and
 
 test("the summary of nothing is zeros, and says so", () => {
   assert.deepEqual(summarizeCiWatchRows([], Date.now(), 1000), { watches: 0, finished: 0, failed: 0, ghCalls: 0, pollsReplaced: 0, sleepsReplaced: 0, injected: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// C2: reading a tool.call outcome, and the merge commit of a pull request
+// ---------------------------------------------------------------------------
+
+test("a Bash outcome becomes a CiBashCall: the text the model read, the error flag and the engine's gitOperation", () => {
+  const outcome = { result: { stdout: "out", stderr: "err", interrupted: false, gitOperation: { push: { branch: "feat/x" } } }, text: "out\nerr", ref: 3 };
+  assert.deepEqual(ciBashCallFrom("git push", outcome), { command: "git push", isError: false, output: "out\nerr", gitOperation: { push: { branch: "feat/x" } } });
+  assert.equal(ciBashCallFrom("git push", { ...outcome, isError: true })?.isError, true);
+  assert.equal(ciBashCallFrom("git push", { result: { stdout: "o", stderr: "e" } })?.output, "o\ne", "no text: stdout and stderr");
+  assert.equal(ciBashCallFrom("git push", { result: "ok" })?.gitOperation, undefined);
+});
+
+test("a denied or unreadable outcome is no call at all", () => {
+  assert.equal(ciBashCallFrom("git push", { deny: "blocked" }), null);
+  for (const bad of [null, undefined, "x", 3, []]) assert.equal(ciBashCallFrom("git push", bad), null, String(bad));
+});
+
+test("couldStartCiWatch is the cheap filter before any lookup: a push or pull-request command, or an engine report", () => {
+  assert.equal(couldStartCiWatch("git push", false), true);
+  assert.equal(couldStartCiWatch("cd x && git -C y push origin main", false), true);
+  assert.equal(couldStartCiWatch("gh pr create --fill", false), true);
+  assert.equal(couldStartCiWatch("gh pr merge 5", false), true);
+  assert.equal(couldStartCiWatch("./ship.sh", true), true);
+  assert.equal(couldStartCiWatch("ls -la", false), false);
+  assert.equal(couldStartCiWatch("git status", false), false);
+  assert.equal(couldStartCiWatch("gh pr list", false), false);
+});
+
+test("gh pr view --json mergeCommit,baseRefName: the merge commit and the branch it landed on; none while the merge is queued", () => {
+  assert.deepEqual(parsePrMergeView(JSON.stringify({ mergeCommit: { oid: SHA }, baseRefName: "main" })), { sha: SHA, branch: "main" });
+  assert.equal(parsePrMergeView(JSON.stringify({ mergeCommit: null, baseRefName: "main" })), null);
+  assert.equal(parsePrMergeView(JSON.stringify({ baseRefName: "main" })), null);
+  assert.equal(parsePrMergeView(JSON.stringify({ mergeCommit: { oid: "" }, baseRefName: "main" })), null);
+  assert.deepEqual(parsePrMergeView(JSON.stringify({ mergeCommit: { oid: SHA } })), { sha: SHA, branch: null });
+  for (const bad of ["", "x", "[]", "null"]) assert.equal(parsePrMergeView(bad), null, bad);
 });
