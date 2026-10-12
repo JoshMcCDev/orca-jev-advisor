@@ -13,6 +13,7 @@ import {
   detectMemoryBackend,
   engramServerFromTools,
   engramUsable,
+  isPermissionRefusal,
   parseEngramVersion,
   parseEnabledEngramPlugin,
   parseUserMcpEngram,
@@ -111,6 +112,12 @@ test("health: a missing tool, a timeout and a refused connection are failed", ()
   assert.equal(classifyHealthOutcome({ ok: false, error: "timed out after 5000 ms" }), "failed");
   assert.equal(classifyHealthOutcome({ ok: false, error: "connect ECONNREFUSED 127.0.0.1:7437" }), "failed");
   assert.equal(classifyHealthOutcome({ ok: false, error: "" }), "failed");
+});
+
+test("permission refusal: the engine's refusal text is recognised, other errors are not", () => {
+  assert.equal(isPermissionRefusal("Claude requested permissions to use mcp__engram__mem_save, but you haven't granted it yet."), true);
+  assert.equal(isPermissionRefusal("connect ECONNREFUSED 127.0.0.1:7437"), false);
+  assert.equal(isPermissionRefusal("Failed to save: database is locked"), false);
 });
 
 // ---------------------------------------------------------------------------

@@ -262,6 +262,13 @@ export function memoryIndexLine(save: DraftSave, file: string): string {
   return `${head} — ${hook.length > room ? `${hook.slice(0, room - 1)}…` : hook}`;
 }
 
+/** The index without the line that links `file`; unchanged when no line does. */
+export function removeIndexLine(index: string, file: string): string {
+  const lines = index.split("\n");
+  const kept = lines.filter((l) => !l.includes(`](${file})`));
+  return kept.length === lines.length ? index : kept.join("\n");
+}
+
 /** The index with `line` for `file`: the line that already links the file is replaced in place, else the line is appended. Everything else is kept. */
 export function upsertIndexLine(index: string, file: string, line: string): string {
   const links = (l: string): boolean => l.includes(`](${file})`);

@@ -108,10 +108,15 @@ export type HealthCall = { readonly ok: true; readonly result: unknown } | { rea
 
 const PERMISSION_REFUSAL = /requested permissions? to use|haven'?t granted|permission (rule|denied)|\brefused:/i;
 
+/** Whether an error text is the engine refusing an `$.mcp.call` for want of a permission rule (not Engram being down). */
+export function isPermissionRefusal(error: string): boolean {
+  return PERMISSION_REFUSAL.test(error);
+}
+
 /** A refusal for want of a permission rule is `permission`; any other error, and an MCP `isError` result, is `failed`. */
 export function classifyHealthOutcome(call: HealthCall): HealthOutcome {
   if (call.ok) return isRecord(call.result) && call.result.isError === true ? "failed" : "ok";
-  return PERMISSION_REFUSAL.test(call.error) ? "permission" : "failed";
+  return isPermissionRefusal(call.error) ? "permission" : "failed";
 }
 
 // ---------------------------------------------------------------------------

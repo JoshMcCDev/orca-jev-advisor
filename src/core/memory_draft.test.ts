@@ -15,6 +15,7 @@ import {
   memoryFileName,
   memoryIndexLine,
   parseDraft,
+  removeIndexLine,
   renderMemoryFile,
   slugTopicKey,
   upsertIndexLine,
@@ -243,4 +244,11 @@ test("upsertIndexLine: appends a new file, replaces the line of a known one, kee
   assert.equal(upsertIndexLine(index, "two.md", "- [Two!](two.md) — changed"), "- [One](one.md) — first\n- [Two!](two.md) — changed\n");
   assert.equal(upsertIndexLine("", "a.md", "- [A](a.md) — a"), "- [A](a.md) — a\n");
   assert.equal(upsertIndexLine("- [One](one.md) — first", "b.md", "- [B](b.md) — b"), "- [One](one.md) — first\n- [B](b.md) — b\n");
+});
+
+test("removeIndexLine: drops the line that links the file, keeps the rest, and is a no-op when it is absent", () => {
+  const index = "# Feedback\n- [One](one.md) — first\n- [Two](two.md) — second\n";
+  assert.equal(removeIndexLine(index, "one.md"), "# Feedback\n- [Two](two.md) — second\n");
+  assert.equal(removeIndexLine(index, "nope.md"), index);
+  assert.equal(removeIndexLine("- [One](one.md) — first\n", "one.md"), "");
 });
