@@ -148,8 +148,29 @@ export type CiWatchesState = {
   }[]
 }
 
+/**
+ * The memory module's backend for this session (odd/tasks/memory-shadow.md,
+ * M8), as src/core/memory_detect.ts decided it: at session start, and once
+ * more at the first turn when the start found no live Engram (MCP servers can
+ * connect late). The health call (`mem_current_project`) is made at most once
+ * a session; its outcome is kept so a re-check does not repeat it.
+ */
+export type MemoryShadowState = {
+  backend: 'live' | 'configured-down' | 'absent'
+  decidedBy: 'tools+health' | 'tools' | 'health' | 'user-config' | 'plugin' | 'binary' | 'none'
+  /** The Engram MCP server to call, null when Engram cannot be called. */
+  server: string | null
+  permission: 'ok' | 'refused' | 'unknown'
+  /** Where the backend was last decided. */
+  detectedAt: 'start' | 'turn'
+  /** The health call's outcome; null when it was not made. */
+  health: 'ok' | 'permission' | 'failed' | null
+  /** A turn already looked again after the start found no live Engram. */
+  rechecked: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState; ciWatches: CiWatchesState }
+    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState; ciWatches: CiWatchesState; memory: MemoryShadowState }
   }
 }

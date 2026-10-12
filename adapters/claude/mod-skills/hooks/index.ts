@@ -176,7 +176,7 @@ import type { RouterDestination } from '../../../../src/core/model_router_destin
 import { decideSubagent, subagentStepEffort } from '../../../../src/core/model_router_subagent.ts'
 import type { SubagentDecision } from '../../../../src/core/model_router_subagent.ts'
 import { isPersonPromptOrigin } from '../../../../src/core/model_router_origin.ts'
-import type { RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardColdState, StewardState } from '../types/index.d.ts'
+import type { MemoryShadowState, RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardColdState, StewardState } from '../types/index.d.ts'
 import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, preColdInstructions, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
 import type { PreColdRecordFields, StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
 import { stewardFromSettings } from '../../../../src/core/model_router_mode.ts'
@@ -188,6 +188,14 @@ import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '..
 import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
 import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciNoteText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, isCiWatchNote, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
 import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress, CiWatchRecordInput } from '../../../../src/core/ci_watch.ts'
+import { autoMemoryDir, claudeConfigDir, classifyHealthOutcome, detectMemoryBackend, engramServerFromTools, engramUsable, parseEnabledEngramPlugin, parseUserMcpEngram } from '../../../../src/core/memory_detect.ts'
+import type { HealthCall, HealthOutcome, MemoryBackendDecision } from '../../../../src/core/memory_detect.ts'
+import { GATE_MAX_TOKENS, GATE_SYSTEM, GATE_TIMEOUT_MS, buildGatePrompt, freeChecks, lastExchange, parseGate, typedPrompt } from '../../../../src/core/memory_decide.ts'
+import { buildDraftPrompt, parseDraft } from '../../../../src/core/memory_draft.ts'
+import type { MemoryDraft } from '../../../../src/core/memory_draft.ts'
+import { EMPTY_SEEN, classifyMainCall, draftCounts, dryJudgeBuilds, isForkSampled, memoryDecisionFileName, memoryShadowRecord, memoryTopics, noteMainCall, readMemSaveCandidates, withinBudget } from '../../../../src/core/memory_shadow.ts'
+import type { ForkOutcome, GateOutcome, MainMemorySeen, ModelTokens } from '../../../../src/core/memory_shadow.ts'
+import { isRecord } from '../../../../src/guards.ts'
 
 const DEFAULT_BUDGET_MS = 800
 const DEFAULT_SHORTLIST = 3
@@ -2806,6 +2814,240 @@ async function ciWatchOnSessionStart($: EngineInterface, host: CiWatchHost): Pro
 }
 
 // ---------------------------------------------------------------------------
+// Memory in Shadow (odd/tasks/memory-shadow.md, M8). `session.start` decides
+// the backend (Engram live, configured but down, or absent) from the tool
+// list and one read-only `mem_current_project`, on a timer so the start never
+// waits on an MCP dial. After a MAIN turn that ended with an answer,
+// `turn.complete` schedules `memoryAfterTurn`, as it does verify-done's: free
+// checks, one Haiku SKIP/UPDATE, a fork on a sampled UPDATE (one in
+// FORK_SAMPLE_EVERY), the judge built dry, one row. `tool.call` only watches
+// the main thread's own mem_save, mem_judge and Write or Edit into the
+// memory folder, after `next`. Shadow writes nothing: no mem_save, no
+// mem_judge, no memory file, no spool. Fails open everywhere.
+// ---------------------------------------------------------------------------
+
+const MEMORY_DELAY_MS = 250
+const MEMORY_HEALTH_TIMEOUT_MS = 3000
+/** What the fork reads of the memory folder when it is the store: whole files, at most this many and this many characters. */
+const MEMORY_FORK_FILES = 40
+const MEMORY_FORK_CHARS = 40_000
+/** The files read for their topic keys when Engram is the store. */
+const MEMORY_TOPIC_FILES = 200
+
+/** What `register` keeps for memory between hooks: the main thread's memory calls this turn, and the memory folder once worked out. */
+interface MemoryHolder {
+  seen: MainMemorySeen
+  dir: string | null | undefined
+}
+
+/** What the turn-end timer reads from `register`: the main turn running now, or null between turns. */
+interface MemoryHost {
+  readonly runningTurn: () => string | null
+}
+
+async function readTextOrNull($: EngineInterface, path: string): Promise<string | null> {
+  try {
+    return (await $.fs.exists(path)) ? await $.fs.read(path) : null
+  } catch {
+    return null
+  }
+}
+
+/** Claude Code's config dir: `CLAUDE_CONFIG_DIR` (an Orca account folder) when set, else `~/.claude`; null without a home. */
+async function memoryConfigDir($: EngineInterface): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+  if ((configured === undefined || configured === '') && (home === undefined || home === '')) return null
+  return claudeConfigDir({ claudeConfigDir: configured ?? null, home: home ?? '' })
+}
+
+/** The auto-memory folder of this session: under the repository root, shared by its worktrees (engine probes, d). */
+async function resolveMemoryDir($: EngineInterface): Promise<string | null> {
+  const configDir = await memoryConfigDir($)
+  if (configDir === null) return null
+  let repoRoot: string | null = null
+  try {
+    repoRoot = (await $.session.repo())?.root ?? null
+  } catch {
+    repoRoot = null
+  }
+  return autoMemoryDir({ configDir, repoRoot, cwd: await $.session.cwd() })
+}
+
+/** `mem_current_project`, the one Engram call Shadow makes: read only, raced against a clock. */
+async function engramHealth($: EngineInterface, server: string): Promise<HealthOutcome> {
+  const call: Promise<HealthCall> = $.mcp.call(server, 'mem_current_project', {}).then(
+    (result): HealthCall => ({ ok: true, result }),
+    (error: unknown): HealthCall => ({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+  )
+  const late: Promise<HealthCall> = $.clock.sleep(MEMORY_HEALTH_TIMEOUT_MS).then((): HealthCall => ({ ok: false, error: 'timed out' }))
+  return classifyHealthOutcome(await Promise.race([call, late]))
+}
+
+/**
+ * Decides the backend. The health call is made only when the tools name a
+ * server and it was not made before this session (`previous`). The config
+ * files are read only when the tools show no Engram; the binary is never
+ * run (no process per session), so `binary` never decides here.
+ */
+async function detectMemory($: EngineInterface, at: 'start' | 'turn', previous: MemoryShadowState | undefined): Promise<MemoryShadowState> {
+  const liveServer = engramServerFromTools(await $.tool.list())
+  let health: HealthOutcome | null = previous?.health ?? null
+  if (liveServer !== null && health === null) health = await engramHealth($, liveServer)
+  let userConfigured = false
+  let pluginEnabled = false
+  if (liveServer === null) {
+    const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+    const home = await $.env.get('HOME')
+    const configDir = await memoryConfigDir($)
+    const claudeJson = configured !== undefined && configured !== '' ? `${configDir}/.claude.json` : `${home ?? ''}/.claude.json`
+    userConfigured = parseUserMcpEngram((await readTextOrNull($, claudeJson)) ?? '')
+    pluginEnabled = configDir !== null && parseEnabledEngramPlugin((await readTextOrNull($, `${configDir}/settings.json`)) ?? '')
+  }
+  const decision = detectMemoryBackend({ liveServer, health, userConfigured, pluginEnabled, binaryVersion: null })
+  return { ...decision, detectedAt: at, health, rechecked: at === 'turn' || (previous?.rechecked ?? false) }
+}
+
+/** session.start's timer: decide the backend and keep it in `$.state`. Never throws. */
+async function memoryDetectAtStart($: EngineInterface, modulesFile: FeatureModulesFile): Promise<void> {
+  try {
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'memory') === 'off') return
+    const state = await detectMemory($, 'start', undefined)
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'memory' }, state)
+  } catch {
+    // No backend known yet: the first turn decides it.
+  }
+}
+
+/** The backend for this turn: the start's, looked at once more when the start found no live Engram (servers connect late). */
+async function ensureMemoryBackend($: EngineInterface): Promise<MemoryShadowState> {
+  const stored = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'memory' })).value
+  if (stored !== undefined && (stored.backend === 'live' || stored.rechecked)) return stored
+  const state = await detectMemory($, 'turn', stored)
+  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'memory' }, state)
+  return state
+}
+
+/** tool.call, after `next`: counts a main-thread memory call into this turn's tally. Never throws, never touches the call. */
+async function observeMemoryCall($: EngineInterface, holder: MemoryHolder, tool: string, args: Readonly<Record<string, unknown>>, result: unknown): Promise<void> {
+  try {
+    if (isRecord(result) && typeof result.deny === 'string') return
+    if (holder.dir === undefined && !tool.startsWith('mcp__')) holder.dir = await resolveMemoryDir($)
+    const call = classifyMainCall(tool, args, holder.dir ?? null)
+    if (call === null) return
+    const candidates = call === 'engram-save' && isRecord(result) ? readMemSaveCandidates(result.result) : []
+    holder.seen = noteMainCall(holder.seen, call, { type: args.type, candidates })
+  } catch {
+    // Watching is never a reason to touch a call.
+  }
+}
+
+/** This turn's tally, handed to its timer; the next turn starts from zero. */
+function takeMemorySeen(holder: MemoryHolder): MainMemorySeen {
+  const seen = holder.seen
+  holder.seen = EMPTY_SEEN
+  return seen
+}
+
+/** The memory files by name, read in name order: up to `maxFiles` `.md` files (MEMORY.md left out). */
+async function readMemoryFiles($: EngineInterface, dir: string, maxFiles: number): Promise<Record<string, string>> {
+  const files: Record<string, string> = {}
+  let entries: readonly { readonly name: string; readonly kind: string }[] = []
+  try {
+    entries = await $.fs.list(dir)
+  } catch {
+    return files
+  }
+  const names = entries.filter((entry) => entry.kind === 'file' && entry.name.endsWith('.md') && entry.name.toLowerCase() !== 'memory.md').map((entry) => entry.name).sort().slice(0, maxFiles)
+  for (const name of names) {
+    const text = await readTextOrNull($, `${dir}/${name}`)
+    if (text !== null) files[name] = text
+  }
+  return files
+}
+
+/** Appends one decision line to the current hour's `memory-decisions-*.jsonl`, best-effort. */
+async function appendMemoryDecision($: EngineInterface, atIso: string, line: string): Promise<void> {
+  try {
+    const paths = await resolveHomePaths($)
+    if (!paths) return
+    await appendToFile($, `${paths.cacheDir}/${memoryDecisionFileName(atIso)}`, line)
+  } catch {
+    // Logging is best-effort and must never affect the session.
+  }
+}
+
+/** The fork on a sampled UPDATE: the writer prompt over the session's own transcript, read strictly; nothing it says is written. */
+async function draftInShadow($: EngineInterface, reason: string, backend: MemoryBackendDecision, dir: string | null, today: string): Promise<{ fork: ForkOutcome; forkMs: number; forkUsage: ModelTokens | null; draft: MemoryDraft | null }> {
+  const engramLive = engramUsable(backend)
+  const files = dir === null ? {} : await readMemoryFiles($, dir, engramLive ? MEMORY_TOPIC_FILES : MEMORY_FORK_FILES)
+  const prompt = buildDraftPrompt({
+    reason,
+    engramLive,
+    files: engramLive ? {} : withinBudget(files, MEMORY_FORK_FILES, MEMORY_FORK_CHARS),
+    topics: engramLive ? memoryTopics(files) : [],
+    today,
+  })
+  const asked = await $.clock.now()
+  const reply = await $.model.fork({ prompt })
+  const forkMs = (await $.clock.now()) - asked
+  const forkUsage = 'usage' in reply ? reply.usage : null
+  if (!reply.isAnswered) return { fork: 'no-answer', forkMs, forkUsage, draft: null }
+  const parsed = parseDraft(reply.text)
+  return parsed.ok ? { fork: 'drafted', forkMs, forkUsage, draft: parsed.draft } : { fork: 'unparsable', forkMs, forkUsage, draft: null }
+}
+
+/** The timer `turn.complete` schedules: free checks, Haiku, the sampled fork, the dry judge, one row. Writes nothing else. Never throws. */
+async function memoryAfterTurn($: EngineInterface, modulesFile: FeatureModulesFile, host: MemoryHost, seen: MainMemorySeen, turnId: string): Promise<void> {
+  try {
+    // Read again here: the switch may have moved in the delay since turn.complete scheduled this.
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'memory') === 'off') return
+    const messages = await $.session.messages()
+    if (!freeChecks({ agentId: undefined, reason: 'answer', prompt: typedPrompt(messages) }).pass) return
+    const state = await ensureMemoryBackend($)
+    const backend: MemoryBackendDecision = { backend: state.backend, decidedBy: state.decidedBy, server: state.server, permission: state.permission }
+    const dir = await resolveMemoryDir($)
+    const index = dir === null ? '' : ((await readTextOrNull($, `${dir}/MEMORY.md`)) ?? '')
+    const sessionId = await readSessionId($)
+    const asked = await $.clock.now()
+    const reply = await $.model.complete({ model: 'haiku', system: GATE_SYSTEM, prompt: buildGatePrompt({ index, exchange: lastExchange(messages) }), maxTokens: GATE_MAX_TOKENS, effort: 'low', timeoutMs: GATE_TIMEOUT_MS })
+    const answered = await $.clock.now()
+    const verdict = reply.isAnswered ? parseGate(reply.text) : null
+    const gate: GateOutcome = verdict === null ? 'no-answer' : verdict.kind === 'failure' ? 'malformed' : verdict.kind
+    let fork: ForkOutcome | null = null
+    let forkMs: number | null = null
+    let forkUsage: ModelTokens | null = null
+    let draft: MemoryDraft | null = null
+    if (verdict !== null && verdict.kind === 'update') {
+      if (!isForkSampled(sessionId, turnId)) fork = 'not-sampled'
+      else if (host.runningTurn() !== null) fork = 'turn-moved-on'
+      else ({ fork, forkMs, forkUsage, draft } = await draftInShadow($, verdict.reason, backend, dir, new Date(answered).toISOString().slice(0, 10)))
+    }
+    const at = new Date(await $.clock.now()).toISOString()
+    const record = memoryShadowRecord({
+      at,
+      account: await resolveAccountId($),
+      project: baseName(await $.session.root()),
+      sessionId,
+      backend,
+      detectedAt: state.detectedAt,
+      gate,
+      gateMs: answered - asked,
+      gateUsage: reply.usage,
+      fork,
+      forkMs,
+      forkUsage,
+      draft: draft === null ? null : draftCounts(draft, backend),
+      judgeBuilds: draft !== null && engramUsable(backend) ? dryJudgeBuilds(draft.saves, seen.candidates) : 0,
+      seen,
+    })
+    await appendMemoryDecision($, at, `${JSON.stringify(record)}\n`)
+  } catch {
+    // The measure never affects the session on a failure.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Active-mode switches -- hoisted out of `register` (JEVADV-43): the engine
 // refuses `$` passed into a closure declared INSIDE register, only a
 // top-level function. These take the option value already resolved from
@@ -2951,6 +3193,8 @@ export function register(on: On, options: PluginOptions): void {
   // The main turn running now (turn.start → turn.complete), so the steward
   // never compacts under a turn that started after the one it judged.
   let activeTurnId: string | null = null
+  // Memory (memoryAfterTurn): the main thread's memory calls this turn, handed to the turn's timer at turn.complete.
+  const memoryHolder: MemoryHolder = { seen: EMPTY_SEEN, dir: undefined }
   // K0: each session's draft at the composer (TypingTracking), in memory only.
   const typing: TypingTracking = { drafts: new Map<string, TypingDraft>(), pending: Promise.resolve() }
 
@@ -3526,14 +3770,23 @@ export function register(on: On, options: PluginOptions): void {
     const modules = await resolveFeatureModules($, modulesFile)
     // The CI watcher: the watches of the old load are gone with their timers; so are their rows.
     if (moduleState(modules, 'ci-watch') !== 'off') await ciWatchOnSessionStart($, ciWatch)
-    if (moduleState(modules, 'model-router') === 'off') return next(e)
-    try {
-      await snapshotBeforeLoad($, runningSubagents)
-      agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
-      const line = statusLine()
-      if (line !== null) $.ui.status(line)
-    } catch {
-      // The status line is never a reason to fail a start.
+    if (moduleState(modules, 'model-router') !== 'off') {
+      try {
+        await snapshotBeforeLoad($, runningSubagents)
+        agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
+        const line = statusLine()
+        if (line !== null) $.ui.status(line)
+      } catch {
+        // The status line is never a reason to fail a start.
+      }
+    }
+    // Memory (memoryDetectAtStart): the backend is decided on a timer, so the start never waits on an MCP dial.
+    if (moduleState(modules, 'memory') !== 'off') {
+      try {
+        $.clock.after(0, () => memoryDetectAtStart($, modulesFile))
+      } catch {
+        // No timer: the first turn decides the backend.
+      }
     }
     return next(e)
   })
@@ -3581,6 +3834,17 @@ export function register(on: On, options: PluginOptions): void {
         const finalMessage = e.answer
         try {
           $.clock.after(VERIFY_DONE_DELAY_MS, () => verifyDoneAfterTurn($, options, modulesFile, finalMessage))
+        } catch {
+          // No timer, no measure: the turn ends as it would have.
+        }
+      }
+      // Memory (memoryAfterTurn): this turn's memory calls go to its own timer, whatever the reason; the next turn starts from zero.
+      const memorySeen = takeMemorySeen(memoryHolder)
+      if (e.reason === 'answer' && moduleState(modules, 'memory') !== 'off') {
+        const turnId = e.turnId
+        const memoryHost: MemoryHost = { runningTurn: () => activeTurnId }
+        try {
+          $.clock.after(MEMORY_DELAY_MS, () => memoryAfterTurn($, modulesFile, memoryHost, memorySeen, turnId))
         } catch {
           // No timer, no measure: the turn ends as it would have.
         }
@@ -3647,6 +3911,10 @@ export function register(on: On, options: PluginOptions): void {
       } catch {
         // Measure-only: never a reason to touch the call.
       }
+    }
+    // Memory (observeMemoryCall): what the main thread saved this turn, read off the call after it ran; the result is not touched.
+    if (e.agentId === undefined && moduleState(modules, 'memory') !== 'off') {
+      await observeMemoryCall($, memoryHolder, e.tool, e as unknown as Readonly<Record<string, unknown>>, result)
     }
     return result
   })

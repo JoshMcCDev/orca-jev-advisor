@@ -17,7 +17,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,4 +58,20 @@ test('the installed copy validates cleanly with the real `claude` binary -- the 
   const raw = execFileSync(claudeBinary, ['plugin', 'validate', '--json', destination], { encoding: 'utf8' })
   const result = JSON.parse(raw)
   assert.equal(result.success, true, `claude plugin validate reported failure: ${JSON.stringify(result)}`)
+})
+
+// Memory in Shadow (odd/tasks/memory-shadow.md, M8): the hooks module now
+// imports the memory core. The copy must carry every one of those files, and
+// none may import from node:, which the hooks sandbox does not have. The
+// validate run above then checks that same copy.
+test('the installed copy carries the memory core the hooks import, all of it free of node: imports', async () => {
+  const plan = await planModSkillsCopy(PLUGIN_ROOT)
+  for (const name of ['memory_detect', 'memory_decide', 'memory_draft', 'memory_judge', 'memory_spool', 'memory_tidy', 'memory_shadow']) {
+    const path = `src/core/${name}.ts`
+    assert.ok(plan.closurePaths.includes(path), `${path} is in the copy`)
+  }
+  for (const path of plan.closurePaths.filter((p) => p.startsWith('src/'))) {
+    const source = readFileSync(join(PLUGIN_ROOT, ...path.split('/')), 'utf8')
+    assert.doesNotMatch(source, /from ['"]node:/, `${path} imports nothing from node:`)
+  }
 })

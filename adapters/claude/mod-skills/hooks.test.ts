@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 
 import { register } from "./hooks/index.ts";
 import { walkModSkillsClosure } from "../../../src/core/mod_skills_copy.ts";
+import { isForkSampled } from "../../../src/core/memory_shadow.ts";
 
 // ---------------------------------------------------------------------------
 // A minimal fake of the Claude Code function-hooks host: only the `on`
@@ -98,6 +99,17 @@ interface FakeHost {
   readonly toasts: string[];
   /** 0.9.0 C5: every `$.prompt.submit` input. */
   readonly submits: { text: string; asUser?: true }[];
+  /** Memory (M8): every `$.model.complete` request, and the replies it answers in order; an empty queue rejects. */
+  readonly modelCalls: Record<string, unknown>[];
+  readonly modelQueue: unknown[];
+  /** Memory (M8): every `$.model.fork` prompt, and its replies in order; an empty queue rejects. */
+  readonly forkCalls: string[];
+  readonly forkQueue: unknown[];
+  /** Memory (M8): every `$.mcp.call`, and what it answers (a thrown Error rejects). */
+  readonly mcpCalls: { server: string; tool: string; args?: Record<string, unknown> }[];
+  mcpAnswer: (server: string, tool: string) => unknown;
+  /** Memory (M8): `$.session.repo()`; null when not in a repository. */
+  repo: { root: string } | null;
 }
 
 function makeFakeHost(): FakeHost {
@@ -128,6 +140,15 @@ function makeFakeHost(): FakeHost {
     processHandler: null,
     toasts: [],
     submits: [],
+    modelCalls: [],
+    modelQueue: [],
+    forkCalls: [],
+    forkQueue: [],
+    mcpCalls: [],
+    mcpAnswer: (server: string, tool: string) => {
+      throw new Error(`fake host: $.mcp.call: no connected MCP tool "${tool}" on a server named "${server}"`);
+    },
+    repo: null,
   };
 }
 
@@ -171,6 +192,25 @@ function makeFakeEngine(host: FakeHost): unknown {
       version: async () => {
         if (host.engineVersion === null) throw new Error("fake host: session.version failed");
         return host.engineVersion;
+      },
+      repo: async () => (host.repo === null ? null : { root: host.repo.root, remote: null, internal: false, name: null }),
+    },
+    model: {
+      complete: async (request: Record<string, unknown>) => {
+        host.modelCalls.push(request);
+        if (host.modelQueue.length === 0) throw new Error("fake host: model.complete queue exhausted");
+        return host.modelQueue.shift();
+      },
+      fork: async (request: { prompt: string }) => {
+        host.forkCalls.push(request.prompt);
+        if (host.forkQueue.length === 0) throw new Error("fake host: model.fork queue exhausted");
+        return host.forkQueue.shift();
+      },
+    },
+    mcp: {
+      call: async (server: string, tool: string, args?: Record<string, unknown>) => {
+        host.mcpCalls.push({ server, tool, ...(args === undefined ? {} : { args }) });
+        return host.mcpAnswer(server, tool);
       },
     },
     env: { get: async (name: string) => (name === "HOME" ? HOME : host.env.get(name)) },
@@ -4726,4 +4766,390 @@ test("C3 ci-watch: a reload forgets the watches - a row left in state by the old
   await startSession(handlers, engine);
   assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
   assert.deepEqual(host.state.get("ciWatches"), { rows: [] });
+});
+
+// ---------------------------------------------------------------------------
+// Memory in Shadow (odd/tasks/memory-shadow.md, M8): session.start detects the
+// backend (the tool list and one read-only mem_current_project); after a main
+// turn that ended with an answer, a timer runs the free checks, asks Haiku
+// SKIP or UPDATE, drafts on a sampled UPDATE with a fork, builds the judge dry
+// and logs one row. tool.call only observes the main thread's own saves.
+// Nothing is ever written: no mem_save, no mem_judge, no memory file.
+// ---------------------------------------------------------------------------
+
+const MEMORY_ROWS_PATH = `${CACHE_DIR}/memory-decisions-2026-09-25T10.jsonl`;
+const MEMORY_ACCOUNT_DIR = "/orca/claude-accounts/acct-1/auth";
+const MEMORY_DIR = `${MEMORY_ACCOUNT_DIR}/projects/-home-dev-Projects-sandbox/memory`;
+const ENGRAM_TOOLS = [
+  { name: "mcp__engram__mem_save", description: "", mcp: true },
+  { name: "mcp__engram__mem_current_project", description: "", mcp: true },
+];
+const MEMORY_TURN: Row[] = [
+  { role: "user", text: "De ahora en adelante respóndeme en español con tú, nunca voseo.", toolUses: [] },
+  { role: "assistant", text: "Entendido, te hablo con tú.", toolUses: [] },
+];
+const USAGE = (input: number, output: number, cacheRead = 0) => ({ input_tokens: input, output_tokens: output, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: 0 });
+const GATE_UPDATE = { isAnswered: true, text: "UPDATE: the person wants Spanish with tú", usage: USAGE(900, 9) };
+const GATE_SKIP = { isAnswered: true, text: "SKIP", usage: USAGE(900, 1) };
+const DRAFT_REPLY = {
+  isAnswered: true,
+  text: JSON.stringify({ saves: [{ type: "feedback", title: "Spanish with tú", content: "Reply in Spanish with tú, never voseo.", topic_key: "spanish-tu" }], updates: [], deletes: [] }),
+  usage: USAGE(12, 140, 180_000),
+};
+const HEALTHY = (_server: string, tool: string): unknown => {
+  if (tool === "mem_current_project") return { content: [{ type: "text", text: JSON.stringify({ project: "sandbox" }) }], isError: false };
+  throw new Error(`fake host: unexpected Engram tool ${tool}`);
+};
+
+function turnIdWhere(sampled: boolean): string {
+  for (let i = 0; i < 1000; i += 1) if (isForkSampled("session-1", `turn-${i}`) === sampled) return `turn-${i}`;
+  throw new Error("no turn id found");
+}
+
+function memoryHost(options: { engram?: boolean } = {}): FakeHost {
+  const host = makeFakeHost();
+  host.env.set("CLAUDE_CONFIG_DIR", MEMORY_ACCOUNT_DIR);
+  host.repo = { root: CWD };
+  host.messages = MEMORY_TURN;
+  host.files.set(`${MEMORY_DIR}/MEMORY.md`, "- [Merge email](merge-email.md) — use the noreply address\n");
+  host.files.set(`${MEMORY_DIR}/merge-email.md`, "---\nname: merge-email\nmetadata:\n  type: feedback\n  topic_key: merge-email\n---\n\nUse the noreply address.\n");
+  if (options.engram !== false) {
+    host.toolList = [...ENGRAM_TOOLS];
+    host.mcpAnswer = HEALTHY;
+  }
+  return host;
+}
+
+async function startSessionWith(handlers: Map<string, Hook>, engine: unknown): Promise<unknown> {
+  const hook = handlers.get("session.start");
+  assert.ok(hook, "session.start was never registered");
+  return hook(engine, { source: "startup" }, async (e: unknown) => e);
+}
+
+/** Fires tool.call on the main thread; `next` answers `answer` and is counted. */
+async function mainToolCall(handlers: Map<string, Hook>, engine: unknown, tool: string, args: Record<string, unknown>, answer: unknown): Promise<{ result: unknown; nexts: number }> {
+  const hook = handlers.get("tool.call");
+  assert.ok(hook, "tool.call was never registered");
+  let nexts = 0;
+  const result = await hook(engine, { tool, tool_use_id: `toolu_${tool}`, ...args }, async () => {
+    nexts += 1;
+    return answer;
+  });
+  return { result, nexts };
+}
+
+function memoryRows(host: FakeHost): Record<string, unknown>[] {
+  return (host.files.get(MEMORY_ROWS_PATH) ?? "").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** Shadow writes nothing: no Engram write call, nothing under the account's memory or spool folders. */
+function assertNothingWritten(host: FakeHost, seeded: ReadonlySet<string>): void {
+  assert.deepEqual(host.mcpCalls.filter((call) => call.tool !== "mem_current_project"), [], "the only Engram call is the read-only health check");
+  const written = [...host.files.keys()].filter((path) => !seeded.has(path));
+  assert.deepEqual(written.filter((path) => path.startsWith(MEMORY_ACCOUNT_DIR) || path.includes("spool")), [], "no memory file, no spool");
+}
+
+test("M8 memory shadow (the default): a sampled UPDATE turn asks Haiku once, forks once, builds the judge dry and logs one row; nothing is written", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const seeded = new Set(host.files.keys());
+  const seededMemory = new Map([...host.files].filter(([path]) => path.startsWith(MEMORY_DIR)));
+  const { handlers, engine } = loadHooks(host);
+
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(host.mcpCalls, [{ server: "engram", tool: "mem_current_project", args: {} }], "one health call at start");
+
+  // The main thread saves on its own; the hook only watches, after next.
+  const saveAnswer = { result: { content: [{ type: "text", text: JSON.stringify({ id: 5, judgment_required: true, candidates: [{ id: 3, title: "Spanish with vos", type: "policy", judgment_id: "rel-1" }] }) }], isError: false } };
+  const saved = await mainToolCall(handlers, engine, "mcp__engram__mem_save", { title: "Spanish with tú", type: "policy", content: "x" }, saveAnswer);
+  assert.equal(saved.result, saveAnswer, "next(e)'s result comes back as it was");
+  assert.equal(saved.nexts, 1);
+  const judged = await mainToolCall(handlers, engine, "mcp__engram__mem_judge", { judgment_id: "rel-1", relation: "supersedes" }, { result: "ok" });
+  assert.equal(judged.nexts, 1);
+
+  const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  assert.equal(result, TURN_RESULT, "next(e)'s result is handed back as it was");
+  await runTimers(host);
+
+  assert.equal(host.modelCalls.length, 1, "one Haiku gate");
+  assert.equal(host.modelCalls[0]?.model, "haiku");
+  assert.equal(host.forkCalls.length, 1, "one fork on a sampled UPDATE");
+  assert.match(host.forkCalls[0] ?? "", /^\[orca-memory\]/, "the fork's prompt carries the module's own marker");
+  assert.match(host.forkCalls[0] ?? "", /merge-email/, "Engram live: the fork reuses the auto-memory topic keys");
+  const rows = memoryRows(host);
+  assert.equal(rows.length, 1);
+  const row = rows[0] ?? {};
+  assert.deepEqual({ ...row, at: "x", account: "x", gateMs: "x", forkMs: "x" }, {
+    at: "x",
+    account: "x",
+    project: "sandbox",
+    mode: "shadow",
+    sessionId: "session-1",
+    backend: "live",
+    decidedBy: "tools+health",
+    permission: "ok",
+    detectedAt: "start",
+    gate: "update",
+    gateMs: "x",
+    gateTokens: { input: 900, output: 9, cacheRead: 0, cacheWrite: 0 },
+    forkSampled: true,
+    fork: "drafted",
+    forkMs: "x",
+    forkTokens: { input: 12, output: 140, cacheRead: 180_000, cacheWrite: 0 },
+    wouldSave: { user: 0, feedback: 1, project: 0, reference: 0 },
+    wouldUpdate: 0,
+    wouldDelete: 0,
+    toEngram: 1,
+    toAutoMemory: 1,
+    judgeBuilds: 1,
+    mainEngramSaves: 1,
+    mainEngramSaveTypes: { policy: 1 },
+    mainJudges: 1,
+    mainCandidates: 1,
+    mainAutoMemoryWrites: 0,
+    agreement: "both",
+  });
+  assert.doesNotMatch(JSON.stringify(row), /Spanish|vos|tú/, "no memory text or title in the row");
+  assertNothingWritten(host, seeded);
+  for (const [path, content] of seededMemory) assert.equal(host.files.get(path), content, `${path} byte for byte`);
+  assert.deepEqual([...host.state.keys()].filter((key) => key.startsWith("memory")), ["memory"], "one state key");
+});
+
+test("M8 memory shadow: an UPDATE outside the sample makes no fork; a SKIP neither; both log a row", async () => {
+  const cases: { gate: unknown; turnId: string; fork: string | null; agreement: string }[] = [
+    { gate: GATE_UPDATE, turnId: turnIdWhere(false), fork: "not-sampled", agreement: "module-only" },
+    { gate: GATE_SKIP, turnId: turnIdWhere(true), fork: null, agreement: "neither" },
+  ];
+  for (const { gate, turnId, fork, agreement } of cases) {
+    const host = memoryHost();
+    host.modelQueue.push(gate);
+    host.forkQueue.push(DRAFT_REPLY);
+    const seeded = new Set(host.files.keys());
+    const { handlers, engine } = loadHooks(host);
+    await startSessionWith(handlers, engine);
+    await completeTurn(handlers, engine, { turnId });
+    await runTimers(host);
+    assert.equal(host.modelCalls.length, 1, String(fork));
+    assert.equal(host.forkCalls.length, 0, String(fork));
+    const row = memoryRows(host)[0];
+    assert.equal(row?.fork, fork);
+    assert.equal(row?.forkSampled, false);
+    assert.deepEqual(row?.wouldSave, { user: 0, feedback: 0, project: 0, reference: 0 });
+    assert.equal(row?.agreement, agreement);
+    assertNothingWritten(host, seeded);
+  }
+});
+
+test("M8 memory off: no detection, no Haiku call, no fork, no row; nothing scheduled", async () => {
+  const host = memoryHost();
+  setModules(host, { memory: "off", "verify-done": "off", steward: "off" });
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  const answer = { result: "saved" };
+  const observed = await mainToolCall(handlers, engine, "mcp__engram__mem_save", { type: "policy" }, answer);
+  assert.equal(observed.result, answer);
+  assert.equal(observed.nexts, 1);
+  const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  assert.equal(result, TURN_RESULT);
+  assert.equal(host.timers.length, 0, "nothing scheduled");
+  await runTimers(host);
+  assert.equal(host.modelCalls.length, 0);
+  assert.equal(host.forkCalls.length, 0);
+  assert.equal(host.mcpCalls.length, 0);
+  assert.equal(host.files.has(MEMORY_ROWS_PATH), false);
+  assert.equal(host.state.has("memory"), false);
+});
+
+test("M8 memory: a timer already scheduled does nothing once the module went off", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_UPDATE);
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  setModules(host, { memory: "off" });
+  await runTimers(host);
+  assert.equal(host.modelCalls.length, 0);
+  assert.equal(host.files.has(MEMORY_ROWS_PATH), false);
+});
+
+test("M8 memory: a subagent's turn, a turn that did not end with an answer, a slash command and the module's own marker do nothing", async () => {
+  const cases: { extra: Record<string, unknown>; messages: Row[] }[] = [
+    { extra: { agentId: "a-1" }, messages: MEMORY_TURN },
+    { extra: { reason: "aborted", isAborted: true }, messages: MEMORY_TURN },
+    { extra: { reason: "error" }, messages: MEMORY_TURN },
+    { extra: {}, messages: [{ role: "user", text: "/compact", toolUses: [] }, { role: "assistant", text: "ok", toolUses: [] }] },
+    { extra: {}, messages: [{ role: "user", text: "[orca-memory] This message is from the memory module", toolUses: [] }, { role: "assistant", text: "{}", toolUses: [] }] },
+  ];
+  for (const { extra, messages } of cases) {
+    const host = memoryHost();
+    host.messages = messages;
+    host.modelQueue.push(GATE_UPDATE);
+    const { handlers, engine } = loadHooks(host);
+    const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(true), ...extra });
+    await runTimers(host);
+    const label = JSON.stringify({ extra, prompt: messages[0]?.text });
+    assert.equal(result, TURN_RESULT, label);
+    assert.equal(host.modelCalls.length, 0, label);
+    assert.equal(host.files.has(MEMORY_ROWS_PATH), false, label);
+  }
+});
+
+test("M8 memory: no Engram anywhere is auto-memory alone; no MCP call; the fork reads the memory files", async () => {
+  const host = memoryHost({ engram: false });
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  assert.equal(host.mcpCalls.length, 0);
+  assert.match(host.forkCalls[0] ?? "", /<file name="merge-email.md">/);
+  assert.doesNotMatch(host.forkCalls[0] ?? "", /<file name="MEMORY.md">/, "the index is not a memory");
+  const row = memoryRows(host)[0];
+  assert.equal(row?.backend, "absent");
+  assert.equal(row?.decidedBy, "none");
+  assert.equal(row?.detectedAt, "turn", "start saw no Engram, so the turn checked again");
+  assert.equal(row?.toEngram, 0);
+  assert.equal(row?.toAutoMemory, 1);
+  assert.equal(row?.judgeBuilds, 0, "no Engram, no judge");
+  assertNothingWritten(host, seeded);
+});
+
+test("M8 memory: Engram configured but not connected is configured-down, decided by the user-scope config", async () => {
+  const host = memoryHost({ engram: false });
+  host.files.set(`${MEMORY_ACCOUNT_DIR}/.claude.json`, JSON.stringify({ mcpServers: { engram: { command: "/opt/homebrew/bin/engram", args: ["mcp"] } } }));
+  host.modelQueue.push(GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  const row = memoryRows(host)[0];
+  assert.equal(row?.backend, "configured-down");
+  assert.equal(row?.decidedBy, "user-config");
+});
+
+test("M8 memory: Engram tools that connect after the start are found at the first turn, with one health call a session", async () => {
+  const host = memoryHost({ engram: false });
+  host.modelQueue.push(GATE_SKIP, GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  host.toolList = [...ENGRAM_TOOLS];
+  host.mcpAnswer = HEALTHY;
+  await completeTurn(handlers, engine, { turnId: "turn-a" });
+  await runTimers(host);
+  await completeTurn(handlers, engine, { turnId: "turn-b" });
+  await runTimers(host);
+  assert.equal(host.mcpCalls.length, 1, "the health call is made once a session");
+  assert.deepEqual(memoryRows(host).map((row) => [row.backend, row.detectedAt]), [["live", "turn"], ["live", "turn"]]);
+});
+
+test("M8 memory: a refused health call is live with permission refused, never down; a failing one is configured-down", async () => {
+  const cases = [
+    { error: "$.mcp.call(engram, mem_current_project) refused: Claude requested permissions to use mcp__engram__mem_current_project, but you haven't granted it yet.", backend: "live", permission: "refused" },
+    { error: "connection closed", backend: "configured-down", permission: "unknown" },
+  ];
+  for (const { error, backend, permission } of cases) {
+    const host = memoryHost();
+    host.mcpAnswer = () => {
+      throw new Error(error);
+    };
+    host.modelQueue.push(GATE_SKIP);
+    const { handlers, engine } = loadHooks(host);
+    await startSessionWith(handlers, engine);
+    await runTimers(host);
+    await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+    await runTimers(host);
+    const row = memoryRows(host)[0];
+    assert.equal(row?.backend, backend, error);
+    assert.equal(row?.permission, permission, error);
+  }
+});
+
+test("M8 memory: what Haiku reads is the index and the redacted last exchange; a malformed answer is no verdict and no fork", async () => {
+  const host = memoryHost();
+  const secret = "sk-ant-api03-" + "c".repeat(40);
+  host.messages = [
+    { role: "user", text: `Guarda que la clave del staging es ${secret}`, toolUses: [] },
+    { role: "assistant", text: "No guardo secretos.", toolUses: [{ tool_use_id: "r1", tool: "Read", input: { file_path: "/secret/path.ts" }, text: "SECRET_FILE_CONTENTS" }] },
+  ];
+  host.modelQueue.push({ isAnswered: true, text: "I think UPDATE because it matters", usage: USAGE(800, 12) });
+  host.forkQueue.push(DRAFT_REPLY);
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  const sent = JSON.stringify(host.modelCalls[0] ?? {});
+  assert.match(sent, /Merge email/, "the MEMORY.md index");
+  assert.match(sent, /la clave del staging/, "the exchange");
+  assert.ok(!sent.includes(secret), "the secret is redacted");
+  assert.ok(!sent.includes("SECRET_FILE_CONTENTS"), "no tool output");
+  assert.ok(!sent.includes("/secret/path.ts"), "no tool input");
+  assert.equal(host.forkCalls.length, 0);
+  const row = memoryRows(host)[0];
+  assert.equal(row?.gate, "malformed");
+  assert.equal(row?.fork, null);
+  assert.equal(row?.agreement, "unknown");
+});
+
+test("M8 memory: a gate with no answer logs no-answer; a model call that rejects logs nothing and the turn is untouched", async () => {
+  const host = memoryHost();
+  host.modelQueue.push({ isAnswered: false, reason: "api-error", status: 529, error: "overloaded", usage: USAGE(0, 0) });
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  assert.equal(memoryRows(host)[0]?.gate, "no-answer");
+
+  const rejecting = memoryHost();
+  const loaded = loadHooks(rejecting);
+  const result = await completeTurn(loaded.handlers, loaded.engine, { turnId: turnIdWhere(true) });
+  await runTimers(rejecting);
+  assert.equal(result, TURN_RESULT);
+  assert.equal(rejecting.files.has(MEMORY_ROWS_PATH), false);
+});
+
+test("M8 memory: a sampled fork is skipped when the next turn already started", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  const start = handlers.get("turn.start");
+  assert.ok(start);
+  await start(engine, { turnId: "turn-next" }, async (e: unknown) => e);
+  await runTimers(host);
+  assert.equal(host.forkCalls.length, 0);
+  assert.equal(memoryRows(host)[0]?.fork, "turn-moved-on");
+});
+
+test("M8 memory: a main-thread Write into the memory folder is seen; one elsewhere, or a subagent's, is not", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  const answer = { result: "written" };
+  const inMemory = await mainToolCall(handlers, engine, "Write", { file_path: `${MEMORY_DIR}/feedback_tu.md`, content: "x" }, answer);
+  assert.equal(inMemory.result, answer);
+  await mainToolCall(handlers, engine, "Write", { file_path: `${CWD}/notes.md`, content: "x" }, answer);
+  const hook = handlers.get("tool.call");
+  assert.ok(hook);
+  await hook(engine, { tool: "Write", tool_use_id: "s1", agentId: "a-1", file_path: `${MEMORY_DIR}/sub.md`, content: "x" }, async () => answer);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  const row = memoryRows(host)[0];
+  assert.equal(row?.mainAutoMemoryWrites, 1);
+  assert.equal(row?.agreement, "main-only");
+});
+
+test("M8 memory: what was seen belongs to its own turn; the next turn starts from zero", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_SKIP, GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await mainToolCall(handlers, engine, "mcp__engram__mem_save", { type: "discovery" }, { result: "{}" });
+  await completeTurn(handlers, engine, { turnId: "turn-a" });
+  await completeTurn(handlers, engine, { turnId: "turn-b" });
+  await runTimers(host);
+  assert.deepEqual(memoryRows(host).map((row) => row.mainEngramSaves), [1, 0]);
 });
