@@ -4239,16 +4239,33 @@ function assertSecretAsk (home, answer, file) {
   assert.equal(record.source, 'local-rule')
 }
 
-test('secret guard G0: git add -f .env asks, naming the file', { todo: 'G1' }, () => {
+test('secret guard G0: git add -f .env asks, naming the file', () => {
   const home = makeHome()
   const repo = secretRepo()
   assertSecretAsk(home, answerFor(home, 'git add -f .env', repo), '.env')
 })
 
-test('secret guard G0: git add .env && git commit asks, naming the file', { todo: 'G1' }, () => {
+test('secret guard G0: git add .env && git commit asks, naming the file', () => {
   const home = makeHome()
   const repo = secretRepo()
   assertSecretAsk(home, answerFor(home, 'git add .env && git commit -qm x', repo), '.env')
+})
+
+test('secret guard G1: git add -f . stages the ignored .env, and asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  assertSecretAsk(home, answerFor(home, 'git add -f . && git commit -qm all', repo), '.env')
+})
+
+test('secret guard G1: templates and add -A with an ignored .env stay own-tree work, with no ask', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  for (const name of ['.env.example', '.env.sample', '.env.template']) writeFileSync(join(repo, name), 'API_KEY=\n')
+  for (const command of ['git add .env.example .env.sample .env.template && git commit -qm templates', 'git add -A && git commit -qm wip']) {
+    const answer = answerFor(home, command, repo)
+    assert.equal(answer.permissionDecision, 'allow', `${command}: ${answer.reason}`)
+    assert.equal(lastGateRecord(home).stopReason, 'own-tree', command)
+  }
 })
 
 test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', { todo: 'G3' }, () => {

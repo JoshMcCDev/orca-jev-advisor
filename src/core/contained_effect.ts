@@ -43,6 +43,7 @@
 import { posix } from "node:path";
 
 import { isSafeSegment } from "./gate_safe_command.ts";
+import { secretPathKind } from "./secret_paths.ts";
 
 export interface ContainedEffectInput {
   /** Temp roots as the environment names them (tempRootsFromEnvironment); realpath'd here. */
@@ -1104,8 +1105,27 @@ function isOwnBranchName(name: string, places: Places): boolean {
 }
 
 /**
+ * Gate secret guard G1 (odd/tasks/gate-secret-guard.md): an add that stages
+ * past .gitignore (`-f`/`--force`, alone or in a cluster such as `-Af`) or
+ * names a secret path (secret_paths.ts, a `.npmrc` included, whose content
+ * only the gate reads). `-A`, `.` and `-u` stay: they skip ignored files.
+ */
+function addMayStageSecret(words: readonly string[]): boolean {
+  let pathspecs = false;
+  for (const word of words) {
+    if (!pathspecs && word === "--") pathspecs = true;
+    else if (!pathspecs && word.startsWith("--")) {
+      if (word === "--force") return true;
+    } else if (!pathspecs && /^-[A-Za-z]+$/.test(word)) {
+      if (word.includes("f")) return true;
+    } else if (secretPathKind(word) !== null) return true;
+  }
+  return false;
+}
+
+/**
  * 0.6.28 T6: git that only changes the own tree's index, its branch list or
- * its own history on a working branch: `add`, `commit` (never
+ * its own history on a working branch: `add` (never a secret, G1), `commit` (never
  * `--no-verify`/`-n`), `checkout -b`, `switch -c`/`switch <name>`, `stash`
  * (`push`/`save`), `restore --staged`. Only `-C <dir>` may come before the
  * subcommand. Never anything that discards work, rewrites history from
@@ -1130,7 +1150,7 @@ function localGitContained(args: readonly Expanded[], cwd: string, places: Place
   const quiet = (word: string): boolean => word === "-q" || word === "--quiet";
   switch (subcommand) {
     case "add":
-      return true;
+      return !addMayStageSecret(rest);
     case "commit":
       return !rest.some((word) => word === "--no-verify" || /^-[A-Za-z]*n[A-Za-z]*$/.test(word));
     case "checkout": {

@@ -112,7 +112,7 @@ export type GateVerdict = "allow" | "ask" | "deny" | "advise";
 export type GateFailure = JevFailure | { readonly kind: "oversized" };
 export type GateFailureClass = GateFailure["kind"];
 
-export type GateStopReason = "policy" | "local-rule" | "local-allow" | "risk" | "unreachable" | "cache" | "advice-retry" | "queue" | "authorized" | "contained" | "own-tree" | "trusted";
+export type GateStopReason = "policy" | "local-rule" | "local-allow" | "risk" | "unreachable" | "cache" | "advice-retry" | "queue" | "authorized" | "contained" | "own-tree" | "trusted" | "secret-publish";
 
 export interface GateDecisionRecord {
   readonly type: "gate-decision";

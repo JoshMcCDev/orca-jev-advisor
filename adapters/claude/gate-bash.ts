@@ -103,6 +103,8 @@ import type { HumanQueueEntry } from '../../src/core/human_queue.ts'
 import { TEAM_OWNERS_MIRROR_FILE, parseTeamOwners } from '../../src/core/team_owners.ts'
 import { TRUSTED_PROGRAMS_MIRROR_FILE, parseTrustedPrograms } from '../../src/core/trusted_programs.ts'
 import { qualifiesForLocalGitAllow } from '../../src/core/push_own_branch.ts'
+import { findSecretPublish } from '../../src/core/secret_publish.ts'
+import type { SecretPublishFinding, SecretPublishReader, SecretPublishResult } from '../../src/core/secret_publish.ts'
 import { deliveryClassesOf } from '../../src/core/delivery_class.ts'
 import type { DeliveryClass } from '../../src/core/delivery_class.ts'
 import { AUTHORIZATIONS_FILE, EMPTY_AUTHORIZATIONS, isAuthorized, parseAuthorizations, pruneExpired, recordAuthorization, repoIdentity, repoSpecIdentity, touchAuthorization } from '../../src/core/gate_authorizations.ts'
@@ -2037,6 +2039,55 @@ function commandIsOwnTreeWork(command: string, cwd: string): boolean {
   }
 }
 
+/** Larger than this, a file is not read for a credential: no `.npmrc` or `.pypirc` is. */
+const SECRET_CONTENT_MAX_BYTES = 64 * 1024
+
+/**
+ * Gate secret guard: what src/core/secret_publish.ts reads from this
+ * process's repositories -- `git add --dry-run` for a forced add, and a
+ * by-content file's text. Every read fails to null ("unknown").
+ */
+const SECRET_PUBLISH_READER: SecretPublishReader = {
+  forcedAddPaths: (dir, args) => {
+    const out = gitOutput(['add', '--dry-run', '--force', ...args], dir)
+    if (out === null) return null
+    return out.split('\n').flatMap((line) => {
+      const match = /^add '(.*)'$/.exec(line)
+      return match === null ? [] : [match[1] ?? '']
+    })
+  },
+  workingContent: (dir, path) => {
+    try {
+      const file = resolve(dir, path)
+      return statSync(file).size > SECRET_CONTENT_MAX_BYTES ? null : readFileSync(file, 'utf8')
+    } catch {
+      return null
+    }
+  },
+}
+
+/** Whether `command` stages, commits or pushes a secret path; an unexpected throw is "unknown", never a silent clean. */
+function readSecretPublish(command: string, cwd: string): SecretPublishResult {
+  try {
+    return findSecretPublish(command, cwd, homedir(), SECRET_PUBLISH_READER)
+  } catch {
+    return { kind: 'unknown' }
+  }
+}
+
+/**
+ * The secret guard's ask: the person decides, with the file and the reason
+ * in front of them. Recorded as a local rule (`secret-publish`), never
+ * cached and never remembered as an authorization -- the finding depends on
+ * the repository's state, not on the command's shape.
+ */
+function emitSecretPublishAsk(finding: SecretPublishFinding, command: string, actingCwd: string, toolUseId: string | null, teamInternal: boolean): void {
+  appendGateRecord(actingCwd, command, 'local-rule', 'ask', null, 'secret-publish', null, teamInternal)
+  appendPendingApproval(toolUseId, actingCwd, command, null, null, { reversible: null, external: null, consequence: null }, GATE_CONSEQUENCE_CEILING, 'secret-publish', null)
+  const segment = truncateForPersonLine(affectedSegments(command)[0] ?? command)
+  emit('ask', t(`secretPublish.${finding.kind}`, { file: finding.path }), t('secretPublishLine', { file: finding.path, segment }))
+}
+
 /** A command that qualifies for a local allow, which kind, and the trusted programs it runs (T7) -- see src/core/local_allow.ts. */
 type LocalAllow = { readonly qualifies: true; readonly kind: LocalAllowKind; readonly programs: readonly string[] } | { readonly qualifies: false }
 
@@ -2296,16 +2347,32 @@ async function main(): Promise<void> {
   // tree on a working branch -- the effect of Claude Code's own Edit and
   // Write tools, which never reach this gate -- qualify the same way, when
   // nothing in the text names a shared branch (src/core/local_allow.ts).
-  const localGitAllow: LocalGitAllowResult = mentionOnly ? { qualifies: false } : qualifiesForLocalGitAllow({ command, cwd })
+  //
+  // Gate secret guard (odd/tasks/gate-secret-guard.md): a command that
+  // stages, commits or pushes a secret path asks the person, naming the
+  // file, before any local allow, the advice retry pass, the remembered
+  // authorizations or the verdict cache could let it through -- a pushed key
+  // cannot be taken back. The local deny rules above already had their say.
+  // A read git could not answer is no evidence of a secret: it only keeps
+  // the command off the local allows, so the ordinary path judges it.
+  const secretPublish: SecretPublishResult = mentionOnly ? { kind: 'clean' } : readSecretPublish(inspected, cwd)
+  if (secretPublish.kind === 'found') {
+    emitSecretPublishAsk(secretPublish.finding, command, actingCwd, toolUseId, teamInternal)
+    return
+  }
+  const localAllowsOff = secretPublish.kind !== 'clean'
+  const localGitAllow: LocalGitAllowResult = mentionOnly || localAllowsOff ? { qualifies: false } : qualifiesForLocalGitAllow({ command, cwd })
   // 0.6.28 T7: so does a line of programs the person trusted in the panel.
-  const trustedRun = localGitAllow.qualifies || namesProtected ? null : trustedProgramsInCommand(command, cwd)
-  const localAllow: LocalAllow = localGitAllow.qualifies
-    ? { qualifies: true, kind: localGitAllow.reasonKind ?? 'ownBranchPush', programs: [] }
-    : !namesProtected && commandIsOwnTreeWork(command, cwd)
-      ? { qualifies: true, kind: 'ownTree', programs: [] }
-      : trustedRun !== null
-        ? { qualifies: true, kind: 'trusted', programs: trustedRun }
-        : { qualifies: false }
+  const trustedRun = localGitAllow.qualifies || namesProtected || localAllowsOff ? null : trustedProgramsInCommand(command, cwd)
+  const localAllow: LocalAllow = localAllowsOff
+    ? { qualifies: false }
+    : localGitAllow.qualifies
+      ? { qualifies: true, kind: localGitAllow.reasonKind ?? 'ownBranchPush', programs: [] }
+      : !namesProtected && commandIsOwnTreeWork(command, cwd)
+        ? { qualifies: true, kind: 'ownTree', programs: [] }
+        : trustedRun !== null
+          ? { qualifies: true, kind: 'trusted', programs: trustedRun }
+          : { qualifies: false }
   if (localAllow.qualifies && commandScopedPolicies.length === 0) {
     appendGateRecord(actingCwd, command, 'local-rule', 'allow', null, localAllowStopReason(localAllow.kind), null, teamInternal)
     emit('allow', localAllowReason(localAllow))
