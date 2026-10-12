@@ -65,8 +65,17 @@ Ships Active (no Shadow): it is a deterministic path check.
   run from a non-repository went RED on the first cut (unknown read turned
   the local allow off) and GREEN once "no repository / missing source sends
   nothing" was read as clean.
-- [ ] G4 Precedence: runs before the 0.6.28 remembered authorizations and the
+- [x] G4 Precedence: runs before the 0.6.28 remembered authorizations and the
   shape cache replay; a policy deny stays a deny; a local-rule deny stays a deny.
+  The check sits after the local deny rules and the policy filtering, before
+  the local allows, the retry pass, the key, the cache and Jev. With no
+  `prohibits` policy left it asks at once. With one, the cache and Jev still
+  judge, and only their policy deny is kept; an allow, an advice, a policy
+  ask, no key or no answer become the ask. Never cached, never remembered,
+  never relaxed by the retry pass. Proof: authorized push and cache replay
+  (G0) GREEN since G3; cached policy deny RED (`ask`) then GREEN (`deny`);
+  local-rule deny (`feat/x:main`), prohibiting policy with a cached allow or
+  no key, and no-cache/no-authorization/retry-asks-again tests GREEN.
 - [ ] G5 Visibility: es/en ask text names the file and the reason; distinct
   `stopReason` in `GateStopReason` and its guard; panel row only if the panel
   lists fixed rules.

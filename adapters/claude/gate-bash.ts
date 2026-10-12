@@ -2380,9 +2380,15 @@ async function main(): Promise<void> {
   // cannot be taken back. The local deny rules above already had their say.
   // A read git could not answer is no evidence of a secret: it only keeps
   // the command off the local allows, so the ordinary path judges it.
+  //
+  // A team policy that prohibits is the one thing stronger than this ask: when
+  // one survives filtering, the cache and Jev still judge the command, and
+  // only their policy deny is kept -- anything else, no key or no answer,
+  // becomes this ask (secretFinding below).
   const secretPublish: SecretPublishResult = mentionOnly ? { kind: 'clean' } : readSecretPublish(inspected, cwd)
-  if (secretPublish.kind === 'found') {
-    emitSecretPublishAsk(secretPublish.finding, command, actingCwd, toolUseId, teamInternal)
+  const secretFinding = secretPublish.kind === 'found' ? secretPublish.finding : null
+  if (secretFinding !== null && !commandScopedPolicies.some((policy) => migratePolicyKind(policy.kind) === 'prohibits')) {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
     return
   }
   const localAllowsOff = secretPublish.kind !== 'clean'
@@ -2415,13 +2421,17 @@ async function main(): Promise<void> {
   // costs neither a wasted network round trip nor even the no-key notice
   // machinery below -- true for an uncacheable command shape exactly as much
   // as a cacheable one.
-  if (tryAdviceRetryPass(command, cwd, actingCwd, sessionId, 'jev', null, teamInternal)) return
+  if (secretFinding === null && tryAdviceRetryPass(command, cwd, actingCwd, sessionId, 'jev', null, teamInternal)) return
 
   const apiKey = await resolveApiKey()
   const previouslyWarnedNoKey = readNoKeyWarned()
   const noKeyNotice = decideNoKeyNotice(apiKey !== null, previouslyWarnedNoKey)
   if (noKeyNotice.nextWarned !== previouslyWarnedNoKey) writeNoKeyWarned(noKeyNotice.nextWarned)
   if (apiKey === null) {
+    if (secretFinding !== null) {
+      emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+      return
+    }
     if (noKeyNotice.shouldWarn) passThroughWithNotice(t('noApiKey'))
     passThrough()
   }
@@ -2476,6 +2486,11 @@ async function main(): Promise<void> {
   const key = cacheKey(command, context, cwd, matchedDestination?.id ?? null, catalogMatch?.treeRoot ?? null, commandScopedPolicies, matchedDestination?.autonomy?.consequenceCeiling, localAllow.qualifies ? localAllow.kind : null)
   const cache = key === null ? {} : readCache()
   const hit = key === null ? undefined : cache[key]
+  // Secret guard: only a cached policy deny is replayed over a secret.
+  if (secretFinding !== null && hit !== undefined && hit.decision !== 'deny') {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+    return
+  }
   if (hit !== undefined) {
     // An 'advise' hit is never replayed as a canned line: recoverability
     // depends on the CURRENT git status, which the shape-only cache key
@@ -2547,6 +2562,13 @@ async function main(): Promise<void> {
   const jevStartedAt = Date.now()
   const outcome = await askJev(apiKey, command, jevContext, jevNames, localAllow, matchedDestination, commandScopedPolicies, cwd)
   const jevLatencyMs = Date.now() - jevStartedAt
+
+  // Secret guard: only a policy deny from Jev is stronger than the ask; no
+  // answer, an allow, an advice or a policy ask all become the ask, uncached.
+  if (secretFinding !== null && !(outcome.kind === 'verdict' && outcome.decision === 'deny' && outcome.policyId !== null)) {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
+    return
+  }
 
   if (outcome.kind === 'none') {
     // The decision is a truthful 'allow' (failing open is correct and must

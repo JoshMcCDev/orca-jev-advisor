@@ -4319,6 +4319,57 @@ test('secret guard G3: a secret already on origin\'s default branch is not this 
   assertAllowedByOwnBranchPush(home, 'git push -u origin feat/x', repo)
 })
 
+const NO_SECRETS_OUT = { id: 'no_secrets_out', rule: 'Nothing leaves this repository without review.', kind: 'prohibits', scope: 'command' }
+
+/** Seeds one verdict for `command` under the key the hook computes once the secret guard has switched the local allows off. */
+function seedSecretPushVerdict (home, cwd, command, policies, entry) {
+  const existing = existsSync(verdictCachePath(home)) ? JSON.parse(readFileSync(verdictCachePath(home), 'utf8')) : {}
+  existing[computeCacheKey(command, cwd, home, { repoContext: computeRepoContextForTest(cwd), policies })] = entry
+  writeVerdictCacheEntries(home, existing)
+}
+
+test('secret guard G4: a policy deny of a push carrying .env stays a deny', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const command = 'git push origin feat/x'
+  writePoliciesMirror(home, [NO_SECRETS_OUT])
+  seedSecretPushVerdict(home, repo, command, [NO_SECRETS_OUT], { decision: 'deny', reason: 'forbidden by no_secrets_out', policyId: 'no_secrets_out', at: Date.now() })
+  const answer = keyedAnswerFor(home, command, repo, 'secret-policy-deny')
+  assert.equal(answer.permissionDecision, 'deny', answer.reason)
+  assert.match(answer.message, /no_secrets_out/)
+})
+
+test('secret guard G4: with a prohibiting policy that does not stop it, or no key to ask, the push still asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const command = 'git push origin feat/x'
+  writePoliciesMirror(home, [NO_SECRETS_OUT])
+  assertSecretAsk(home, answerFor(home, command, repo), '.env')
+  seedSecretPushVerdict(home, repo, command, [NO_SECRETS_OUT], { decision: 'allow', reason: 'not covered', at: Date.now() })
+  assertSecretAsk(home, keyedAnswerFor(home, command, repo, 'secret-policy-allow'), '.env')
+})
+
+test('secret guard G4: a local-rule deny stays a deny', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  const answer = answerFor(home, 'git push origin feat/x:main', repo)
+  assert.equal(answer.permissionDecision, 'deny', answer.reason)
+  assert.equal(lastGateRecord(home).stopReason, 'local-rule')
+})
+
+test('secret guard G4: the ask is never cached or remembered, and a retry in the same session asks again', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeAuthorizations(home, {})
+  for (let attempt = 0; attempt < 2; attempt += 1) assertSecretAsk(home, keyedAnswerFor(home, 'git push origin feat/x', repo, 'secret-retry'), '.env')
+  assert.equal(existsSync(verdictCachePath(home)), false, 'no verdict is cached for a finding that depends on the repository')
+  assert.deepEqual(readAuthorizations(home).repos, {}, 'nothing is remembered')
+})
+
 test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', () => {
   const home = makeHome()
   const repo = secretRepo()
