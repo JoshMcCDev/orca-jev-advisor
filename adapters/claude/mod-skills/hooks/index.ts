@@ -181,6 +181,8 @@ import type { StewardActivity, StewardDecision, StewardJudgment, StewardMode, St
 import { stewardFromSettings } from '../../../../src/core/model_router_mode.ts'
 import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, interpretVerifyDone, isVerifyDoneCandidate, verifyDoneDecisionFileName, verifyDoneRecord } from '../../../../src/core/verify_done.ts'
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
+import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
+import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
 
 const DEFAULT_BUDGET_MS = 800
 const DEFAULT_SHORTLIST = 3
@@ -2167,6 +2169,72 @@ async function verifyDoneAfterTurn($: EngineInterface, options: PluginOptions, m
 }
 
 // ---------------------------------------------------------------------------
+// Typing lead time (odd/tasks/typing-lead-time.md, K0). `prompt.edit` fires on
+// every keystroke at the composer, so its hook hands `next(e)`'s result back
+// at once and only queues two host reads (clock, session id) that update a
+// draft record in memory: no file, no `$.state`. `prompt.submit` reads and
+// clears the composer's draft and appends one row per scored prompt to the
+// hour's `typing-*.jsonl`, unless skill selection is off. Fails open.
+// ---------------------------------------------------------------------------
+
+/** Each session's draft, and the queued keystroke updates `prompt.submit` waits for. One per `register`. */
+interface TypingTracking {
+  readonly drafts: Map<string, TypingDraft>;
+  pending: Promise<void>;
+}
+
+/** How long `prompt.submit` waits for queued keystroke updates before it reads the draft anyway. */
+const TYPING_SETTLE_MS = 200
+
+async function noteTypingKeystroke($: EngineInterface, typing: TypingTracking): Promise<void> {
+  const [at, sessionId] = await Promise.all([$.clock.now(), $.session.id()])
+  keepBounded(typing.drafts, sessionId, noteTypingEdit(typing.drafts.get(sessionId), at))
+}
+
+/** Called by `prompt.edit` after `next(e)`: queues the update and returns at once. Never throws. */
+function trackTypingEdit($: EngineInterface, typing: TypingTracking): void {
+  try {
+    typing.pending = typing.pending.then(() => noteTypingKeystroke($, typing)).catch(() => {})
+  } catch {
+    // A keystroke is never affected by the measure.
+  }
+}
+
+/** Appends one row to the current hour's `typing-*.jsonl`, best-effort. */
+async function appendTyping($: EngineInterface, atIso: string, line: string): Promise<void> {
+  try {
+    const paths = await resolveHomePaths($)
+    if (!paths) return
+    await appendToFile($, `${paths.cacheDir}/${typingFileName(atIso)}`, line)
+  } catch {
+    // Logging is best-effort and must never affect the prompt.
+  }
+}
+
+/**
+ * At `prompt.submit`: a composer submission takes its session's draft and
+ * clears it; another origin leaves the draft for the person's own Enter. A
+ * row is written only for a prompt the skill scorer sees (`scored`) and only
+ * when skill selection is not off (`write`). Never throws.
+ */
+async function recordTypingAtSubmit($: EngineInterface, typing: TypingTracking, originKind: string, scored: boolean, write: boolean): Promise<void> {
+  try {
+    // Settled first, so a keystroke update still queued reads its clock before the submission does.
+    await Promise.race([typing.pending, $.clock.sleep(TYPING_SETTLE_MS).catch(() => {})])
+    const submittedAt = await $.clock.now()
+    const sessionId = await readSessionId($)
+    const draft = sessionId === null ? undefined : typing.drafts.get(sessionId)
+    if (originKind === 'composer' && sessionId !== null) typing.drafts.delete(sessionId)
+    if (!scored || !write) return
+    const at = new Date(submittedAt).toISOString()
+    const record = typingRecord({ at, sessionId, origin: originKind, typing: typingAtSubmit(originKind, draft, submittedAt) })
+    await appendTyping($, at, `${JSON.stringify(record)}\n`)
+  } catch {
+    // The measure never affects the prompt.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Active-mode switches -- hoisted out of `register` (JEVADV-43): the engine
 // refuses `$` passed into a closure declared INSIDE register, only a
 // top-level function. These take the option value already resolved from
@@ -2312,6 +2380,16 @@ export function register(on: On, options: PluginOptions): void {
   // The main turn running now (turn.start → turn.complete), so the steward
   // never compacts under a turn that started after the one it judged.
   let activeTurnId: string | null = null
+  // K0: each session's draft at the composer (TypingTracking), in memory only.
+  const typing: TypingTracking = { drafts: new Map<string, TypingDraft>(), pending: Promise.resolve() }
+
+  // K0: the keystroke goes through first and untouched; the measure only
+  // queues an in-memory update (trackTypingEdit), so no keystroke waits on it.
+  on('prompt.edit', async ($, e, next) => {
+    const result = await next(e)
+    trackTypingEdit($, typing)
+    return result
+  })
 
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
     // A subagent's own listing is left alone, since nothing here suggests
@@ -2343,6 +2421,10 @@ export function register(on: On, options: PluginOptions): void {
     // `off` module does none of its work below -- no state write, no Jev call.
     const modules = await resolveFeatureModules($, modulesFile)
     const skillState = moduleState(modules, 'skill-selection')
+    // K0: the typing lead time, measured first so its clock read is the
+    // submission's. Scored means what the skill scorer below would see.
+    const typedText = e.text.trim()
+    await recordTypingAtSubmit($, typing, e.origin.kind, typedText.length > 0 && !typedText.startsWith('/'), skillState !== 'off')
     if (moduleState(modules, 'model-router') !== 'off') {
       try {
         const origin: RouterPromptOrigin = { kind: e.origin.kind }

@@ -244,7 +244,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     defaultState: "active",
     hooks: [],
     modFeatures: [
-      { id: "skill-selection", hooks: ["prompt.submit", "prompt.attachment", "skill.prompt"], jev: true },
+      { id: "skill-selection", hooks: ["prompt.edit", "prompt.submit", "prompt.attachment", "skill.prompt"], jev: true },
       { id: "tool-selection", hooks: ["prompt.submit", "tool.call"], jev: true },
     ],
     workerJobs: [

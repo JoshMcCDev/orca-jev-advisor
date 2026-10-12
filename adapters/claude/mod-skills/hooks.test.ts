@@ -26,9 +26,13 @@
 //   node --test adapters/claude/mod-skills/hooks.test.ts
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { register } from "./hooks/index.ts";
+import { walkModSkillsClosure } from "../../../src/core/mod_skills_copy.ts";
 
 // ---------------------------------------------------------------------------
 // A minimal fake of the Claude Code function-hooks host: only the `on`
@@ -553,16 +557,17 @@ test("the shared sampling roll's own failure fails open as not sampled: no throw
   host.toolList = [{ name: "Bash", description: "Runs a shell command", mcp: false }];
   const { handlers, engine } = loadHooks(host);
 
-  // The roll's own `$.clock.now()` call (building `today`) is the very
-  // first clock read of the whole prompt.submit run -- fail only that one
-  // call, so everything after the roll (timestamps inside the two
-  // closures, should either of them still run) keeps behaving normally.
+  // The roll's own `$.clock.now()` call (building `today`) is the second
+  // clock read of the whole prompt.submit run, after K0's typing lead time
+  // (whose own failure the K0b tests cover) -- fail only that one call, so
+  // everything after the roll (timestamps inside the two closures, should
+  // either of them still run) keeps behaving normally.
   const baseEngine = engine as { clock: { now: () => Promise<number> } };
   const originalNow = baseEngine.clock.now.bind(baseEngine.clock);
   let callCount = 0;
   baseEngine.clock.now = async () => {
     callCount += 1;
-    if (callCount === 1) throw new Error("clock unavailable");
+    if (callCount === 2) throw new Error("clock unavailable");
     return originalNow();
   };
 
@@ -3960,4 +3965,153 @@ test("V3 verify-done: what Jev reads is the redacted final message and counts; a
   assert.ok(!body.includes(secret), "the secret is redacted");
   assert.ok(!body.includes("SECRET_CONTENTS"), "no file contents");
   assert.ok(!body.includes("secret-module"), "no paths");
+});
+
+// ---------------------------------------------------------------------------
+// K0b typing lead time (odd/tasks/typing-lead-time.md): `prompt.edit` keeps
+// each session's draft in memory only; `prompt.submit` writes one row per
+// scored prompt to `typing-<hour>.jsonl`, following skill-selection's state.
+// These tests load the real mod, so they also prove it loads with the new
+// src/core import (src/core/typing_lead_time.ts has no `node:` import).
+// ---------------------------------------------------------------------------
+
+const TYPING_PATH = `${CACHE_DIR}/typing-2026-09-25T10.jsonl`;
+const EDIT_RESULT = { text: "h", cursor: 1 };
+
+/** One keystroke at the composer; returns what the hook handed back. */
+async function typeKey(handlers: Map<string, Hook>, engine: unknown, text = ""): Promise<unknown> {
+  const hook = handlers.get("prompt.edit");
+  assert.ok(hook, "prompt.edit was never registered");
+  return hook(engine, { origin: { kind: "composer" }, text, cursor: text.length, start: text.length, end: text.length, inputText: "h" }, async () => EDIT_RESULT);
+}
+
+async function submitFrom(handlers: Map<string, Hook>, engine: unknown, text: string, kind: string): Promise<unknown> {
+  const submit = handlers.get("prompt.submit");
+  assert.ok(submit, "prompt.submit was never registered");
+  return submit(engine, { text, wait: false, origin: { kind } }, promptSubmitNext);
+}
+
+function typingRows(host: FakeHost): Record<string, unknown>[] {
+  return (host.files.get(TYPING_PATH) ?? "").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("K0b the installed mod carries the typing core, and nothing it loads imports node: (the hook sandbox has no Node)", async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+  const closure = await walkModSkillsClosure("adapters/claude/mod-skills/hooks/index.ts", { read: (path) => readFile(join(repoRoot, path), "utf8") });
+  assert.ok(closure.includes("src/core/typing_lead_time.ts"), "the install copies the new core file");
+  for (const path of closure) {
+    const source = await readFile(join(repoRoot, path), "utf8");
+    assert.doesNotMatch(source, /from ["']node:/, path);
+  }
+});
+
+test("K0b prompt.edit: hands back next(e)'s own result and writes no file and no state, keystroke after keystroke", async () => {
+  const host = makeFakeHost();
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+  for (let i = 0; i < 5; i += 1) assert.equal(await typeKey(handlers, engine, "h".repeat(i)), EDIT_RESULT);
+  assert.deepEqual(leftBehind(host, seeded), []);
+  assert.equal(host.fetchCalls.length, 0);
+});
+
+test("K0b prompt.edit: a failing clock or session read never reaches the keystroke or the prompt", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  const base = engine as Record<string, Record<string, unknown>>;
+  const broken = { ...base, clock: { ...base.clock, now: async () => { throw new Error("fake host: clock failed"); } }, session: { ...base.session, id: async () => { throw new Error("fake host: id failed"); } } };
+  assert.equal(await typeKey(handlers, broken), EDIT_RESULT);
+  const submitted = await submitFrom(handlers, broken, "how does the auth module work", "composer");
+  assert.deepEqual(submitted, { text: "how does the auth module work", wait: false, origin: { kind: "composer" } });
+});
+
+test("K0b composer prompt: one row with the gap since the last edit and the number of edits", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  for (let i = 0; i < 4; i += 1) await typeKey(handlers, engine, "h".repeat(i));
+  // The person pauses: the queued keystroke updates run, then 750 ms pass.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  host.clockOffsetMs = 750;
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  const rows = typingRows(host);
+  assert.equal(rows.length, 1);
+  const [row] = rows;
+  assert.equal(row?.type, "typing");
+  assert.equal(row?.kind, "composer");
+  assert.equal(row?.origin, "composer");
+  assert.equal(row?.edits, 4);
+  assert.equal(row?.sessionId, "session-1");
+  assert.ok(typeof row?.gapMs === "number" && row.gapMs >= 750 && row.gapMs < 800, `gap ${String(row?.gapMs)}`);
+  assert.equal(JSON.stringify(row).includes("auth module"), false, "the prompt's text is never logged");
+});
+
+test("K0b the draft is cleared at submit: the next prompt counts only its own edits", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  for (let i = 0; i < 3; i += 1) await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "first prompt", "composer");
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "second prompt", "composer");
+  assert.deepEqual(typingRows(host).map((row) => row.edits), [3, 1]);
+});
+
+test("K0b injected prompt: a row of kind injected with no gap, and the draft being typed is left for its own submit", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "a background task finished", "task-notification");
+  await submitFrom(handlers, engine, "my own prompt", "composer");
+  const rows = typingRows(host);
+  assert.deepEqual(rows.map((row) => [row.kind, row.origin, row.gapMs === null, row.edits]), [["injected", "task-notification", true, 0], ["composer", "composer", false, 2]]);
+});
+
+test("K0b a composer prompt with no edit seen is injected, never a 0 ms gap", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  const [row] = typingRows(host);
+  assert.equal(row?.kind, "injected");
+  assert.equal(row?.gapMs, null);
+});
+
+test("K0b empty prompts and slash commands are not scored, so they write no row and still clear the draft", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "/clear", "composer");
+  await submitFrom(handlers, engine, "   ", "composer");
+  assert.equal(host.files.has(TYPING_PATH), false);
+  await submitFrom(handlers, engine, "a real prompt", "composer");
+  assert.equal(typingRows(host)[0]?.kind, "injected", "the /clear draft is not carried over");
+});
+
+test("K0b skill-selection off: typing and sending writes no row", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "skill-selection": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  await submitFrom(handlers, engine, "a background task finished", "task-notification");
+  assert.equal(host.files.has(TYPING_PATH), false);
+});
+
+test("K0b skill-selection shadow: rows are written as in active", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "skill-selection": "shadow" });
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  assert.equal(typingRows(host).length, 1);
+});
+
+test("K0b a subagent's run writes no typing row and leaves the person's draft alone", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "model-router": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await spawnThrough(handlers, engine, spawnEvent());
+  await completeTurn(handlers, engine, { agentId: "agent-1" });
+  assert.equal(host.files.has(TYPING_PATH), false);
+  await submitFrom(handlers, engine, "my own prompt", "composer");
+  assert.deepEqual(typingRows(host).map((row) => [row.kind, row.edits]), [["composer", 1]]);
 });
