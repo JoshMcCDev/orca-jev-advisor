@@ -20,7 +20,12 @@
 //              already has a measure mode; that mode IS its shadow, so no
 //              second shadow switch exists anywhere. A module that only
 //              measures (verify-done) offers off and shadow, no active, and
-//              has no existing mode: its shadow is its own one switch.
+//              has no existing mode: its shadow is its own one switch. So
+//              does ci-watch (`ownSwitch`), which offers all three: its
+//              state itself is what it does, and its shadow is the one
+//              exception to "only measures" -- it also shows the person a
+//              band row and a toast when a run ends -- but it never talks to
+//              the agent (odd/tasks/ci-watcher.md).
 //   active  -- the module's own existing modes decide, exactly as before
 //              this file existed.
 // `off` is a top state in front of the existing modes, never a parallel
@@ -30,16 +35,17 @@
 // unknown or wrong-typed field, read as each module's default, and every
 // module that existed before 0.8.0 defaults to `active`. verify-done, new in
 // 0.8.0, has no earlier behaviour to keep and defaults to `shadow`: its week
-// of measurement is the point (odd/tasks/verify-done-module.md).
+// of measurement is the point (odd/tasks/verify-done-module.md). ci-watch,
+// new in 0.9.0, is in the same case and also defaults to `shadow`.
 //
 // Pure: no I/O and no node: import, so the mod sandbox can load it too.
 
 /** The module state file, in the plugin config directory (src/core/paths.ts resolveConfigDir). */
 export const FEATURE_MODULES_FILE = "feature-modules.json";
 
-export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done";
+export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done" | "ci-watch";
 
-export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done"];
+export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch"];
 
 export type ModuleState = "off" | "shadow" | "active";
 
@@ -57,7 +63,7 @@ export interface HookEntry {
   readonly script: string;
 }
 
-export type ModFeatureId = "router-tier" | "router-subagent" | "subagent-status" | "turn-usage" | "steward" | "skill-selection" | "tool-selection" | "verify-done";
+export type ModFeatureId = "router-tier" | "router-subagent" | "subagent-status" | "turn-usage" | "steward" | "skill-selection" | "tool-selection" | "verify-done" | "ci-watch";
 
 /** A feature of the shared mod copy (adapters/claude/mod-skills/hooks/index.ts) and the engine hooks it runs from. */
 export interface ModFeature {
@@ -138,6 +144,12 @@ export interface FeatureModule {
   readonly modFeatures: readonly ModFeature[];
   readonly workerJobs: readonly WorkerJob[];
   readonly modes: readonly ModeSource[];
+  /**
+   * The module's state is itself the switch: it has no existing per-feature
+   * mode to cap, so `shadow` and `active` are its own (ci-watch). Only such a
+   * module offers `shadow` without a mode that has a measure value.
+   */
+  readonly ownSwitch?: true;
 }
 
 const FILE_TOOLS_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
@@ -284,6 +296,21 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     workerJobs: [],
     modes: [],
   },
+  {
+    // odd/tasks/ci-watcher.md: after a push the mod watches the run with `gh`
+    // (no Jev call, no hook process of Claude Code's own, no worker job). The
+    // hooks are the mod engine's: tool.call (the wake and the count),
+    // turn.start and turn.complete (is a turn running), ui.render (the band
+    // row) and session.start (a reload forgets the watches).
+    id: "ci-watch",
+    states: MODULE_STATES,
+    defaultState: "shadow",
+    hooks: [],
+    modFeatures: [{ id: "ci-watch", hooks: ["tool.call", "turn.start", "turn.complete", "ui.render", "session.start"], jev: false }],
+    workerJobs: [],
+    modes: [],
+    ownSwitch: true,
+  },
 ];
 
 export type FeatureModules = { readonly [K in ModuleId]: ModuleState };
@@ -295,6 +322,7 @@ export const DEFAULT_FEATURE_MODULES: FeatureModules = {
   "skill-selection": "active",
   board: "active",
   "verify-done": "shadow",
+  "ci-watch": "shadow",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -336,6 +364,7 @@ export function parseFeatureModules(content: string): FeatureModules {
     "skill-selection": stateOf("skill-selection", read("skill-selection")),
     board: stateOf("board", read("board")),
     "verify-done": stateOf("verify-done", read("verify-done")),
+    "ci-watch": stateOf("ci-watch", read("ci-watch")),
   };
 }
 

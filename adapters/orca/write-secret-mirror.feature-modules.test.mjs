@@ -37,8 +37,8 @@ function readModules (content) {
   return JSON.parse(execFileSync(process.execPath, [SCRIPT_PATH, 'feature-modules-read'], { env, encoding: 'utf8' }))
 }
 
-// Every module that existed before 0.8.0 defaults to active; verify-done, new, to shadow.
-const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow' }
+// Every module that existed before 0.8.0 defaults to active; verify-done and ci-watch, new, to shadow.
+const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow' }
 
 test('feature-modules-read: a missing file reads as the defaults', () => {
   assert.deepEqual(readModules(undefined), { ok: true, value: DEFAULTS })
@@ -73,7 +73,7 @@ function runMode (mode, { input, existing } = {}) {
   return { result, file, configDir, content: existsSync(file) ? readFileSync(file, 'utf8') : null }
 }
 
-const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off' }
+const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off', 'ci-watch': 'active' }
 
 test('feature-modules-save: writes the chosen states, pretty-printed, and answers with them', () => {
   const { result, content, configDir } = runMode('feature-modules-save', { input: JSON.stringify({ modules: CHOSEN }) })

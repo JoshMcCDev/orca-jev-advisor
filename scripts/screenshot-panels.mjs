@@ -236,7 +236,7 @@ function emptyWindow (key) {
  * install was left alone). scripts/fixture_shape.test.mjs holds this to the
  * real installer's output.
  */
-const MODULE_HOOK_COUNTS = { gate: 5, 'model-router': 3, steward: 0, 'skill-selection': 0, board: 0, 'verify-done': 0 }
+const MODULE_HOOK_COUNTS = { gate: 5, 'model-router': 3, steward: 0, 'skill-selection': 0, board: 0, 'verify-done': 0, 'ci-watch': 0 }
 function moduleStatus (states, unmatched = []) {
   return Object.fromEntries(Object.entries(MODULE_HOOK_COUNTS).map(([id, hookCount]) => {
     const state = states[id] ?? DEFAULT_FEATURE_MODULES[id]
