@@ -35,14 +35,20 @@ Ships Active (no Shadow): it is a deterministic path check.
 
 ## Checklist
 
-- [ ] G0 End-to-end `gate-bash.test.mjs` tests pin the three shapes, plus the
+- [x] G0 End-to-end `gate-bash.test.mjs` tests pin the three shapes, plus the
   authorized-push and cache-replay precedence cases, as `ask` (RED today).
-- [ ] G1 `git add -f`, or an add whose pathspec names a secret path, is not own-tree
+  Proof: 5/5 RED through the paths they claim: `own-tree` (add -f, add &&
+  commit), `local-allow` (push), `authorized`, `cache`. Committed as `todo`.
+- [x] G1 `git add -f`, or an add whose pathspec names a secret path, is not own-tree
   work and asks. Secret path defined once. `.env.example`, `.env.sample`,
-  `.env.template` stay allowed.
-- [ ] G2 A commit with a staged secret path (or `-a` with a modified tracked
+  `.env.template` stay allowed. Proof: `secret_paths.test.ts` and
+  `secret_publish.test.ts` RED (module missing), own-tree add cases RED
+  (`git add -f .env` was own-tree); GREEN after; both G0 add tests GREEN;
+  full `npm test` 3812 pass, 0 fail, 3 todo.
+- [x] G2 A commit with a staged secret path (or `-a` with a modified tracked
   one, or a secret pathspec) is not own-tree work and asks. The hook reads
-  the staged names.
+  the staged names. Proof: 3 unit tests and 2 e2e tests RED (e2e: `own-tree`
+  allow), GREEN after.
 - [ ] G3 A push asks when any outgoing commit touched a secret path
   (`git log --name-only <range>`, add-then-delete caught). A new branch with
   no upstream is read from the merge-base with origin's default branch.

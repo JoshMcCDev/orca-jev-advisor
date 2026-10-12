@@ -4268,6 +4268,26 @@ test('secret guard G1: templates and add -A with an ignored .env stay own-tree w
   }
 })
 
+test('secret guard G2: a commit with .env already staged asks, naming the file; a clean one stays own-tree work', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  writeFileSync(join(repo, 'a.ts'), 'a\n')
+  git(['add', 'a.ts'], repo)
+  const clean = answerFor(home, 'git commit -qm a', repo)
+  assert.equal(clean.permissionDecision, 'allow', clean.reason)
+  assert.equal(lastGateRecord(home).stopReason, 'own-tree')
+  git(['add', '-f', '.env'], repo)
+  assertSecretAsk(home, answerFor(home, 'git commit -qm x', repo), '.env')
+})
+
+test('secret guard G2: commit -a with a modified tracked .env asks', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeFileSync(join(repo, '.env'), 'API_KEY=sk-test-1111\n')
+  assertSecretAsk(home, answerFor(home, 'git commit -am rotate', repo), '.env')
+})
+
 test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', { todo: 'G3' }, () => {
   const home = makeHome()
   const repo = secretRepo()

@@ -2056,14 +2056,28 @@ const SECRET_PUBLISH_READER: SecretPublishReader = {
       return match === null ? [] : [match[1] ?? '']
     })
   },
-  workingContent: (dir, path) => {
-    try {
-      const file = resolve(dir, path)
-      return statSync(file).size > SECRET_CONTENT_MAX_BYTES ? null : readFileSync(file, 'utf8')
-    } catch {
-      return null
-    }
+  workingContent: (dir, path) => readSecretCandidate(resolve(dir, path)),
+  stagedPaths: (dir) => nulSeparated(gitOutput(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=d', '-z'], dir)),
+  modifiedTrackedPaths: (dir) => nulSeparated(gitOutput(['diff', '--name-only', '--no-renames', '--diff-filter=d', '-z'], dir)),
+  indexContent: (dir, path) => gitOutput(['show', `:${path}`], dir),
+  treeContent: (dir, path) => {
+    const root = gitOutput(['rev-parse', '--show-toplevel'], dir)?.trim()
+    return root === undefined || root.length === 0 ? null : readSecretCandidate(join(root, path))
   },
+}
+
+/** A small file's text, or null when it is missing, unreadable or too large to be a credential file. */
+function readSecretCandidate(file: string): string | null {
+  try {
+    return statSync(file).size > SECRET_CONTENT_MAX_BYTES ? null : readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+/** git's `-z` output as its paths; null stays null ("unknown"). */
+function nulSeparated(out: string | null): readonly string[] | null {
+  return out === null ? null : out.split('\0').filter((path) => path.length > 0)
 }
 
 /** Whether `command` stages, commits or pushes a secret path; an unexpected throw is "unknown", never a silent clean. */

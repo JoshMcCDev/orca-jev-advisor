@@ -33,6 +33,14 @@ export interface SecretPublishReader {
   readonly forcedAddPaths: (dir: string, args: readonly string[]) => readonly string[] | null;
   /** The working-tree text of `path`, relative to `dir`; null when it cannot be read. */
   readonly workingContent: (dir: string, path: string) => string | null;
+  /** The staged paths of the repository at `dir` (deletions left out), relative to its root; null when git fails. */
+  readonly stagedPaths: (dir: string) => readonly string[] | null;
+  /** Its tracked paths modified in the working tree (deletions left out), relative to its root; null when git fails. */
+  readonly modifiedTrackedPaths: (dir: string) => readonly string[] | null;
+  /** The staged text of `path`, relative to the root; null when it cannot be read. */
+  readonly indexContent: (dir: string, path: string) => string | null;
+  /** The working-tree text of `path`, relative to the root; null when it cannot be read. */
+  readonly treeContent: (dir: string, path: string) => string | null;
 }
 
 const CLEAN: SecretPublishResult = { kind: "clean" };
@@ -87,13 +95,17 @@ function addShape(args: readonly string[]): AddShape {
   return { forced, dryRun, widening: [...widening], pathspecs };
 }
 
-/** A path that is a secret, read through the working tree when only its content can say. */
-function secretIn(paths: readonly string[], dir: string | null, reader: SecretPublishReader): string | null {
+/** The first path that is a secret, its content read through `read` only when only its content can say. */
+function firstSecret(paths: readonly string[], read: (path: string) => string | null): string | null {
   for (const path of paths) {
-    if (secretPathKind(path) === null) continue;
-    if (isSecretPath(path, () => (dir === null ? null : reader.workingContent(dir, path)))) return path;
+    if (secretPathKind(path) !== null && isSecretPath(path, () => read(path))) return path;
   }
   return null;
+}
+
+/** A path that is a secret, read through the working tree (relative to `dir`) when only its content can say. */
+function secretIn(paths: readonly string[], dir: string | null, reader: SecretPublishReader): string | null {
+  return firstSecret(paths, (path) => (dir === null ? null : reader.workingContent(dir, path)));
 }
 
 function addResult(args: readonly string[], dir: string | null, reader: SecretPublishReader): SecretPublishResult {
@@ -109,6 +121,81 @@ function addResult(args: readonly string[], dir: string | null, reader: SecretPu
   return secret === null ? CLEAN : { kind: "found", finding: { kind: "add", path: secret } };
 }
 
+/** `git commit` short options that take a value, attached or as the next word. */
+const COMMIT_SHORT_WITH_VALUE = "mFCct";
+/** `git commit` long options that take the next word as their value when no `=` is attached. */
+const COMMIT_LONG_WITH_VALUE: ReadonlySet<string> = new Set(["--message", "--file", "--reuse-message", "--reedit-message", "--template", "--author", "--date", "--cleanup", "--fixup", "--squash", "--trailer", "--pathspec-from-file"]);
+
+interface CommitShape {
+  readonly all: boolean;
+  readonly include: boolean;
+  readonly dryRun: boolean;
+  readonly pathspecs: readonly string[];
+}
+
+function commitShape(args: readonly string[]): CommitShape {
+  let all = false;
+  let include = false;
+  let dryRun = false;
+  const pathspecs: string[] = [];
+  let afterSeparator = false;
+  for (let at = 0; at < args.length; at += 1) {
+    const word = args[at] ?? "";
+    if (afterSeparator) pathspecs.push(word);
+    else if (word === "--") afterSeparator = true;
+    else if (word.startsWith("--")) {
+      all ||= word === "--all";
+      include ||= word === "--include";
+      dryRun ||= word === "--dry-run";
+      if (COMMIT_LONG_WITH_VALUE.has(word)) at += 1;
+    } else if (/^-[A-Za-z]/.test(word)) {
+      // A cluster reads flag by flag until one takes a value: the rest of the
+      // word is that value, or the next word when nothing is attached.
+      for (let index = 1; index < word.length; index += 1) {
+        const flag = word[index] ?? "";
+        if (COMMIT_SHORT_WITH_VALUE.includes(flag)) {
+          if (index === word.length - 1) at += 1;
+          break;
+        }
+        all ||= flag === "a";
+        include ||= flag === "i";
+      }
+    } else pathspecs.push(word);
+  }
+  return { all, include, dryRun, pathspecs };
+}
+
+function commitResult(args: readonly string[], dir: string | null, reader: SecretPublishReader): SecretPublishResult {
+  const shape = commitShape(args);
+  if (shape.dryRun) return CLEAN;
+  const named = secretIn(shape.pathspecs, dir, reader);
+  if (named !== null) return { kind: "found", finding: { kind: "commit", path: named } };
+  // A pathspec commits only what it names, unless --include keeps the index.
+  if (shape.pathspecs.length > 0 && !shape.include) return CLEAN;
+  if (dir === null) return UNKNOWN;
+  const staged = reader.stagedPaths(dir);
+  if (staged === null) return UNKNOWN;
+  const fromIndex = firstSecret(staged, (path) => reader.indexContent(dir, path));
+  if (fromIndex !== null) return { kind: "found", finding: { kind: "commit", path: fromIndex } };
+  if (!shape.all) return CLEAN;
+  const modified = reader.modifiedTrackedPaths(dir);
+  if (modified === null) return UNKNOWN;
+  const fromTree = firstSecret(modified, (path) => reader.treeContent(dir, path));
+  return fromTree === null ? CLEAN : { kind: "found", finding: { kind: "commit", path: fromTree } };
+}
+
+/** What one git segment stages, commits or pushes. */
+function segmentResult(subcommand: string | null, args: readonly string[], dir: string | null, reader: SecretPublishReader): SecretPublishResult {
+  switch (subcommand) {
+    case "add":
+      return addResult(args, dir, reader);
+    case "commit":
+      return commitResult(args, dir, reader);
+    default:
+      return CLEAN;
+  }
+}
+
 /**
  * Whether `command`, run from `cwd`, stages, commits or pushes a secret
  * path. The first secret found wins; an unknown read is remembered but a
@@ -120,7 +207,7 @@ export function findSecretPublish(command: string, cwd: string, home: string, re
     const git = gitInvocation(outer, dir, home);
     if (git === null) continue;
     const args = withoutRedirections(git.args);
-    const result = git.subcommand === "add" ? addResult(args, git.dir, reader) : CLEAN;
+    const result = segmentResult(git.subcommand, args, git.dir, reader);
     if (result.kind === "found") return result;
     unknown ||= result.kind === "unknown";
   }

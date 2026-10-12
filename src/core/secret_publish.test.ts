@@ -14,6 +14,11 @@ const REPO = `${HOME}/project`;
 interface FakeRepo {
   readonly forcedAdd?: Readonly<Record<string, readonly string[] | null>>;
   readonly working?: Readonly<Record<string, string>>;
+  /** Staged paths; null: git failed. */
+  readonly staged?: readonly string[] | null;
+  /** Tracked paths modified in the working tree; null: git failed. */
+  readonly modified?: readonly string[] | null;
+  readonly index?: Readonly<Record<string, string>>;
 }
 
 /** A reader over fixed answers; `calls` records which reads ran. */
@@ -26,6 +31,22 @@ function reader(repo: FakeRepo = {}, calls: string[] = []): SecretPublishReader 
     },
     workingContent: (dir, path) => {
       calls.push(`working ${dir} ${path}`);
+      return repo.working?.[path] ?? null;
+    },
+    stagedPaths: (dir) => {
+      calls.push(`staged ${dir}`);
+      return repo.staged === undefined ? [] : repo.staged;
+    },
+    modifiedTrackedPaths: (dir) => {
+      calls.push(`modified ${dir}`);
+      return repo.modified === undefined ? [] : repo.modified;
+    },
+    indexContent: (dir, path) => {
+      calls.push(`index ${dir} ${path}`);
+      return repo.index?.[path] ?? null;
+    },
+    treeContent: (dir, path) => {
+      calls.push(`tree ${dir} ${path}`);
       return repo.working?.[path] ?? null;
     },
   };
@@ -64,8 +85,8 @@ test("secret publish G1: a .npmrc is found only when it holds a credential", () 
 test("secret publish G1: ordinary adds, templates and a dry run are clean, and read nothing", () => {
   const calls: string[] = [];
   for (const command of [
-    "git add -A && git commit -qm wip",
-    "git add . && git commit -qm wip",
+    "git add -A",
+    "git add . 2>&1",
     "git add -u",
     "git add .env.example .env.sample .env.template",
     "git add id_rsa.pub",
@@ -78,4 +99,28 @@ test("secret publish G1: ordinary adds, templates and a dry run are clean, and r
     assert.deepEqual(findSecretPublish(command, REPO, HOME, reader({}, calls)), { kind: "clean" }, command);
   }
   assert.deepEqual(calls, [], "no git and no file read for a command that cannot stage a secret");
+});
+
+test("secret publish G2: a commit with a staged secret path is found, from the index", () => {
+  assert.deepEqual(find("git commit -qm x", { staged: ["src/a.ts", "config/.env"] }), { kind: "found", finding: { kind: "commit", path: "config/.env" } });
+  assert.deepEqual(find("git commit -m 'fix: thing' --amend", { staged: [".env.local"] }), { kind: "found", finding: { kind: "commit", path: ".env.local" } });
+  assert.deepEqual(find("git commit -qm x", { staged: [".npmrc"], index: { ".npmrc": "//registry.npmjs.org/:_authToken=npm_abc123\n" } }), { kind: "found", finding: { kind: "commit", path: ".npmrc" } });
+  assert.deepEqual(find("git commit -qm x", { staged: [".npmrc"], index: { ".npmrc": "registry=https://registry.npmjs.org/\n" } }), { kind: "clean" });
+});
+
+test("secret publish G2: -a also commits modified tracked files; a pathspec commits only what it names", () => {
+  assert.deepEqual(find("git commit -am x", { modified: [".env"] }), { kind: "found", finding: { kind: "commit", path: ".env" } });
+  assert.deepEqual(find("git commit --all -m x", { modified: ["certs/server.key"] }), { kind: "found", finding: { kind: "commit", path: "certs/server.key" } });
+  assert.deepEqual(find("git commit -m x", { modified: [".env"] }), { kind: "clean" }, "without -a a modified file is not committed");
+  assert.deepEqual(find("git commit -m x -- .env"), { kind: "found", finding: { kind: "commit", path: ".env" } });
+  assert.deepEqual(find("git commit -m x src/a.ts", { staged: [".env"] }), { kind: "clean" }, "a pathspec commits only what it names");
+  assert.deepEqual(find("git commit -i -m x src/a.ts", { staged: [".env"] }), { kind: "found", finding: { kind: "commit", path: ".env" } }, "--include keeps the index");
+});
+
+test("secret publish G2: a commit message, a dry run and a clean index are clean; a failed read is unknown", () => {
+  assert.deepEqual(find("git commit -m '.env'", { staged: ["src/a.ts"] }), { kind: "clean" }, "a message is not a pathspec");
+  assert.deepEqual(find("git commit -F .env.msg -q", { staged: ["src/a.ts"] }), { kind: "clean" });
+  assert.deepEqual(find("git commit --dry-run", { staged: [".env"] }), { kind: "clean" });
+  assert.deepEqual(find("git add -A && git commit -qm wip", { staged: ["src/a.ts"] }), { kind: "clean" });
+  assert.deepEqual(find("git commit -qm x", { staged: null }), { kind: "unknown" });
 });
