@@ -88,7 +88,8 @@ function runActivation (modules, panelKey = '') {
   })
 }
 
-const ALL_OFF = { gate: 'off', 'model-router': 'off', steward: 'off', 'skill-selection': 'off', board: 'off' }
+// memory (odd/tasks/memory-shadow.md) co-owns the measurements summary its card reads, so it is off here too.
+const ALL_OFF = { gate: 'off', 'model-router': 'off', steward: 'off', 'skill-selection': 'off', board: 'off', memory: 'off' }
 
 test('every module off: no module job publishes anything and no Orca event handler is registered', { skip: process.platform === 'win32' }, async () => {
   const { sets, subscribed } = await runActivation(ALL_OFF)

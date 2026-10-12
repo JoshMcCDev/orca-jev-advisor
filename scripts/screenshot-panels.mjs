@@ -42,6 +42,7 @@ import { parseTrustedPrograms } from '../src/core/trusted_programs.ts'
 import { DEFAULT_FEATURE_MODULES } from '../src/core/feature_modules.ts'
 import { summarizeTypingLeadTime, TYPING_WINDOW_MS } from '../src/core/typing_lead_time.ts'
 import { summarizeCiWatchRows } from '../src/core/ci_watch.ts'
+import { summarizeMemoryDecisions } from '../src/core/memory_shadow.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PANELS_DIR = join(ROOT, 'adapters/orca/panels')
@@ -470,6 +471,29 @@ const READY = {
     // publishes it. Unlike the figures above these are illustrative literals, not
     // the author's logs: the module is new and has measured nothing yet.
     ciWatch: { watches: 14, finished: 12, failed: 2, ghCalls: 310, pollsReplaced: 38, sleepsReplaced: 27, injected: 0 },
+    // The memory module in Shadow (odd/tasks/memory-shadow.md, M14): no week of
+    // real rows exists yet, so these are illustrative figures in the shape
+    // summarizeMemoryDecisions publishes, an Engram-live machine.
+    memory: {
+      decisions: 212,
+      gates: 212,
+      updates: 41,
+      skips: 168,
+      gateFailures: 3,
+      updateRate: 41 / 209,
+      forks: 8,
+      drafts: 7,
+      wouldSave: { user: 1, feedback: 5, project: 4, reference: 1 },
+      judgeBuilds: 6,
+      mainEngramSaves: 63,
+      mainJudges: 131,
+      mainAutoMemoryWrites: 2,
+      agreement: { both: 30, moduleOnly: 11, mainOnly: 19, neither: 149, unknown: 3 },
+      agreementRate: 179 / 209,
+      haikuTokens: { input: 190800, output: 1900 },
+      forkTokens: { input: 96, output: 1610, cacheRead: 1496000 },
+      latest: { at: '2026-09-24T17:40:00.000Z', backend: 'live', decidedBy: 'tools+health', permission: 'ok' },
+    },
     approvals: {
       asked: 43,
       approved: 27,
@@ -558,6 +582,7 @@ const EMPTY = {
     approvals: { ...emptyWindow('all').approvals, corruptLines: 0 },
     abBenchmark: { ...foldAbResults([]), corruptLines: 0 },
     ciWatch: summarizeCiWatchRows([], 0, 0),
+    memory: summarizeMemoryDecisions([], 0, 1),
   },
 }
 

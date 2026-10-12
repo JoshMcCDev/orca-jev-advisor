@@ -111,6 +111,13 @@ async function realMeasurementsSummary () {
       },
       agree: false,
     })}\n`)
+    // The memory module's row (src/core/memory_shadow.ts memoryShadowRecord), so `memory.latest` is compared too.
+    writeFileSync(join(cache, `memory-decisions-${recentAt.slice(0, 13)}.jsonl`), `${JSON.stringify({
+      at: recentAt, account: 'home', project: 'p', mode: 'shadow', sessionId: 's', backend: 'live', decidedBy: 'tools+health', permission: 'ok', detectedAt: 'start',
+      gate: 'skip', gateMs: 300, gateTokens: { input: 900, output: 1, cacheRead: 0, cacheWrite: 0 }, forkSampled: false, fork: null, forkMs: null, forkTokens: null,
+      wouldSave: { user: 0, feedback: 0, project: 0, reference: 0 }, wouldUpdate: 0, wouldDelete: 0, toEngram: 0, toAutoMemory: 0, judgeBuilds: 0,
+      mainEngramSaves: 0, mainEngramSaveTypes: {}, mainJudges: 0, mainCandidates: 0, mainAutoMemoryWrites: 0, agreement: 'neither',
+    })}\n`)
     const { stdout } = await execFileAsync(
       process.execPath,
       ['--experimental-strip-types', join(ROOT, 'adapters', 'orca', 'read-measurements.mjs')],

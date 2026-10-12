@@ -4446,7 +4446,7 @@ test('every trusted.* key in one language catalog exists in the other', { skip: 
 // status().modules shape (fixture_shape.test.mjs).
 // ---------------------------------------------------------------------------
 
-const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board', 'verify-done', 'ci-watch']
+const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board', 'verify-done', 'ci-watch', 'memory']
 const SECRET_MIRROR_SCRIPT = join(ROOT, 'adapters', 'orca', 'write-secret-mirror.mjs')
 
 /**
@@ -4489,17 +4489,17 @@ async function moduleCards (page) {
   }))
 }
 
-test('Modules: the first section of General lists the seven modules with what they do and cost; the five earlier ones active by default, verify-done and ci-watch in shadow', MODULES_SKIP, async () => {
+test('Modules: the first section of General lists the eight modules with what they do and cost; the five earlier ones active by default, verify-done, ci-watch and memory in shadow', MODULES_SKIP, async () => {
   const { browser, page, errors } = await openPanel(SCENARIOS.ready)
   try {
     const first = await page.evaluate(() => document.querySelector('#panel-general section').id)
     assert.equal(first, 'modules-section')
     const cards = await moduleCards(page)
     assert.deepEqual(cards.map((c) => c.id), MODULE_IDS)
-    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board', 'Verify done', 'CI watcher'])
-    // The registry decides the states: no shadow where the module has no measure mode of its own, no active where it only measures.
-    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active'], ['off', 'shadow'], ['off', 'shadow', 'active']])
-    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['shadow'], ['shadow']])
+    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board', 'Verify done', 'CI watcher', 'Memory'])
+    // The registry decides the states: no shadow where the module has no measure mode of its own, no active where it only measures or is not wired yet.
+    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active'], ['off', 'shadow'], ['off', 'shadow', 'active'], ['off', 'shadow']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['shadow'], ['shadow'], ['shadow']])
     assert.deepEqual(cards[5].labels, ['Off', 'Shadow'])
     const verify = cards[5].text
     assert.match(verify, /turns that edited files with no test passing/)
@@ -4540,7 +4540,7 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
     assert.equal(typeof request.id, 'string')
-    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }, 'memory has no card yet and rides along unchanged')
+    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }, 'every card sends its state, the pressed one changed')
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, 'the real writer takes the map the panel sent')
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="gate"]').textContent), undefined, { timeout: 25000 })
     assert.equal(await page.evaluate(() => document.querySelector('[data-module-said="steward"]').textContent), '', 'only the pressed card answers')
@@ -4586,7 +4586,7 @@ test('Modules: ci-watch offers Off, Shadow and Active, and every state it offers
       await page.click(`[data-module-states="ci-watch"] button[data-value="${state}"]`)
       await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
       const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
-      assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': state })
+      assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': state, memory: 'shadow' })
       assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, `the real writer takes ci-watch ${state}`)
       await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="ci-watch"]').textContent), undefined, { timeout: 25000 })
       assert.deepEqual(errors, [])
@@ -4675,6 +4675,91 @@ test('Modules: the ci-watch card shows a week of figures from the log, and says 
   }
 })
 
+// Memory in Shadow (odd/tasks/memory-shadow.md, M14): Off and Shadow only;
+// the backend and the signal that decided it, the fixed fork sample, what
+// Haiku and the fork see, the quota note and the week's counts from the
+// shared measurements summary.
+test('Modules: the memory card offers Off and Shadow, states the fork sample, what Haiku and the fork see, the quota and the week', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+  try {
+    const card = (await moduleCards(page))[7]
+    assert.equal(card.id, 'memory')
+    assert.deepEqual(card.labels, ['Off', 'Shadow'])
+    assert.deepEqual(card.pressed, ['shadow'])
+    assert.match(card.text, /In Shadow it only measures: it saves nothing to Engram, judges no conflict and writes no memory file/)
+    assert.match(card.text, /Active, which writes, is not offered yet\./)
+    assert.match(card.text, /one Haiku call per answered turn and, on 1 in 5 turns Haiku marks for an update, one fork of the session/)
+    assert.match(card.text, /Haiku calls and forks count against your Max plan quota\./)
+    assert.match(card.text, /Haiku sees your MEMORY\.md \(up to 8,000 characters\) and the last exchange \(up to 12,000 characters, secrets redacted/)
+    assert.match(card.text, /The fork sees this session's own transcript/)
+    assert.match(card.text, /Where it would save: Engram, which is live \(its tools are connected and it answered the check\)\./)
+    assert.match(card.text, /This week: 212 Haiku decisions, 20% marked for an update, 8 forks\. It would save 5 feedback, 1 user, 4 project and 1 reference\. Your main thread saved 65 times on its own, and Haiku agreed with it on 86% of turns\./)
+    assert.match(card.text, /Background: nothing of its own\./)
+    assert.match(card.text, /follows the switch directly/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: switching memory off sends the whole map, and the real writer accepts it', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+  try {
+    await page.click('[data-module-states="memory"] button[data-value="off"]')
+    await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'off' })
+    assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
+    await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="memory"]').textContent), undefined, { timeout: 25000 })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the memory card with nothing logged yet, and with Engram refused, down or absent, says so', MODULES_SKIP, async () => {
+  const empty = await openPanel(SCENARIOS.empty)
+  try {
+    const card = (await moduleCards(empty.page))[7]
+    assert.match(card.text, /Where it would save: not detected yet\. The first answered turn decides it\./)
+    assert.match(card.text, /This week: nothing logged yet\./)
+  } finally {
+    await empty.browser.close()
+  }
+  const cases = [
+    [{ backend: 'live', decidedBy: 'tools+health', permission: 'refused' }, /Engram is connected, but its check was refused for want of a permission rule/],
+    [{ backend: 'configured-down', decidedBy: 'user-config', permission: 'unknown' }, /Engram is configured but not answering \(found in your user MCP config\)\. It would save to auto-memory and pass it to Engram later\./],
+    [{ backend: 'absent', decidedBy: 'none', permission: 'unknown' }, /Where it would save: auto-memory, since there is no Engram \(no sign of Engram\)\./]
+  ]
+  for (const [latest, expected] of cases) {
+    const ready = SCENARIOS.ready
+    const scenario = { ...ready, measurementsSummary: { ...ready.measurementsSummary, memory: { ...ready.measurementsSummary.memory, latest: { at: '2026-09-24T17:40:00.000Z', ...latest } } } }
+    const { browser, page } = await openPanel(scenario)
+    try {
+      assert.match((await moduleCards(page))[7].text, expected)
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('Modules: the memory card in Spanish speaks with tú and says the same', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS.ready, 'es')
+  try {
+    const card = (await moduleCards(page))[7]
+    assert.equal(card.name, 'Memoria')
+    assert.deepEqual(card.labels, ['Apagado', 'Sombra'])
+    assert.match(card.text, /En sombra solo mide: no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria/)
+    assert.match(card.text, /en 1 de cada 5 turnos que Haiku marca para actualizar, un fork de la sesión/)
+    assert.match(card.text, /cuentan contra la cuota de tu plan Max/)
+    assert.match(card.text, /Esta semana: 212 decisiones de Haiku, 20% para actualizar y 8 forks\./)
+    assert.doesNotMatch(card.text, /\b(tenés|podés|revisá|decime|querés)\b/, 'no voseo')
+  } finally {
+    await browser.close()
+  }
+})
+
+
 test('Modules: a state the card already shows sends nothing', MODULES_SKIP, async () => {
   const { browser, page } = await openPanel(SCENARIOS.ready)
   try {
@@ -4735,7 +4820,7 @@ test('Modules: with the gate off its settings are hidden, a note says why, and i
   const { browser, page, errors } = await openPanel(SCENARIOS['modules-mixed'])
   try {
     const cards = await moduleCards(page)
-    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active'], ['off'], ['shadow']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active'], ['off'], ['shadow'], ['shadow']])
     assert.match(cards[0].text, /Hooks removed from Claude Code, as you chose\./)
     assert.match(cards[0].text, /With the gate off, nothing checks Bash commands or file edits/)
     const lines = await page.evaluate(() => document.getElementById('claude-integration-status').innerText)

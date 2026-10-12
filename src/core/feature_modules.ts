@@ -331,7 +331,9 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
       { id: "memory-tidy", hooks: ["turn.complete", "session.compact", "command.run"], jev: false },
       { id: "memory-ui", hooks: ["ui.render"], jev: false },
     ],
-    workerJobs: [],
+    // The card's weekly counts come from the shared measurements summary (read-measurements.mjs `memory`):
+    // memory keeps that panel-only job running while it is on, and starts nothing of its own.
+    workerJobs: [MEASUREMENTS_SUMMARY],
     modes: [],
   },
 ];

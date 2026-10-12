@@ -132,16 +132,17 @@ function panelModuleRows () {
   return [...html.matchAll(/\{ id: '([\w-]+)', states: \[([^\]]*)\], cost:/g)].map((match) => ({ id: match[1], states: [...match[2].matchAll(/'([\w-]+)'/g)].map((state) => state[1]) }))
 }
 
-// Registry modules whose card is not on the panel yet. The panel sends their
-// state back unchanged on every switch (config.html uncardedModuleStates), so
-// the writer still gets the whole map. Remove an id when its card lands:
-// `memory` waits for the panel card of odd/tasks/memory-core.md's track (M14).
-const UNCARDED = ['memory']
-
-test('the panel offers a card for every registered module that has one, with exactly the states the registry allows', async () => {
+test('the panel offers a card for every registered module, with exactly the states the registry allows', async () => {
   const { FEATURE_MODULES } = await import('../../src/core/feature_modules.ts')
-  for (const id of UNCARDED) assert.ok(FEATURE_MODULES.some((module) => module.id === id), `${id} is registered`)
-  assert.deepEqual(panelModuleRows(), FEATURE_MODULES.filter((module) => !UNCARDED.includes(module.id)).map((module) => ({ id: module.id, states: [...module.states] })))
+  assert.deepEqual(panelModuleRows(), FEATURE_MODULES.map((module) => ({ id: module.id, states: [...module.states] })))
+})
+
+test('the memory card states the fork sample the mod really uses (odd/tasks/memory-shadow.md)', async () => {
+  const { FORK_SAMPLE_EVERY } = await import('../../src/core/memory_shadow.ts')
+  const html = readFileSync(join(__dirname, 'panels', 'config.html'), 'utf8')
+  const card = /\{ id: 'memory', states: \[[^\]]*\], cost: \{ every: (\d+) \}/.exec(html)
+  assert.ok(card, 'the memory row carries its sample')
+  assert.equal(Number(card[1]), FORK_SAMPLE_EVERY)
 })
 
 test("the ci-watch card's gh-call ceiling is the schedule's own (CI_WATCH_MAX_POLLS)", async () => {
@@ -154,7 +155,7 @@ test("the ci-watch card's gh-call ceiling is the schedule's own (CI_WATCH_MAX_PO
 test('feature-modules-save: the map the panel sends, for every state its cards offer, is accepted by the real sidecar', () => {
   const rows = panelModuleRows()
   // What the panel holds when nothing was chosen yet: each card at the state the status reports, the defaults.
-  const shown = Object.fromEntries([...rows.map((row) => row.id), ...UNCARDED].map((id) => [id, DEFAULTS[id]]))
+  const shown = Object.fromEntries(rows.map((row) => [row.id, DEFAULTS[row.id]]))
   for (const row of rows) {
     for (const state of row.states) {
       const next = { ...shown, [row.id]: state }

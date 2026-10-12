@@ -133,7 +133,10 @@ test("memory: off and shadow until Active is wired (odd/tasks/memory-shadow.md T
     { id: "memory-ui", hooks: ["ui.render"], jev: false },
   ]);
   assert.deepEqual(entry.hooks, []);
-  assert.deepEqual(entry.workerJobs, []);
+  // Its card reads its weekly counts from the shared measurements summary (odd/tasks/memory-shadow.md, M14): no job of its own.
+  assert.deepEqual(entry.workerJobs.map((job) => job.id), ["measurements-summary"]);
+  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off" })).includes("measurements-summary"), true, "memory alone keeps the summary its card reads");
+  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off", memory: "off" })).includes("measurements-summary"), false);
   assert.deepEqual(entry.modes, []);
   // An upgrade with no module file measures; Off runs none of it.
   const on = modFeaturesOn(parseFeatureModules(""));
@@ -255,13 +258,13 @@ test("workerJobsOn: a shared job runs while any owner is on, and is listed once"
   const all = workerJobsOn(DEFAULT_FEATURE_MODULES);
   assert.equal(all.length, new Set(all).size);
   assert.equal(workerJobsOn(withStates({ gate: "off" })).includes("measurements-summary"), true);
-  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off" })).includes("measurements-summary"), false);
+  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off", memory: "off" })).includes("measurements-summary"), false);
   assert.equal(workerJobsOn(withStates({ "model-router": "off" })).includes("consumption-summary"), true);
   assert.equal(workerJobsOn(withStates({ "model-router": "off", steward: "off" })).includes("consumption-summary"), false);
   assert.equal(workerJobsOn(withStates({ gate: "off" })).includes("gate-authorizations"), false);
   const boardOff = workerJobsOn(withStates({ board: "off" }));
   for (const id of ["board-agent-status", "board-worktree-created", "board-worktree-removed"] as const) assert.equal(boardOff.includes(id), false, id);
-  assert.deepEqual(workerJobsOn(withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off" })), [], "verify-done owns no worker job");
+  assert.deepEqual(workerJobsOn(withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off", memory: "off" })), [], "verify-done owns no worker job");
 });
 
 test("workerJobsFor: the jobs behind each trigger, whichever module owns them (T0's shared timers)", () => {
@@ -278,9 +281,9 @@ test("workerJobsFor: the jobs behind each trigger, whichever module owns them (T
 test("workerTriggerOn: a timer is wanted until every module using it is off", () => {
   const fifteenSeconds: WorkerTrigger = "interval-15s";
   assert.equal(workerTriggerOn(DEFAULT_FEATURE_MODULES, fifteenSeconds), true);
-  // Gate, model-router and skill-selection use it: any one keeps it.
+  // Gate, model-router, skill-selection and memory use it: any one keeps it.
   assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off" }), fifteenSeconds), true);
-  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off" }), fifteenSeconds), false);
+  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off", memory: "off" }), fifteenSeconds), false);
   // The steward's jobs are not on the 15 s timer, so only the shared 10 min ones keep it.
   assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off", board: "off" }), "interval-consumption-10min"), true);
   assert.equal(workerTriggerOn(withStates({ "model-router": "off", steward: "off" }), "interval-consumption-10min"), false);
@@ -319,7 +322,7 @@ test("workerTriggerWanted: a timer of panel-only jobs exists only while a panel 
   assert.equal(workerTriggerWanted(routerOff, "interval-15s", false), false);
   assert.equal(workerTriggerWanted(routerOff, "interval-15s", true), true);
   // Off still wins: nothing is wanted when every owner is off, panel open or not.
-  const allOff = withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off" });
+  const allOff = withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off", memory: "off" });
   assert.equal(workerTriggerWanted(allOff, "interval-15s", true), false);
   // Event handlers do not depend on a panel.
   assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, "agent.status.changed", false), true);
