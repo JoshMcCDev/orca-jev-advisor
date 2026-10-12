@@ -2191,9 +2191,22 @@ async function armPreCold($: EngineInterface, host: StewardHost, modulesFile: Fe
     host.cold.timer?.cancel()
     host.cold.autoCompactRunning = false
     host.cold.armedAt = endedAt
-    host.cold.timer = $.clock.after(preColdEarliestMs(PRE_COLD_TTL_MS), () => preColdWake($, host, modulesFile, endedAt, 1))
+    host.cold.timer = $.clock.after(preColdEarliestMs(await preColdTtlMs($)), () => preColdWake($, host, modulesFile, endedAt, 1))
   } catch {
     // No timer: the session goes cold as it would have.
+  }
+}
+
+/**
+ * The main loop's cache TTL as track R reads it from the transcript tail
+ * (`routerCache`, kept while the router is on); 1h when unknown, which is
+ * 99.99% of measured responses.
+ */
+async function preColdTtlMs($: EngineInterface): Promise<number> {
+  try {
+    return (await readCacheClock($)).ttlMs ?? PRE_COLD_TTL_MS
+  } catch {
+    return PRE_COLD_TTL_MS
   }
 }
 
@@ -2221,7 +2234,8 @@ async function preColdWake($: EngineInterface, host: StewardHost, modulesFile: F
   try {
     if (host.cold.armedAt !== armedAt || host.runningTurn() !== null) return
     const idleMs = (await $.clock.now()) - armedAt
-    const earliest = preColdEarliestMs(PRE_COLD_TTL_MS)
+    const ttlMs = await preColdTtlMs($)
+    const earliest = preColdEarliestMs(ttlMs)
     if (idleMs < earliest) {
       if (wake < PRE_COLD_MAX_WAKES) host.cold.timer = $.clock.after(earliest - idleMs, () => preColdWake($, host, modulesFile, armedAt, wake + 1))
       return
@@ -2242,7 +2256,7 @@ async function preColdWake($: EngineInterface, host: StewardHost, modulesFile: F
     const decision = decidePreCold({
       contextTokens,
       threshold: settings.threshold,
-      ttlMs: PRE_COLD_TTL_MS,
+      ttlMs,
       idleMs,
       engineMinTokens,
       engineSeen: await readEngineSeen($),

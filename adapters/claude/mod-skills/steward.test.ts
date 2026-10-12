@@ -698,6 +698,16 @@ test("S2 pre-cold: a wake before its slot re-arms for the rest, at most three wa
   assert.ok(host.timerDelays.filter((ms) => ms >= MINUTE).length <= 3, host.timerDelays.join(","));
 });
 
+test("S2 pre-cold: the TTL the router read from the transcript sets the slot; with none it is 1h", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.state.set("routerCache", { ttlMs: 5 * MINUTE, lastMainAt: null });
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 1);
+  assert.ok(host.timerDelays.includes(0.85 * 5 * MINUTE), host.timerDelays.join(","));
+  assert.ok(!host.timerDelays.includes(51 * MINUTE), host.timerDelays.join(","));
+});
+
 test("S2 pre-cold: a turn that starts makes the armed timer do nothing", async () => {
   const host = makeHost();
   const engine = load(host);
