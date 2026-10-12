@@ -13,6 +13,8 @@ const REPO = `${HOME}/project`;
 
 interface FakeRepo {
   readonly forcedAdd?: Readonly<Record<string, readonly string[] | null>>;
+  /** What an unforced `git add --dry-run <args>` would stage, keyed by its args; null: git failed. */
+  readonly added?: Readonly<Record<string, readonly string[] | null>>;
   readonly working?: Readonly<Record<string, string>>;
   /** Staged paths; null: git failed. */
   readonly staged?: readonly string[] | null;
@@ -31,6 +33,11 @@ function reader(repo: FakeRepo = {}, calls: string[] = []): SecretPublishReader 
     forcedAddPaths: (dir, args) => {
       calls.push(`forcedAdd ${dir} ${args.join(" ")}`);
       const answer = repo.forcedAdd?.[args.join(" ")];
+      return answer === undefined ? [] : answer;
+    },
+    addPaths: (dir, args) => {
+      calls.push(`add ${dir} ${args.join(" ")}`);
+      const answer = repo.added?.[args.join(" ")];
       return answer === undefined ? [] : answer;
     },
     workingContent: (dir, path) => {
@@ -96,19 +103,57 @@ test("secret publish G1: a forced add is found from what git would stage", () =>
   assert.deepEqual(find("git add -f missing", { forcedAdd: { "-- missing": null } }), { kind: "unknown" }, "git could not say what it would stage");
 });
 
+test("secret publish G7: a broad add is found from what git would stage, not from what it names", () => {
+  const added = {
+    "-A": ["src/a.ts", ".env"],
+    "-- .": ["config/.env.production"],
+    "-- src": ["src/a.ts", "src/certs/server.pem"],
+    "-u": [".env"],
+    "-A -- src docs": ["docs/id_rsa"],
+  };
+  const repo: FakeRepo = { added };
+  assert.deepEqual(find("git add -A", repo), { kind: "found", finding: { kind: "add", path: ".env" } });
+  assert.deepEqual(find("git add --all", repo), { kind: "found", finding: { kind: "add", path: ".env" } });
+  assert.deepEqual(find("git add .", repo), { kind: "found", finding: { kind: "add", path: "config/.env.production" } });
+  assert.deepEqual(find("git add src", repo), { kind: "found", finding: { kind: "add", path: "src/certs/server.pem" } });
+  assert.deepEqual(find("git add -u", repo), { kind: "found", finding: { kind: "add", path: ".env" } });
+  assert.deepEqual(find("git add --update", repo), { kind: "found", finding: { kind: "add", path: ".env" } });
+  assert.deepEqual(find("git add -A src docs", repo), { kind: "found", finding: { kind: "add", path: "docs/id_rsa" } });
+  assert.deepEqual(find("git add -A && git commit -qm wip", repo), { kind: "found", finding: { kind: "add", path: ".env" } }, "the add segment finds it before anything is staged");
+  assert.deepEqual(find(`git -C ${REPO} add -A 2>&1`, repo), { kind: "found", finding: { kind: "add", path: ".env" } });
+});
+
+test("secret publish G7: a broad add is read where it runs", () => {
+  const calls: string[] = [];
+  findSecretPublish(`cd ${REPO}/sub && git add -A`, REPO, HOME, reader({}, calls));
+  findSecretPublish("git add .", REPO, HOME, reader({}, calls));
+  assert.deepEqual(calls, [`add ${REPO}/sub -A`, `add ${REPO} -- .`]);
+});
+
+test("secret publish G7: nothing secret to stage is clean: ignored secrets, templates, ordinary files", () => {
+  // git leaves an ignored .env out of what -A would stage, so it is not in the answer.
+  assert.deepEqual(find("git add -A", { added: { "-A": ["src/a.ts", ".gitignore"] } }), { kind: "clean" });
+  assert.deepEqual(find("git add -A", { added: { "-A": [".env.example", ".env.sample", ".env.template", "id_rsa.pub"] } }), { kind: "clean" });
+  assert.deepEqual(find("git add -A && git commit -qm wip", { added: { "-A": [] }, staged: ["src/a.ts"] }), { kind: "clean" });
+  assert.deepEqual(find("git add .env.example .env.sample .env.template"), { kind: "clean" });
+  assert.deepEqual(find("git add -A", { added: { "-A": [".npmrc"] }, working: { ".npmrc": "registry=https://registry.npmjs.org/\n" } }), { kind: "clean" });
+  assert.deepEqual(find("git add -A", { added: { "-A": [".npmrc"] }, working: { ".npmrc": "//registry.npmjs.org/:_authToken=npm_abc123\n" } }), { kind: "found", finding: { kind: "add", path: ".npmrc" } });
+});
+
+test("secret publish G7: an add git cannot list stages nothing: clean, never an ask", () => {
+  assert.deepEqual(find("git add -A", { added: { "-A": null } }), { kind: "clean" });
+  assert.deepEqual(find("git add missing.ts", { added: { "-- missing.ts": null } }), { kind: "clean" });
+  assert.deepEqual(find("git add -A && git commit -qm x", { added: { "-A": null }, staged: [".env"] }), { kind: "found", finding: { kind: "commit", path: ".env" } }, "a later segment may still find one");
+});
+
 test("secret publish G1: a .npmrc is found only when it holds a credential", () => {
   assert.deepEqual(find("git add .npmrc", { working: { ".npmrc": "//registry.npmjs.org/:_authToken=npm_abc123\n" } }), { kind: "found", finding: { kind: "add", path: ".npmrc" } });
   assert.deepEqual(find("git add .npmrc", { working: { ".npmrc": "registry=https://registry.npmjs.org/\n" } }), { kind: "clean" });
 });
 
-test("secret publish G1: ordinary adds, templates and a dry run are clean, and read nothing", () => {
+test("secret publish G1: a dry run and commands that cannot stage a secret are clean, and read nothing", () => {
   const calls: string[] = [];
   for (const command of [
-    "git add -A",
-    "git add . 2>&1",
-    "git add -u",
-    "git add .env.example .env.sample .env.template",
-    "git add id_rsa.pub",
     "git add -n .env",
     "git add --dry-run -f .",
     "echo git add .env",
