@@ -72,7 +72,10 @@ Ships Active (no Shadow): it is a deterministic path check.
   `prohibits` policy left it asks at once. With one, the cache and Jev still
   judge, and only their policy deny is kept; an allow, an advice, a policy
   ask, no key or no answer become the ask. Never cached, never remembered,
-  never relaxed by the retry pass. Proof: authorized push and cache replay
+  never relaxed by the retry pass. A local rule switched off to an advice (or
+  matched only in interpreter code) would pass on its identical retry, so a
+  finding replaces that advice with the ask: RED (`deny` advice first, an
+  allow on retry), GREEN after (ask twice). Proof: authorized push and cache replay
   (G0) GREEN since G3; cached policy deny RED (`ask`) then GREEN (`deny`);
   local-rule deny (`feat/x:main`), prohibiting policy with a cached allow or
   no key, and no-cache/no-authorization/retry-asks-again tests GREEN.

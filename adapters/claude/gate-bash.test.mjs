@@ -4361,6 +4361,14 @@ test('secret guard G4: a local-rule deny stays a deny', () => {
   assert.equal(lastGateRecord(home).stopReason, 'local-rule')
 })
 
+test('secret guard G4: a local rule switched off to an advice never lets a secret through on its retry', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeDenyTierConfig(home, { denyForcePush: false })
+  for (let attempt = 0; attempt < 2; attempt += 1) assertSecretAsk(home, keyedAnswerFor(home, 'git push --force origin feat/x', repo, 'secret-advice-retry'), '.env')
+})
+
 test('secret guard G4: the ask is never cached or remembered, and a retry in the same session asks again', () => {
   const home = makeHome()
   const repo = secretRepo()

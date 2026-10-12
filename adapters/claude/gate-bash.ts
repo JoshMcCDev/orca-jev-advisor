@@ -2236,6 +2236,18 @@ async function main(): Promise<void> {
     }
     if (firstAdvice === null) firstAdvice = { why, kind: 'toggle-off', evaluate }
   }
+  // Gate secret guard (odd/tasks/gate-secret-guard.md): whether the command
+  // stages, commits or pushes a secret path, read once the local deny rules
+  // have had their say. A rule switched off (or matched only in interpreter
+  // code) would only advise, and its identical retry passes -- so a finding
+  // turns that advice into the secret ask. Read only after the rules: a deny
+  // that stands needs no git read.
+  const secretPublish: SecretPublishResult = mentionOnly ? { kind: 'clean' } : readSecretPublish(inspected, cwd)
+  const secretFinding = secretPublish.kind === 'found' ? secretPublish.finding : null
+  if (firstAdvice !== null && secretFinding !== null) {
+    emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, false)
+    return
+  }
   if (firstAdvice !== null) {
     const { why, kind, evaluate } = firstAdvice
     // The advise-model release: a rule that would deny but whose switch was
@@ -2402,9 +2414,7 @@ async function main(): Promise<void> {
   // A team policy that prohibits is the one thing stronger than this ask: when
   // one survives filtering, the cache and Jev still judge the command, and
   // only their policy deny is kept -- anything else, no key or no answer,
-  // becomes this ask (secretFinding below).
-  const secretPublish: SecretPublishResult = mentionOnly ? { kind: 'clean' } : readSecretPublish(inspected, cwd)
-  const secretFinding = secretPublish.kind === 'found' ? secretPublish.finding : null
+  // becomes this ask (secretFinding, read above after the local rules).
   if (secretFinding !== null && !commandScopedPolicies.some((policy) => migratePolicyKind(policy.kind) === 'prohibits')) {
     emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
     return
