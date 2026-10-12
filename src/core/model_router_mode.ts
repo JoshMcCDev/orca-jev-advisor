@@ -21,7 +21,7 @@ import { EFFORT_LEVELS, TIER_EFFORT } from "./model_router_decide.ts";
 import type { TierEffort, TierEffortMap } from "./model_router_decide.ts";
 import { MAX_STEWARD_THRESHOLD, MIN_STEWARD_THRESHOLD, STEWARD_MODES, STEWARD_SOFT_MODES, parseStewardMode, parseStewardSoftMode, parseStewardThreshold } from "./context_steward.ts";
 import type { StewardMode, StewardSoftMode } from "./context_steward.ts";
-import { parseStewardColdMode } from "./steward_pre_cold.ts";
+import { STEWARD_COLD_MODES, parseStewardColdMode } from "./steward_pre_cold.ts";
 import type { StewardColdMode } from "./steward_pre_cold.ts";
 import { parseWorkKindMode } from "./work_kind.ts";
 import type { WorkKindMode } from "./work_kind.ts";
@@ -245,11 +245,12 @@ export interface StewardSettings {
   readonly coldMode: StewardColdMode;
 }
 
-/** What a writer stores: `softMode` absent leaves the stored switch as it is. */
+/** What a writer stores: `softMode` or `coldMode` absent leaves that stored switch as it is. */
 export interface StewardSettingsWrite {
   readonly mode: StewardMode;
   readonly threshold: number;
   readonly softMode?: StewardSoftMode;
+  readonly coldMode?: StewardColdMode;
 }
 
 export function stewardFromSettings(settings: unknown): StewardSettings {
@@ -261,15 +262,20 @@ export function stewardFromSettings(settings: unknown): StewardSettings {
   };
 }
 
-/** The steward settings as a writer receives them: a known mode, a threshold within range and, when given, a known soft-tier switch, or null -- a writer rejects, never guesses. */
+/** The steward settings as a writer receives them: a known mode, a threshold within range and, when given, a known soft-tier and cold-tier switch, or null -- a writer rejects, never guesses. */
 export function parseStewardSettingsStrict(value: unknown): StewardSettingsWrite | null {
   if (!isObject(value)) return null;
-  const { mode, threshold, softMode } = value;
+  const { mode, threshold, softMode, coldMode } = value;
   if (typeof mode !== "string" || !(STEWARD_MODES as readonly string[]).includes(mode)) return null;
   if (typeof threshold !== "number" || !Number.isInteger(threshold) || threshold < MIN_STEWARD_THRESHOLD || threshold > MAX_STEWARD_THRESHOLD) return null;
-  if (softMode === undefined) return { mode: mode as StewardMode, threshold };
-  if (typeof softMode !== "string" || !(STEWARD_SOFT_MODES as readonly string[]).includes(softMode)) return null;
-  return { mode: mode as StewardMode, threshold, softMode: softMode as StewardSoftMode };
+  if (softMode !== undefined && (typeof softMode !== "string" || !(STEWARD_SOFT_MODES as readonly string[]).includes(softMode))) return null;
+  if (coldMode !== undefined && (typeof coldMode !== "string" || !(STEWARD_COLD_MODES as readonly string[]).includes(coldMode))) return null;
+  return {
+    mode: mode as StewardMode,
+    threshold,
+    ...(softMode === undefined ? {} : { softMode: softMode as StewardSoftMode }),
+    ...(coldMode === undefined ? {} : { coldMode: coldMode as StewardColdMode }),
+  };
 }
 
 /** What writing `steward` into a settings.json whose text is `raw` (null: no file yet) should do: the same contract as planRouterModeWrite. */
@@ -288,9 +294,11 @@ export function planStewardWrite(raw: string | null, steward: StewardSettingsWri
   const own = isObject(configs[ROUTER_SETTINGS_KEY]) ? (configs[ROUTER_SETTINGS_KEY] as Record<string, unknown>) : {};
   const options = isObject(own.options) ? own.options : {};
   const softUnchanged = steward.softMode === undefined || options.stewardSoftMode === steward.softMode;
-  if (options.stewardMode === steward.mode && options.stewardThreshold === steward.threshold && softUnchanged) return { kind: "unchanged" };
+  const coldUnchanged = steward.coldMode === undefined || options.stewardColdMode === steward.coldMode;
+  if (options.stewardMode === steward.mode && options.stewardThreshold === steward.threshold && softUnchanged && coldUnchanged) return { kind: "unchanged" };
   const soft = steward.softMode === undefined ? {} : { stewardSoftMode: steward.softMode };
-  const next = { ...base, pluginConfigs: { ...configs, [ROUTER_SETTINGS_KEY]: { ...own, options: { ...options, stewardMode: steward.mode, stewardThreshold: steward.threshold, ...soft } } } };
+  const cold = steward.coldMode === undefined ? {} : { stewardColdMode: steward.coldMode };
+  const next = { ...base, pluginConfigs: { ...configs, [ROUTER_SETTINGS_KEY]: { ...own, options: { ...options, stewardMode: steward.mode, stewardThreshold: steward.threshold, ...soft, ...cold } } } };
   if (raw === null) return { kind: "write", text: `${JSON.stringify(next, null, 2)}\n` };
   const text = JSON.stringify(next, null, detectIndent(raw));
   return { kind: "write", text: raw.endsWith("\n") ? `${text}\n` : text };

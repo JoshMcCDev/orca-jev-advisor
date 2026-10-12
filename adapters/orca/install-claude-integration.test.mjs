@@ -1120,6 +1120,17 @@ test('steward-set: writes the steward mode and threshold next to the router mode
   assert.equal(again.unchanged, true, 'the same settings are no write')
 })
 
+// Track S: the pre-cold tier's switch is written by the same writer and read back by the status the panel shows.
+test('steward-set: the cold switch is written as stewardColdMode and read back; an unknown one is rejected', () => {
+  const home = makeHome()
+  const result = runRouter(['steward-set', 'home', JSON.stringify({ mode: 'active', threshold: 120000, softMode: 'measure', coldMode: 'active' })], home)
+  assert.equal(result.ok, true)
+  assert.equal(readSettings(home).pluginConfigs[ROUTER_SETTINGS_KEY].options.stewardColdMode, 'active')
+  assert.equal(runRouter(['router-mode-status'], home).targets[0].steward.coldMode, 'active')
+  const bad = runRouter(['steward-set', 'home', JSON.stringify({ mode: 'active', threshold: 120000, coldMode: 'loud' })], home)
+  assert.equal(bad.reason, 'unknown-steward')
+})
+
 test('steward-set: an unknown mode, a threshold out of range or a bad shape is rejected and never written', () => {
   const home = makeHome()
   for (const arg of [JSON.stringify({ mode: 'loud', threshold: 120000 }), JSON.stringify({ mode: 'active', threshold: 5 }), JSON.stringify({ mode: 'active' }), 'not json']) {

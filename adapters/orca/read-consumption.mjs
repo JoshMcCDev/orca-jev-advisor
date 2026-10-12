@@ -36,10 +36,12 @@
  * steward's `context-steward-decisions-*.jsonl` (summarizeStewardDecisions,
  * odd/tasks/jev-context-steward.md): null until a file exists. Its
  * `verified` (verifyStewardSaving) is the saving measured on the raw
- * turn-usage rows over the last 7 days, the usage window. `typing` is the
- * mod's `typing-*.jsonl` rows over the last 7 days (summarizeTypingLeadTime,
- * odd/tasks/typing-lead-time.md), null with no row in that window; read and
- * pruned the same way.
+ * turn-usage rows over the last 7 days, the usage window. Its `preCold`
+ * (summarizePreCold, odd/tasks/steward-pre-cold.md) is the pre-cold tier
+ * over the same 7 days, its returns joined from the same turn-usage rows.
+ * `typing` is the mod's `typing-*.jsonl` rows over the last 7 days
+ * (summarizeTypingLeadTime, odd/tasks/typing-lead-time.md), null with no row
+ * in that window; read and pruned the same way.
  */
 import { readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -63,6 +65,7 @@ import {
   TURN_USAGE_FILE_PATTERN,
 } from './log-files.mjs'
 import { STEWARD_DECISIONS_FILE_PATTERN, summarizeStewardDecisions, verifyStewardSaving } from '../../src/core/context_steward.ts'
+import { summarizePreCold } from '../../src/core/steward_pre_cold.ts'
 import { foldGateDecisionLog } from './gate-log-fold.mjs'
 import { summarizeTypingLeadTime, TYPING_FILE_PATTERN, TYPING_WINDOW_MS } from '../../src/core/typing_lead_time.ts'
 
@@ -212,7 +215,7 @@ async function main () {
 
     const steward = stewardFiles.length === 0
       ? null
-      : { ...summarizeStewardDecisions(stewardRows, now, MODEL_ROUTER_WINDOW_MS), verified: verifyStewardSaving(stewardRows, rows, now, STEWARD_VERIFIED_WINDOW_MS) }
+      : { ...summarizeStewardDecisions(stewardRows, now, MODEL_ROUTER_WINDOW_MS), verified: verifyStewardSaving(stewardRows, rows, now, STEWARD_VERIFIED_WINDOW_MS), preCold: summarizePreCold(stewardRows, rows, now, STEWARD_VERIFIED_WINDOW_MS) }
 
     // K0 (odd/tasks/typing-lead-time.md): null with no row in the last 7
     // days, so the Skills card shows no line rather than a zero.

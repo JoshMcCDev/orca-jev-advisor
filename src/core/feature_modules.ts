@@ -236,6 +236,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     modes: [
       { name: "stewardMode", values: ["off", "measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardMode`, shadowValue: "measure" },
       { name: "stewardSoftMode (400k tier)", values: ["measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardSoftMode`, shadowValue: "measure" },
+      { name: "stewardColdMode (pre-cold tier)", values: ["off", "measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardColdMode`, shadowValue: "measure" },
     ],
   },
   {

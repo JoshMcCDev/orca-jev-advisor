@@ -335,7 +335,21 @@ test('steward summarizes the last 24h: compactions applied, measure-mode ones, c
   const now = Date.now()
   writeStewardFile(home, now, [stewardRow(), stewardRow({ mode: 'measure', applied: false, contextAfter: null }), stewardRow({ decision: 'mid-task', compact: false, applied: false, contextAfter: null })])
   const result = run(home)
-  assert.deepEqual(result.steward, { decisions: 3, applied: 1, wouldCompact: 1, freedPerStep: 120000, verified: { compactions: 1, verified: 0, steps: 0, tokensNotReread: 0, mainContextTokens: 0, share: null } })
+  assert.deepEqual(result.steward, { decisions: 3, applied: 1, wouldCompact: 1, freedPerStep: 120000, verified: { compactions: 1, verified: 0, steps: 0, tokensNotReread: 0, mainContextTokens: 0, share: null }, preCold: null })
+})
+
+// Track S: the pre-cold tier's 7 days, its returns joined from the same turn usage.
+test('steward.preCold counts a measured pre-cold fire and the session coming back within 24 h', () => {
+  const home = makeHome()
+  const now = Date.now()
+  const at = (hoursAgo) => new Date(now - hoursAgo * 60 * 60 * 1000).toISOString()
+  writeStewardFile(home, now, [stewardRow({ at: at(30), sessionId: 's1', trigger: 'pre-cold', decision: 'pre-cold', mode: 'measure', applied: false, contextAfter: null, wouldFire: 'pre-cold' })])
+  writeTurnUsageFile(home, now, [usageRow({ at: at(29), sessionId: 's1', input: 0, cacheRead: 0, cacheWrite: 150000 })])
+  const result = run(home)
+  assert.equal(result.steward.decisions, 0, 'not a turn-end decision')
+  assert.equal(result.steward.preCold.wouldFire, 1)
+  assert.equal(result.steward.preCold.returned, 1)
+  assert.equal(result.steward.preCold.coldRewriteOnReturn, 150000)
 })
 
 // 0.6.27 T2: the saving measured on real usage, over the 7-day usage window.

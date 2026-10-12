@@ -2906,7 +2906,7 @@ test('steward: saving sends that target\'s mode and threshold in tokens', { skip
     assert.equal(request.mode, undefined)
     assert.equal(request.effort, undefined)
     // 0.6.15 T4: the 400k soft tier's switch goes with them, measure unless changed.
-    assert.deepEqual(request.steward, { mode: 'active', threshold: 100000, softMode: 'measure' })
+    assert.deepEqual(request.steward, { mode: 'active', threshold: 100000, softMode: 'measure', coldMode: 'measure' })
   } finally {
     await browser.close()
   }
@@ -2933,7 +2933,7 @@ test('steward: the 400k soft tier shows its own switch, measure by default, and 
     await page.click('[data-steward-target="home"] .model-router-steward-save')
     await page.waitForFunction(() => !!window.__written.modelRouterConfigRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.modelRouterConfigRequest)
-    assert.deepEqual(request.steward, { mode: 'measure', threshold: 120000, softMode: 'active' })
+    assert.deepEqual(request.steward, { mode: 'measure', threshold: 120000, softMode: 'active', coldMode: 'measure' })
   } finally {
     await browser.close()
   }
@@ -4761,4 +4761,98 @@ test('every modules.* key and the module hook lines exist in both languages, acc
     assert.match(es.get(key), /[áéíóúñ«]/, `${key} reads as Spanish with its accents`)
   }
   assert.doesNotMatch([...es.values()].join(' '), /\b(tenés|podés|elegí|pulsá|revisá)\b/i, 'tú, never voseo')
+})
+
+// Track S (odd/tasks/steward-pre-cold.md): the pre-cold tier has its own
+// switch (off, measure, active; measure by default) in the same steward row,
+// saved through the same writer, and its weekly numbers on the board.
+test('steward: the pre-cold switch shows off, measure and active, measure by default, and saving sends it', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const status = { ...MODEL_ROUTER_STATUS_EFFORT, targets: MODEL_ROUTER_STATUS_EFFORT.targets.map((target, at) => (at === 1 ? { ...target, steward: { ...target.steward, coldMode: 'active' } } : target)) }
+  const { browser, page, errors } = await openPanel({ modelRouterStatus: status })
+  try {
+    await page.click('#tab-models')
+    const cold = await page.evaluate(() => Array.from(document.querySelectorAll('[data-steward-target]')).map((row) => {
+      const group = row.querySelector('[data-steward-cold]')
+      const buttons = group === null ? [] : Array.from(group.querySelectorAll('button'))
+      const pressed = buttons.find((b) => b.className === 'active')
+      return { text: group === null ? '' : group.innerText, values: buttons.map((b) => b.getAttribute('data-value')), pressed: pressed === undefined ? null : pressed.getAttribute('data-value') }
+    }))
+    assert.deepEqual(cold.map((c) => c.pressed), ['measure', 'active'])
+    assert.deepEqual(cold[0].values, ['off', 'measure', 'active'])
+    assert.match(cold[0].text, /cache/i)
+    const hint = await page.evaluate(() => document.querySelector('#model-router-section').innerText)
+    assert.match(hint, /idle/i)
+    await page.evaluate(() => document.querySelector('[data-steward-target="home"] [data-steward-cold] button[data-value="off"]').click())
+    await page.click('[data-steward-target="home"] .model-router-steward-save')
+    await page.waitForFunction(() => !!window.__written.modelRouterConfigRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.modelRouterConfigRequest)
+    assert.deepEqual(request.steward, { mode: 'measure', threshold: 120000, softMode: 'measure', coldMode: 'off' })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('steward: the pre-cold switch reads in Spanish too', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page } = await openPanel({ modelRouterStatus: MODEL_ROUTER_STATUS_EFFORT }, 'es')
+  try {
+    await page.click('#tab-models')
+    const text = await page.evaluate(() => document.querySelector('[data-steward-target="home"] [data-steward-cold]').innerText)
+    assert.match(text, /caché/)
+  } finally {
+    await browser.close()
+  }
+})
+
+// Track S: the pre-cold tier's weekly numbers under the steward's, both locales.
+test('steward: the pre-cold tier shows fired, would fire, returned within 24 h, realized saving and waste for 7 days', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const preCold = { fired: 3, wouldFire: 5, skipped: 2, returned: 4, notReturned: 2, pending: 2, coldRewriteOnReturn: 410000, realizedSaving: 250000, waste: 44000, engineIdleCompactions: 0 }
+  const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold } }
+  for (const locale of ['en', 'es']) {
+    const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward }, locale)
+    try {
+      const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
+      if (locale === 'en') {
+        assert.match(text, /Before the cache goes cold \(7 days\): compacted 3 · would have compacted 5 \(measuring only\) · back within 24 h: 4 · not back: 2 · still waiting: 2/)
+        assert.match(text, /Realized saving: 250,000 · waste on sessions nobody resumed: 44,000 \(input-token equivalents\)/)
+        assert.match(text, /Cold rewrite when the measured sessions came back: 410,000 tokens/)
+      } else {
+        assert.match(text, /Antes de que se enfríe la caché \(7 días\): compactó 3 · habría compactado 5 \(solo mide\) · retomadas en 24 h: 4 · no retomadas: 2 · aún en espera: 2/)
+        assert.match(text, /Ahorro realizado: 250,000|Ahorro realizado: 250.000/)
+        assert.match(text, /Reescritura en frío/)
+      }
+      assert.deepEqual(errors, [])
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('steward: with no pre-cold row the board says so, and no saving line is invented', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold: null } }
+  const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward })
+  try {
+    const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
+    assert.match(text, /Before the cache goes cold: no decision yet/)
+    assert.doesNotMatch(text, /Realized saving/)
+    assert.doesNotMatch(text, /Cold rewrite/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('steward: measured only, the pre-cold line shows no saving or waste line', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const preCold = { fired: 0, wouldFire: 2, skipped: 0, returned: 1, notReturned: 0, pending: 1, coldRewriteOnReturn: 150000, realizedSaving: null, waste: null, engineIdleCompactions: 0 }
+  const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold } }
+  const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward })
+  try {
+    const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
+    assert.match(text, /would have compacted 2/)
+    assert.doesNotMatch(text, /Realized saving/)
+    assert.match(text, /Cold rewrite when the measured sessions came back: 150,000 tokens/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
 })

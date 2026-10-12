@@ -763,7 +763,7 @@ const ROUTER_READY = {
     targets: [
       // The context steward's per-target settings (odd/tasks/jev-context-steward.md).
       { target: 'home', mode: 'measure', effort: ROUTER_EFFORT_DEFAULTS, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'measure', threshold: 120000 }, workKind: 'measure' },
-      { target: 'cccccccc-0000-4000-8000-000000000003', mode: 'active', email: 'owner@example.com', effort: { ...ROUTER_EFFORT_DEFAULTS, complex: 'xhigh' }, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'active', threshold: 150000, softMode: 'active' }, workKind: 'active' },
+      { target: 'cccccccc-0000-4000-8000-000000000003', mode: 'active', email: 'owner@example.com', effort: { ...ROUTER_EFFORT_DEFAULTS, complex: 'xhigh' }, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'active', threshold: 150000, softMode: 'active', coldMode: 'active' }, workKind: 'active' },
       { target: 'bbbbbbbb-0000-4000-8000-000000000002', mode: 'measure', effort: ROUTER_EFFORT_DEFAULTS, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'off', threshold: 120000 }, workKind: 'measure' },
     ],
     checkedAt: iso,
@@ -791,6 +791,8 @@ const ROUTER_READY = {
       wouldCompact: 2,
       freedPerStep: 114000,
       verified: { compactions: 59, verified: 32, steps: 4891, tokensNotReread: 1380000000, mainContextTokens: 3500000000, share: 0.283 },
+      // Track S: summarizePreCold's shape; synthetic figures.
+      preCold: { fired: 3, wouldFire: 5, skipped: 2, returned: 4, notReturned: 2, pending: 2, coldRewriteOnReturn: 410000, realizedSaving: 250000, waste: 44000, engineIdleCompactions: 0 },
     },
   },
 }
