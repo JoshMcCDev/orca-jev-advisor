@@ -168,9 +168,9 @@ import { parseStewardSettingsStrict, planStewardWrite, stewardFromSettings } fro
 
 test("stewardFromSettings: measure at 120k by default; the installed plugin's options win", () => {
   // 0.6.15 T4: plus the 400k soft tier's own switch, measure by default.
-  assert.deepEqual(stewardFromSettings(null), { mode: "measure", threshold: 120_000, softMode: "measure" });
-  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { routerMode: "active", stewardMode: "active", stewardThreshold: 30_000 } } } }), { mode: "active", threshold: 30_000, softMode: "measure" });
-  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardMode: "loud", stewardThreshold: 5 } } } }), { mode: "measure", threshold: 120_000, softMode: "measure" });
+  assert.deepEqual(stewardFromSettings(null), { mode: "measure", threshold: 120_000, softMode: "measure", coldMode: "measure" });
+  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { routerMode: "active", stewardMode: "active", stewardThreshold: 30_000 } } } }), { mode: "active", threshold: 30_000, softMode: "measure", coldMode: "measure" });
+  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardMode: "loud", stewardThreshold: 5 } } } }), { mode: "measure", threshold: 120_000, softMode: "measure", coldMode: "measure" });
 });
 
 test("parseStewardSettingsStrict: both fields valid or null", () => {
@@ -195,7 +195,7 @@ test("planStewardWrite: next to the router mode, every other key kept; the same 
   assert.deepEqual(planStewardWrite("[]", { mode: "off", threshold: 120_000 }), { kind: "refuse", reason: "not-an-object" });
   const created = planStewardWrite(null, { mode: "off", threshold: 120_000 });
   assert.equal(created.kind, "write");
-  if (created.kind === "write") assert.deepEqual(stewardFromSettings(JSON.parse(created.text)), { mode: "off", threshold: 120_000, softMode: "measure" });
+  if (created.kind === "write") assert.deepEqual(stewardFromSettings(JSON.parse(created.text)), { mode: "off", threshold: 120_000, softMode: "measure", coldMode: "measure" });
 });
 
 // 0.6.15 T4: the 400k soft tier's switch, stored next to the steward's mode.

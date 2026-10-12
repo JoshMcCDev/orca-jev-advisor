@@ -175,10 +175,12 @@ import type { RouterDestination } from '../../../../src/core/model_router_destin
 import { decideSubagent, subagentStepEffort } from '../../../../src/core/model_router_subagent.ts'
 import type { SubagentDecision } from '../../../../src/core/model_router_subagent.ts'
 import { isPersonPromptOrigin } from '../../../../src/core/model_router_origin.ts'
-import type { RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardState } from '../types/index.d.ts'
-import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
-import type { StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
+import type { RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardColdState, StewardState } from '../types/index.d.ts'
+import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, preColdInstructions, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
+import type { PreColdRecordFields, StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
 import { stewardFromSettings } from '../../../../src/core/model_router_mode.ts'
+import { PRE_COLD_MAX_WAKES, PRE_COLD_TTL_MS, decidePreCold, engineIdleCompactMinTokens, inEngineZone, isEngineIdleCompaction, preColdCompactCost, preColdEarliestMs, preColdMode } from '../../../../src/core/steward_pre_cold.ts'
+import type { PreColdJudgment } from '../../../../src/core/steward_pre_cold.ts'
 import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, interpretVerifyDone, isVerifyDoneCandidate, verifyDoneDecisionFileName, verifyDoneRecord } from '../../../../src/core/verify_done.ts'
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
 import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
@@ -1896,6 +1898,25 @@ interface StewardHost {
   readonly runningTurn: () => string | null
   /** Sets the steward's part of the status line; null clears it. */
   readonly show: (text: string | null) => void
+  /** Track S: the idle timer's bookkeeping, plain data held by `register`. */
+  readonly cold: PreColdIdle
+}
+
+/**
+ * Track S: what the pre-cold tier keeps in `register` between hooks, so a
+ * timer can tell whether it is still the one for this idle period and whether
+ * the engine compacted on its own meanwhile. No `$` in here (JEVADV-43).
+ */
+interface PreColdIdle {
+  /** When the idle period began (the steward's timer after the last main turn), or null while a turn runs. */
+  armedAt: number | null
+  timer: { readonly cancel: () => void } | null
+  /** When an `auto` compaction last began or ended. */
+  lastAutoCompactAt: number | null
+  /** An `auto` PreCompact with no PostCompact yet. */
+  autoCompactRunning: boolean
+  /** A pre-cold compaction of ours is running. */
+  ownCallPending: boolean
 }
 
 /** One decision on its way to being logged, and, in active mode, applied. */
@@ -2021,6 +2042,7 @@ async function stewardAfterTurn($: EngineInterface, options: PluginOptions, host
     if (!gate.ask || contextTokens === null) return
     const messages = await $.session.messages()
     const jev = await askStewardJudgment($, options, messages, contextTokens, turnsSinceCompaction)
+    await rememberStewardJudgment($, jev, state.personTurns)
     const softActive = effectiveMode(moduleStewardState, switchMode(settings.softMode === 'active')) === 'active'
     const decision = decideSteward({ jev, hardLimit: gate.hardLimit, softLimit: gate.softLimit, softActive })
     // The soft tier ships measured: while its switch is on measure, a turn it
@@ -2102,6 +2124,226 @@ async function finishSteward($: EngineInterface, plan: StewardPlan, applied: boo
   await appendStewardDecision($, at, `${JSON.stringify(record)}\n`)
   host.show(stewardStatusPart(plan.locale, { mode: plan.mode, decision: plan.decision.decision, applied, before: plan.contextBefore, after: contextAfter }))
   if (applied && plan.decision.suggestClear) $.ui.toast(stewardClearHint(plan.locale), { timeoutMs: 15000 })
+}
+
+// ---------------------------------------------------------------------------
+// The steward's pre-cold tier (track S, odd/tasks/steward-pre-cold.md). An
+// idle session's prompt cache expires after its TTL (1h, assumed: see
+// PRE_COLD_TTL_MS), and the next prompt re-writes it all cold at 2x. The
+// steward's turn-end timer arms an idle timer; while no turn starts, its wake
+// decides with `decidePreCold` (which keeps clear of the engine's own idle
+// compaction) and, in active mode, compacts while the cache is still warm.
+// Measure mode (the default) logs what it would do and moves no steward
+// state. Main thread only, interactive only (a headless session refuses the
+// compaction, and the tier then stops arming), never inside a turn. Every
+// due decision at or above the threshold is a row in the steward's log.
+// Fails open.
+// ---------------------------------------------------------------------------
+
+/** The plugin store key (per account) that says the engine's own idle compaction was seen here. */
+const ENGINE_SEEN_STORE_KEY = 'engineIdleCompactSeenAt'
+const EMPTY_STEWARD_COLD: StewardColdState = { judgment: null, headless: false }
+
+async function readStewardColdState($: EngineInterface): Promise<StewardColdState> {
+  const read = await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'stewardCold' })
+  return read.value ?? EMPTY_STEWARD_COLD
+}
+
+/** Keeps the turn-end verdict for the idle tier, with the turn it judged. Best-effort. */
+async function rememberStewardJudgment($: EngineInterface, jev: StewardJudgment | null, personTurns: number): Promise<void> {
+  try {
+    const cold = await readStewardColdState($)
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'stewardCold' }, { ...cold, judgment: jev === null ? null : { verdict: jev.verdict, confidence: jev.confidence, personTurns } })
+  } catch {
+    // Without it the idle tier reads "no verdict", never "mid-task".
+  }
+}
+
+async function readEngineSeen($: EngineInterface): Promise<boolean> {
+  try {
+    return typeof (await $.store.get(ENGINE_SEEN_STORE_KEY)) === 'string'
+  } catch {
+    // Unknown: the slot after the engine's still keeps the tier from racing it.
+    return false
+  }
+}
+
+/** The timer `turn.complete` schedules for the steward: the turn-end decision, then the idle timer. Never throws. */
+async function stewardTimer($: EngineInterface, options: PluginOptions, host: StewardHost, modulesFile: FeatureModulesFile): Promise<void> {
+  let endedAt: number | null = null
+  try {
+    endedAt = await $.clock.now()
+  } catch {
+    endedAt = null
+  }
+  await stewardAfterTurn($, options, host, modulesFile)
+  if (endedAt !== null) await armPreCold($, host, modulesFile, endedAt)
+}
+
+/** Arms the idle timer for the idle period that began at `endedAt`, replacing any older one. */
+async function armPreCold($: EngineInterface, host: StewardHost, modulesFile: FeatureModulesFile, endedAt: number): Promise<void> {
+  try {
+    if (host.runningTurn() !== null) return
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'steward') === 'off') return
+    const settings = stewardFromSettings(await readVaultSettings($))
+    if (preColdMode(settings.mode, settings.coldMode) === 'off') return
+    if ((await readStewardColdState($)).headless) return
+    host.cold.timer?.cancel()
+    host.cold.armedAt = endedAt
+    host.cold.timer = $.clock.after(preColdEarliestMs(PRE_COLD_TTL_MS), () => preColdWake($, host, modulesFile, endedAt, 1))
+  } catch {
+    // No timer: the session goes cold as it would have.
+  }
+}
+
+/** What a pre-cold row needs besides the outcome. */
+interface PreColdPlan {
+  readonly mode: 'measure' | 'active'
+  readonly contextBefore: number
+  readonly contextWindow: number | null
+  readonly judgment: PreColdJudgment | null
+  readonly personTurns: number
+  readonly idleMs: number
+}
+
+interface PreColdOutcome {
+  readonly decision: StewardDecision
+  readonly applied: boolean
+  readonly contextAfter: number | null
+  readonly notApplied: StewardNotApplied | null
+  readonly wouldFire: StewardTier | null
+  readonly preCold: PreColdRecordFields
+}
+
+/** A wake of the idle timer: stale or early does nothing (an early one re-arms for the rest); a due one decides, logs and, in active mode, compacts. */
+async function preColdWake($: EngineInterface, host: StewardHost, modulesFile: FeatureModulesFile, armedAt: number, wake: number): Promise<void> {
+  try {
+    if (host.cold.armedAt !== armedAt || host.runningTurn() !== null) return
+    const idleMs = (await $.clock.now()) - armedAt
+    const earliest = preColdEarliestMs(PRE_COLD_TTL_MS)
+    if (idleMs < earliest) {
+      if (wake < PRE_COLD_MAX_WAKES) host.cold.timer = $.clock.after(earliest - idleMs, () => preColdWake($, host, modulesFile, armedAt, wake + 1))
+      return
+    }
+    const moduleStewardState = moduleState(await resolveFeatureModules($, modulesFile), 'steward')
+    const settings = stewardFromSettings(await readVaultSettings($))
+    // Shadow caps it at measure, as it does the rest of the steward.
+    const mode = effectiveMode(moduleStewardState, preColdMode(settings.mode, settings.coldMode))
+    if (mode === 'off') return
+    const cold = await readStewardColdState($)
+    if (cold.headless) return
+    const usage = await $.session.usage()
+    const contextTokens = usage.context.tokens ?? null
+    const steward = await readStewardState($)
+    const judgment = cold.judgment !== null && cold.judgment.personTurns === steward.personTurns ? { verdict: cold.judgment.verdict, confidence: cold.judgment.confidence } : null
+    const lastAuto = host.cold.lastAutoCompactAt
+    const engineMinTokens = engineIdleCompactMinTokens(await $.env.get('CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS'))
+    const decision = decidePreCold({
+      contextTokens,
+      threshold: settings.threshold,
+      ttlMs: PRE_COLD_TTL_MS,
+      idleMs,
+      engineMinTokens,
+      engineSeen: await readEngineSeen($),
+      engineCompactedSinceIdle: host.cold.autoCompactRunning || (lastAuto !== null && lastAuto >= armedAt),
+      turnsSinceCompaction: steward.lastCompactionTurn === null ? null : steward.personTurns - steward.lastCompactionTurn,
+      judgment,
+    })
+    if (decision.kind === 'wait') {
+      if (wake < PRE_COLD_MAX_WAKES) host.cold.timer = $.clock.after(decision.ms, () => preColdWake($, host, modulesFile, armedAt, wake + 1))
+      return
+    }
+    if (contextTokens === null) return
+    const plan: PreColdPlan = { mode, contextBefore: contextTokens, contextWindow: usage.context.window ?? null, judgment, personTurns: steward.personTurns, idleMs }
+    const confidence = judgment?.confidence ?? null
+    const engineZone = inEngineZone(contextTokens, engineMinTokens)
+    if (decision.kind === 'skip') {
+      if (!decision.log) return
+      await logPreCold($, plan, { decision: { decision: 'pre-cold-skip', compact: false, suggestClear: false, confidence }, applied: false, contextAfter: null, notApplied: null, wouldFire: null, preCold: { coldSkip: decision.reason, idleMs, engineZone, compactCost: null } })
+      return
+    }
+    const fire: StewardDecision = { decision: 'pre-cold', compact: true, suggestClear: false, confidence }
+    const fields = { coldSkip: null, idleMs, engineZone }
+    if (mode === 'measure') {
+      await logPreCold($, plan, { decision: fire, applied: false, contextAfter: null, notApplied: 'measure', wouldFire: 'pre-cold', preCold: { ...fields, compactCost: null } })
+      return
+    }
+    await applyPreCold($, host, plan, fire, fields)
+  } catch {
+    // The idle tier never affects the session on a failure.
+  }
+}
+
+/** Active mode: one compaction while idle, never under a turn; its result (and the headless refusal) is the row. */
+async function applyPreCold($: EngineInterface, host: StewardHost, plan: PreColdPlan, fire: StewardDecision, fields: Omit<PreColdRecordFields, 'compactCost'>): Promise<void> {
+  const notApplied = (reason: StewardNotApplied): PreColdOutcome => ({ decision: fire, applied: false, contextAfter: null, notApplied: reason, wouldFire: null, preCold: { ...fields, compactCost: null } })
+  if (host.runningTurn() !== null) {
+    await logPreCold($, plan, notApplied('turn-running'))
+    return
+  }
+  const instructions = preColdInstructions(collectStewardFacts(await $.session.messages()))
+  let result: SessionCompactResult | null = null
+  let headless = false
+  host.cold.ownCallPending = true
+  try {
+    result = await $.session.compact({ instructions })
+  } catch (error) {
+    // A -p / SDK session refuses compaction between turns (seen live): stop arming there.
+    headless = error instanceof Error && error.message.includes('headless')
+    result = null
+  } finally {
+    host.cold.ownCallPending = false
+  }
+  if (result === null) {
+    if (headless) await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'stewardCold' }, { ...(await readStewardColdState($)), headless: true })
+    await logPreCold($, plan, notApplied(headless ? 'headless' : host.runningTurn() !== null ? 'turn-running' : 'rejected'))
+    return
+  }
+  if (result.skip !== undefined) {
+    await logPreCold($, plan, notApplied('skipped'))
+    return
+  }
+  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'steward' }, { ...(await readStewardState($)), lastCompactionTurn: plan.personTurns })
+  await logPreCold($, plan, { decision: fire, applied: true, contextAfter: result.tokensAfter ?? null, notApplied: null, wouldFire: null, preCold: { ...fields, compactCost: preColdCompactCost(result.usage) } })
+}
+
+/** One pre-cold row in the steward's hourly log. */
+async function logPreCold($: EngineInterface, plan: PreColdPlan, outcome: PreColdOutcome): Promise<void> {
+  const models = await stewardModels($)
+  const mainWindow = (models.mainModel === null ? null : contextWindowOfModel(models.mainModel)) ?? plan.contextWindow
+  const at = new Date(await $.clock.now()).toISOString()
+  const record = stewardDecisionRecord({
+    at, account: await resolveAccountId($), project: baseName(await $.session.root()), mode: plan.mode, contextBefore: plan.contextBefore, decision: outcome.decision, applied: outcome.applied,
+    contextAfter: outcome.contextAfter, notApplied: outcome.notApplied, verdict: plan.judgment?.verdict ?? null, sessionId: await readSessionId($), turnIndex: plan.personTurns, mainWindow,
+    currentModel: models.currentModel, wouldFire: outcome.wouldFire, preCold: outcome.preCold,
+  })
+  await appendStewardDecision($, at, `${JSON.stringify(record)}\n`)
+}
+
+/**
+ * classic.PreCompact / classic.PostCompact: an `auto` compaction makes the
+ * armed wake stand down; one that ends while idle (no turn, no call of ours,
+ * half the TTL idle) is the engine's own idle compaction, remembered for this
+ * account in the plugin store and logged. Never throws.
+ */
+async function observeCompaction($: EngineInterface, host: Pick<StewardHost, 'runningTurn' | 'cold'>, modulesFile: FeatureModulesFile, phase: 'pre' | 'post', trigger: string): Promise<void> {
+  try {
+    if (trigger !== 'auto') return
+    const now = await $.clock.now()
+    host.cold.lastAutoCompactAt = now
+    host.cold.autoCompactRunning = phase === 'pre'
+    if (phase !== 'post') return
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'steward') === 'off') return
+    const armedAt = host.cold.armedAt
+    const idleMs = armedAt === null ? null : now - armedAt
+    if (!isEngineIdleCompaction({ trigger, turnRunning: host.runningTurn() !== null, ownCallPending: host.cold.ownCallPending, idleMs, ttlMs: PRE_COLD_TTL_MS })) return
+    const at = new Date(now).toISOString()
+    await $.store.set(ENGINE_SEEN_STORE_KEY, at)
+    const row = { at, event: 'engine-idle-compact', account: await resolveAccountId($), project: baseName(await $.session.root()), sessionId: await readSessionId($), idleMs, trigger }
+    await appendStewardDecision($, at, `${JSON.stringify(row)}\n`)
+  } catch {
+    // Observing is best-effort: unseen, the tier keeps to the slot after the engine's.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2390,6 +2632,10 @@ export function register(on: On, options: PluginOptions): void {
     trackTypingEdit($, typing)
     return result
   })
+
+  // Track S: the steward's idle timer and what it must know about compactions (PreColdIdle).
+  const preColdIdle: PreColdIdle = { armedAt: null, timer: null, lastAutoCompactAt: null, autoCompactRunning: false, ownCallPending: false }
+  const compactionWatch: Pick<StewardHost, 'runningTurn' | 'cold'> = { runningTurn: () => activeTurnId, cold: preColdIdle }
 
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
     // A subagent's own listing is left alone, since nothing here suggests
@@ -2908,6 +3154,21 @@ export function register(on: On, options: PluginOptions): void {
   // this turn has ended, never inside it.
   on('turn.start', async ($, e, next) => {
     activeTurnId = e.turnId
+    // Track S: a turn ends the idle period; its armed timer, if it still runs, finds a stale stamp.
+    preColdIdle.timer?.cancel()
+    preColdIdle.timer = null
+    preColdIdle.armedAt = null
+    return next(e)
+  })
+
+  // Track S: compactions the steward did not make. An `auto` one makes the
+  // idle timer stand down; one while idle is the engine's own idle compaction.
+  on('classic.PreCompact', async ($, e, next) => {
+    await observeCompaction($, compactionWatch, modulesFile, 'pre', e.trigger)
+    return next(e)
+  })
+  on('classic.PostCompact', async ($, e, next) => {
+    await observeCompaction($, compactionWatch, modulesFile, 'post', e.trigger)
     return next(e)
   })
 
@@ -2949,9 +3210,10 @@ export function register(on: On, options: PluginOptions): void {
             stewardStatusText = text
             $.ui.status(statusLine() ?? undefined)
           },
+          cold: preColdIdle,
         }
         try {
-          $.clock.after(STEWARD_DELAY_MS, () => stewardAfterTurn($, options, host, modulesFile))
+          $.clock.after(STEWARD_DELAY_MS, () => stewardTimer($, options, host, modulesFile))
         } catch {
           // No timer, no steward: the turn ends as it would have.
         }

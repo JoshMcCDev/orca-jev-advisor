@@ -90,6 +90,18 @@ export type StewardState = {
 }
 
 /**
+ * Track S (odd/tasks/steward-pre-cold.md): what the steward's pre-cold tier
+ * keeps for the session. `judgment` is the turn-end steward's verdict on the
+ * last turn, with the person-turn count it was given at (an older one is not
+ * used); `headless` stops the tier arming in a headless (-p / SDK) session,
+ * where the engine refuses compaction between turns.
+ */
+export type StewardColdState = {
+  judgment: { verdict: 'boundary' | 'mid-task' | 'new-topic'; confidence: number; personTurns: number } | null
+  headless: boolean
+}
+
+/**
  * 0.6.14 T1: the subagents running now, in the order they started, each as
  * `agent.spawn` recorded it (and `turn.step` updated its effort). Kept here
  * so a plugin reload in the same session does not forget them; pruned
@@ -114,6 +126,6 @@ export type RunningSubagentsState = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; runningSubagents: RunningSubagentsState }
+    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState }
   }
 }

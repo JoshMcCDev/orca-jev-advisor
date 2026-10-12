@@ -231,7 +231,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     states: MODULE_STATES,
     defaultState: "active",
     hooks: [],
-    modFeatures: [{ id: "steward", hooks: ["prompt.submit", "turn.start", "turn.complete"], jev: true }],
+    modFeatures: [{ id: "steward", hooks: ["prompt.submit", "turn.start", "turn.complete", "classic.PreCompact", "classic.PostCompact"], jev: true }],
     workerJobs: [ROUTER_STATUS, CONSUMPTION_SUMMARY, ROUTER_CONFIG_REQUEST],
     modes: [
       { name: "stewardMode", values: ["off", "measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardMode`, shadowValue: "measure" },

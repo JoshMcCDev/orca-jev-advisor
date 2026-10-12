@@ -66,6 +66,11 @@ export function engineIdleCompactMinTokens(env: string | undefined): number {
   return Math.max(Number(text), ENGINE_IDLE_COMPACT_FLOOR_TOKENS);
 }
 
+/** Whether a context is in the engine's idle-compaction zone: at or above 90% of its minimum. */
+export function inEngineZone(contextTokens: number, engineMinTokens: number): boolean {
+  return contextTokens >= engineMinTokens * ENGINE_ZONE_SHARE;
+}
+
 /** The earliest the tier can fire: no wake before it needs any reading. */
 export function preColdEarliestMs(ttlMs: number): number {
   return Math.round(ttlMs * PRE_COLD_EARLY_SLOT);
@@ -114,7 +119,7 @@ export type PreColdDecision =
 export function decidePreCold(input: PreColdInput): PreColdDecision {
   if (input.contextTokens === null || input.contextTokens < input.threshold) return { kind: "skip", reason: "below-threshold", log: false };
   if (input.ttlMs !== PRE_COLD_TTL_MS) return { kind: "skip", reason: "ttl", log: true };
-  const engineZone = input.contextTokens >= input.engineMinTokens * ENGINE_ZONE_SHARE;
+  const engineZone = inEngineZone(input.contextTokens, input.engineMinTokens);
   const slotMs = Math.round(input.ttlMs * (engineZone ? PRE_COLD_AFTER_ENGINE_SLOT : PRE_COLD_EARLY_SLOT));
   if (input.idleMs < slotMs) return { kind: "wait", ms: slotMs - input.idleMs };
   if (input.idleMs >= input.ttlMs * PRE_COLD_CUTOFF) return { kind: "skip", reason: "expired", log: true };

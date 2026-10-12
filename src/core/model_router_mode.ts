@@ -21,6 +21,8 @@ import { EFFORT_LEVELS, TIER_EFFORT } from "./model_router_decide.ts";
 import type { TierEffort, TierEffortMap } from "./model_router_decide.ts";
 import { MAX_STEWARD_THRESHOLD, MIN_STEWARD_THRESHOLD, STEWARD_MODES, STEWARD_SOFT_MODES, parseStewardMode, parseStewardSoftMode, parseStewardThreshold } from "./context_steward.ts";
 import type { StewardMode, StewardSoftMode } from "./context_steward.ts";
+import { parseStewardColdMode } from "./steward_pre_cold.ts";
+import type { StewardColdMode } from "./steward_pre_cold.ts";
 import { parseWorkKindMode } from "./work_kind.ts";
 import type { WorkKindMode } from "./work_kind.ts";
 
@@ -239,6 +241,8 @@ export interface StewardSettings {
   readonly threshold: number;
   /** 0.6.15 T4: the 400k soft tier's own switch (`stewardSoftMode`), measure by default. */
   readonly softMode: StewardSoftMode;
+  /** Track S: the pre-cold tier's own switch (`stewardColdMode`), measure by default. */
+  readonly coldMode: StewardColdMode;
 }
 
 /** What a writer stores: `softMode` absent leaves the stored switch as it is. */
@@ -253,6 +257,7 @@ export function stewardFromSettings(settings: unknown): StewardSettings {
     mode: parseStewardMode(routerOption(settings, "stewardMode")),
     threshold: parseStewardThreshold(routerOption(settings, "stewardThreshold")),
     softMode: parseStewardSoftMode(routerOption(settings, "stewardSoftMode")),
+    coldMode: parseStewardColdMode(routerOption(settings, "stewardColdMode")),
   };
 }
 
