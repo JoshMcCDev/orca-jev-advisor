@@ -236,12 +236,17 @@ const ENGRAM_TYPE: Readonly<Record<MemoryType, string>> = {
   reference: "discovery",
 };
 
+/** The Engram category a memory of this type is saved as. */
+export function engramTypeOf(type: MemoryType): string {
+  return ENGRAM_TYPE[type];
+}
+
 export function engramSaveArgs(item: SpoolItem, project: string | undefined): EngramSaveArgs {
   const save = item.save;
   return {
     title: save.title,
     content: save.content,
-    type: ENGRAM_TYPE[save.type],
+    type: engramTypeOf(save.type),
     topic_key: save.topic_key,
     capture_prompt: false,
     ...(project === undefined ? {} : { project }),
