@@ -40,6 +40,7 @@ import { foldAbResults } from '../src/core/ab_report.ts'
 import { EMPTY_AUTHORIZATIONS, authorizationRows, recordAuthorization } from '../src/core/gate_authorizations.ts'
 import { parseTrustedPrograms } from '../src/core/trusted_programs.ts'
 import { DEFAULT_FEATURE_MODULES } from '../src/core/feature_modules.ts'
+import { summarizeTypingLeadTime, TYPING_WINDOW_MS } from '../src/core/typing_lead_time.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PANELS_DIR = join(ROOT, 'adapters/orca/panels')
@@ -884,9 +885,29 @@ function realModSkillsSummary (rows) {
   }
 }
 
+/**
+ * K0c (odd/tasks/typing-lead-time.md) -- the Skills card's "Typing before
+ * send" line. Rows shaped like the mod's typing-*.jsonl (src/core/
+ * typing_lead_time.ts's TypingRecord), summarized by the real
+ * summarizeTypingLeadTime: 40 prompts typed at the composer, pauses spread
+ * from 0.3 s to 4.5 s, and 12 a notification or a plugin injected. Synthetic.
+ */
+function typingLogRows () {
+  const now = Date.parse(iso)
+  const rows = []
+  for (let i = 0; i < 40; i += 1) {
+    rows.push({ type: 'typing', at: new Date(now - (i + 1) * 3 * 60 * 60 * 1000).toISOString(), sessionId: `s-${i % 6}`, origin: 'composer', kind: 'composer', gapMs: 300 + ((i * 397) % 4200), edits: 20 + ((i * 31) % 180) })
+  }
+  for (let i = 0; i < 12; i += 1) {
+    rows.push({ type: 'typing', at: new Date(now - (i + 1) * 7 * 60 * 60 * 1000).toISOString(), sessionId: `s-${i % 6}`, origin: i % 2 === 0 ? 'task-notification' : 'plugin', kind: 'injected', gapMs: null, edits: 0 })
+  }
+  return rows
+}
+
 const SKILLS_READY = {
   ...READY,
   measurementsSummary: { ...READY.measurementsSummary, modSkills: realModSkillsSummary(skillsLogRows()) },
+  consumptionSummary: { ...CONSUMPTION_READY.consumptionSummary, typing: summarizeTypingLeadTime(typingLogRows(), Date.parse(iso), TYPING_WINDOW_MS) },
 }
 
 const SCENARIOS = { fresh: FRESH, empty: EMPTY, ready: READY, degraded: DEGRADED, seeds: SEEDS, baseline: BASELINE, 'models-empty': MODELS_EMPTY, 'models-emptied': MODELS_EMPTIED, 'catalog-proposals': CATALOG_PROPOSALS, 'consumption-ready': CONSUMPTION_READY, 'router-ready': ROUTER_READY }

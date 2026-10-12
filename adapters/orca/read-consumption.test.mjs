@@ -405,3 +405,50 @@ test('T1: a fold that fails leaves the consumption summary and every gate file a
   assert.equal(result.ok, true)
   assert.equal(existsSync(oldPath), true)
 })
+
+// K0c (odd/tasks/typing-lead-time.md): the mod's typing-*.jsonl rows, summed
+// over the last 7 days for the Skills card's "Typing before send" line.
+function typingFileName (ms) {
+  return `typing-${new Date(ms).toISOString().slice(0, 13)}.jsonl`
+}
+
+function typingRow (overrides = {}) {
+  return { type: 'typing', at: new Date().toISOString(), sessionId: 's1', origin: 'composer', kind: 'composer', gapMs: 1200, edits: 40, ...overrides }
+}
+
+function writeTypingFile (home, ms, rows) {
+  const dir = cacheDirFor(home)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, typingFileName(ms)), rows.map((r) => `${JSON.stringify(r)}\n`).join(''), 'utf8')
+}
+
+test('K0c typing is null until a typing file exists, never a zero', () => {
+  const result = run(makeHome())
+  assert.equal(result.ok, true)
+  assert.equal(result.typing, null)
+})
+
+test('K0c typing summarizes the last 7 days: p50 and p90 of the gap over typed prompts, injected ones counted apart', () => {
+  const home = makeHome()
+  const now = Date.now()
+  const at = (hoursAgo) => new Date(now - hoursAgo * 60 * 60 * 1000).toISOString()
+  writeTypingFile(home, now, [
+    typingRow({ at: at(1), gapMs: 400 }),
+    typingRow({ at: at(30), gapMs: 2000 }),
+    typingRow({ at: at(100), gapMs: 900 }),
+    typingRow({ at: at(2), origin: 'task-notification', kind: 'injected', gapMs: null, edits: 0 }),
+    typingRow({ at: at(8 * 24), gapMs: 99000 }),
+  ])
+  assert.deepEqual(run(home).typing, { typed: 3, injected: 1, p50Ms: 900, p90Ms: 2000 })
+})
+
+test('K0c a typing log more than 8 days old is pruned, same retention as the others', () => {
+  const home = makeHome()
+  const oldMs = Date.now() - 9 * 24 * 60 * 60 * 1000
+  writeTypingFile(home, oldMs, [typingRow({ at: new Date(oldMs).toISOString() })])
+  const oldPath = join(cacheDirFor(home), typingFileName(oldMs))
+  const result = run(home)
+  assert.equal(result.ok, true)
+  assert.equal(result.typing, null, 'only rows past the window: no summary')
+  assert.equal(existsSync(oldPath), false)
+})

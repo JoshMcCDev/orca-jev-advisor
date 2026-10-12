@@ -33,10 +33,10 @@ Out: precomputing anything (track K), a version bump, CHANGELOG, README, release
 
 Strict TDD for each: RED observed, then GREEN, then a Conventional Commit on this branch.
 
-- [ ] K0-doc This file.
-- [ ] K0a `src/core/typing_lead_time.ts` + `src/core/typing_lead_time.test.ts`: tracker update (count, latest time, out of order), summary at submit (composer with edits, composer with none, other origin), row shape, hourly file name and pattern, 7-day summary (window edges, p50/p90 nearest rank, injected counted apart, malformed rows skipped, null with no rows), purity (no `node:` import).
-- [ ] K0b Mod wiring + `adapters/claude/mod-skills/hooks.test.ts`: the real mod loads with the new import; `prompt.edit` hands back `next(e)`'s result and writes nothing; Off = 0 rows; a composer prompt = one row with gap and edits; an injected prompt = one `injected` row; a subagent's run writes no row; empty and slash prompts write no row; a failing host never affects the prompt.
-- [ ] K0c `read-consumption.mjs` publishes `typing` (null with no file); the Skills card shows "Typing before send (7 days): p50 X s · p90 Y s · N typed prompts · M injected" (es and en) and no line without data; `scripts/panels.spec.mjs` covers both; `skills-ready` carries the data; shots of the card at 1440 and 390, light.
+- [x] K0-doc This file.
+- [x] K0a `src/core/typing_lead_time.ts` + `src/core/typing_lead_time.test.ts`: tracker update (count, latest time, out of order), summary at submit (composer with edits, composer with none, other origin), row shape, hourly file name and pattern, 7-day summary (window edges, p50/p90 nearest rank, injected counted apart, malformed rows skipped, null with no rows), purity (no `node:` import).
+- [x] K0b Mod wiring + `adapters/claude/mod-skills/hooks.test.ts`: the real mod loads with the new import; `prompt.edit` hands back `next(e)`'s result and writes nothing; Off = 0 rows; a composer prompt = one row with gap and edits; an injected prompt = one `injected` row; a subagent's run writes no row; empty and slash prompts write no row; a failing host never affects the prompt.
+- [x] K0c `read-consumption.mjs` publishes `typing` (null with no file); the Skills card shows "Typing before send (7 days): p50 X s · p90 Y s · N typed prompts · M injected" (es and en) and no line without data; `scripts/panels.spec.mjs` covers both; `skills-ready` carries the data; shots of the card at 1440 and 390, light.
 
 ## Acceptance criteria
 

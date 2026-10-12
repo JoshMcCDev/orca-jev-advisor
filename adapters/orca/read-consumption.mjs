@@ -36,7 +36,10 @@
  * steward's `context-steward-decisions-*.jsonl` (summarizeStewardDecisions,
  * odd/tasks/jev-context-steward.md): null until a file exists. Its
  * `verified` (verifyStewardSaving) is the saving measured on the raw
- * turn-usage rows over the last 7 days, the usage window.
+ * turn-usage rows over the last 7 days, the usage window. `typing` is the
+ * mod's `typing-*.jsonl` rows over the last 7 days (summarizeTypingLeadTime,
+ * odd/tasks/typing-lead-time.md), null with no row in that window; read and
+ * pruned the same way.
  */
 import { readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -61,6 +64,7 @@ import {
 } from './log-files.mjs'
 import { STEWARD_DECISIONS_FILE_PATTERN, summarizeStewardDecisions, verifyStewardSaving } from '../../src/core/context_steward.ts'
 import { foldGateDecisionLog } from './gate-log-fold.mjs'
+import { summarizeTypingLeadTime, TYPING_FILE_PATTERN, TYPING_WINDOW_MS } from '../../src/core/typing_lead_time.ts'
 
 const PLATFORM = normalizePlatform(process.platform)
 const HOME = homedir()
@@ -155,6 +159,8 @@ async function main () {
     const { rows: decisionRows } = await readJsonlRows(decisionFiles)
     const stewardFiles = await listHourlyFiles(CACHE_DIR, STEWARD_DECISIONS_FILE_PATTERN)
     const { rows: stewardRows } = await readJsonlRows(stewardFiles)
+    const typingFiles = await listHourlyFiles(CACHE_DIR, TYPING_FILE_PATTERN)
+    const { rows: typingRows } = await readJsonlRows(typingFiles)
     // Pruning runs after reading, using the same listings -- a file that
     // gets deleted mid-run still contributed its rows to this cycle's
     // aggregation, exactly as if it had been read moments before turning 8
@@ -162,6 +168,7 @@ async function main () {
     await pruneOldHourlyFiles(files, now)
     await pruneOldHourlyFiles(decisionFiles, now)
     await pruneOldHourlyFiles(stewardFiles, now)
+    await pruneOldHourlyFiles(typingFiles, now)
 
     const turnUsageRecords = []
     let malformed = 0
@@ -207,7 +214,11 @@ async function main () {
       ? null
       : { ...summarizeStewardDecisions(stewardRows, now, MODEL_ROUTER_WINDOW_MS), verified: verifyStewardSaving(stewardRows, rows, now, STEWARD_VERIFIED_WINDOW_MS) }
 
-    result = { ok: true, usage, quota, recommendations, modelRouter, steward }
+    // K0 (odd/tasks/typing-lead-time.md): null with no row in the last 7
+    // days, so the Skills card shows no line rather than a zero.
+    const typing = summarizeTypingLeadTime(typingRows, now, TYPING_WINDOW_MS)
+
+    result = { ok: true, usage, quota, recommendations, modelRouter, steward, typing }
   } catch (error) {
     result = { ok: false, reason: 'exception', detail: String(error?.message ?? error).slice(0, 300) }
   }

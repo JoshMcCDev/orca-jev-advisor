@@ -483,6 +483,7 @@
       <section class="card wide" id="card-skills">
         <h2 data-i18n="skills.heading"></h2>
         <div id="skills-body"></div>
+        <div id="skills-typing"></div>
       </section>
     </div>
     </div>
@@ -637,6 +638,9 @@
           'speed.tokensBig': '{{model}}: {{in}} de entrada · {{out}} de salida · {{cache}} de contexto cargado',
           'speed.tokensNote': 'Cada deliberación del modelo se midió en frío: «claude -p» carga su propio contexto cada vez. En una sesión viva ese contexto ya está cargado, así que esa cifra es el coste de decidir en frío, no el de cada decisión dentro de la sesión.',
           'skills.heading': 'Mod de skills',
+          // K0 (odd/tasks/typing-lead-time.md): from consumptionSummary.typing.
+          'skills.typing': 'Escritura antes de enviar (7 días): p50 {{p50}} s · p90 {{p90}} s · {{typed}} prompts escritos · {{injected}} inyectados',
+          'skills.typingNoneTyped': 'Escritura antes de enviar (7 días): todavía sin prompts escritos · {{injected}} inyectados',
           'unmeasured.heading': 'Lo que estos números no miden',
           'unmeasured.money': 'Dinero. Este panel no convierte nada a coste y no va a hacerlo.',
           'unmeasured.extrapolation': 'El tiempo total ahorrado. La diferencia de arriba está medida por decisión; multiplicarla por todas las decisiones sería una extrapolación, no una medida.',
@@ -842,6 +846,8 @@
           'speed.tokensBig': '{{model}}: {{in}} in · {{out}} out · {{cache}} of context loaded',
           'speed.tokensNote': 'Every model deliberation was measured cold: "claude -p" loads its own context each time. Inside a live session that context is already resident, so this figure is the cost of deciding cold, not the cost of each in-session decision.',
           'skills.heading': 'Skills mod',
+          'skills.typing': 'Typing before send (7 days): p50 {{p50}} s · p90 {{p90}} s · {{typed}} typed prompts · {{injected}} injected',
+          'skills.typingNoneTyped': 'Typing before send (7 days): no typed prompts yet · {{injected}} injected',
           'unmeasured.heading': 'What these numbers do not measure',
           'unmeasured.money': 'Money. This panel converts nothing into cost and will not start.',
           'unmeasured.extrapolation': 'Total time saved. The gap above is measured per decision; multiplying it by every decision would be an extrapolation, not a measurement.',
@@ -1630,6 +1636,20 @@
         parts.push(line(t('stats.skillMatchRate') + ': ' +
           (mod.matchRate == null ? t('stats.na') : pct(mod.matchRate) + '%')))
         fill('skills-body', null, parts.join(''), '')
+      }
+
+      /** K0 (odd/tasks/typing-lead-time.md): the pause between the last
+       *  keystroke and sending, over the last 7 days, from the worker's
+       *  consumptionSummary.typing (read-consumption.mjs). No summary (no
+       *  row yet, an {ok:false} read, or none published) is no line at all,
+       *  never a zero; with only injected prompts there is no pause to show. */
+      function renderSkillsTyping (summary) {
+        var typing = summary && summary.ok === true ? summary.typing : null
+        if (!typing || typeof typing.typed !== 'number' || typeof typing.injected !== 'number') { el('skills-typing').innerHTML = ''; return }
+        var seconds = function (value) { return num(Math.round(value / 100) / 10) }
+        el('skills-typing').innerHTML = typing.typed > 0 && typeof typing.p50Ms === 'number' && typeof typing.p90Ms === 'number'
+          ? line(t('skills.typing', { p50: seconds(typing.p50Ms), p90: seconds(typing.p90Ms), typed: num(typing.typed), injected: num(typing.injected) }))
+          : line(t('skills.typingNoneTyped', { injected: num(typing.injected) }))
       }
 
       // ---------- render: consumption (JEV-060 slice 1, T5) -----------------
@@ -2446,6 +2466,7 @@
           renderStats(results[1], results[3])
           renderWorkerNote(results[2])
           renderConsumption(results[4])
+          renderSkillsTyping(results[4])
           renderActivityProjects(results[5])
         }).catch(function (error) {
           noteEl.className = 'meta nota stale'

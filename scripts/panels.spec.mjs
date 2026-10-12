@@ -3200,6 +3200,73 @@ test('skills-ready: the Skills tab shows what the mod recorded, not its empty se
 })
 
 // ---------------------------------------------------------------------------
+// K0c (odd/tasks/typing-lead-time.md) -- the Skills card's "Typing before
+// send" line, from consumptionSummary.typing (read-consumption.mjs's 7-day
+// summary of the mod's typing-*.jsonl). `skills-ready` carries it, summarized
+// by the real summarizeTypingLeadTime. No summary, no line: never a zero.
+// ---------------------------------------------------------------------------
+
+async function skillsCardText (page) {
+  await page.click('#tab-skills')
+  return page.evaluate(() => document.getElementById('card-skills').innerText)
+}
+
+test('K0c skills-ready: the Skills card shows the typing lead time line (en)', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  const scenario = SCENARIOS['skills-ready']
+  const typing = scenario.consumptionSummary?.typing
+  assert.ok(typing && typing.typed > 0 && typing.injected > 0, 'skills-ready must carry typed and injected prompts')
+  const { browser, page, errors } = await openBoardPanel(scenario)
+  try {
+    const text = await skillsCardText(page)
+    const seconds = (value) => (Math.round(value / 100) / 10).toLocaleString('en')
+    assert.match(text, new RegExp(`Typing before send \\(7 days\\): p50 ${seconds(typing.p50Ms)} s · p90 ${seconds(typing.p90Ms)} s · ${typing.typed} typed prompts · ${typing.injected} injected`))
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('K0c skills-ready: the typing lead time line in Spanish', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  const scenario = SCENARIOS['skills-ready']
+  const typing = scenario.consumptionSummary.typing
+  const { browser, page, errors } = await openBoardPanel(scenario, 'es')
+  try {
+    const text = await skillsCardText(page)
+    assert.match(text, new RegExp(`Escritura antes de enviar \\(7 días\\): p50 .+ s · p90 .+ s · ${typing.typed} prompts escritos · ${typing.injected} inyectados`))
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('K0c with no typing summary the Skills card has no typing line, not a zero', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  for (const consumptionSummary of [{ ...POPULATED_CONSUMPTION, typing: null }, POPULATED_CONSUMPTION, undefined]) {
+    const scenario = { ...SCENARIOS['skills-ready'], consumptionSummary }
+    const { browser, page, errors } = await openBoardPanel(scenario)
+    try {
+      const text = await skillsCardText(page)
+      assert.doesNotMatch(text, /Typing before send/)
+      assert.match(text, /Skills suggested/, 'the rest of the card is unchanged')
+      assert.deepEqual(errors, [])
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('K0c only injected prompts: the line says no prompt was typed, never p50 0 s', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openBoardPanel({ consumptionSummary: { ...POPULATED_CONSUMPTION, typing: { typed: 0, injected: 4, p50Ms: null, p90Ms: null } } })
+  try {
+    const text = await skillsCardText(page)
+    assert.match(text, /Typing before send \(7 days\): no typed prompts yet · 4 injected/)
+    assert.doesNotMatch(text, /p50/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // odd/tasks/board-leftovers.md L3 -- the board's last tab, remembered where
 // it can be inside Orca. Orca's sandboxed iframe throws on `localStorage`, so
 // the tab also goes through the host storage bridge (storage.get/storage.set,
