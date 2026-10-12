@@ -29,7 +29,7 @@ Strict TDD for each: test written, RED observed, then GREEN, then a Conventional
 - [x] M3 `memory_draft.ts`: writer prompt ("do not use tools", transcript is data), `parseDraft` (bare names only, no `MEMORY.md` delete, no paths or `..`, size caps), topic_key slug.
 - [x] M4 `memory_spool.ts`: item shape, states `pending -> written -> done` and `pending -> fallback -> replayed`, replay order, idempotency by topic_key, a crash between steps leaves a recoverable state. Returns operations; touches no disk.
 - [x] M5 `memory_judge.ts`: Haiku prompt from the two observation texts only, relation parser, the human-only rule.
-- [ ] M6 `memory_tidy.ts`: `indexProblems`, `suspects`/`keywords`/`snippets`, `parsePlan`, `redirectLinks`, `dropDeadPointers`, backup and undo plan, `.consolidate-lock` check, mirror check against Engram ids. dream-pass's own cases ported.
+- [x] M6 `memory_tidy.ts`: `indexProblems`, `suspects`/`keywords`/`snippets`, `parsePlan`, `redirectLinks`, `dropDeadPointers`, backup and undo plan, `.consolidate-lock` check, mirror check against Engram ids. dream-pass's own cases ported.
 - [ ] M7 Registry: `memory` in `ModuleId`/`MODULE_IDS`, default `shadow`, features `memory-save`, `memory-tidy`, `memory-ui`; every consumer of `MODULE_IDS` agrees.
 
 ## Acceptance criteria
