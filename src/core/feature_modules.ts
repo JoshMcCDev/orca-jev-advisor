@@ -203,7 +203,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
       { event: "PostToolUseFailure", matcher: "Agent", script: "agent-model.ts" },
     ],
     modFeatures: [
-      { id: "router-tier", hooks: ["prompt.submit", "turn.step"], jev: true },
+      { id: "router-tier", hooks: ["prompt.submit", "turn.step", "classic.Stop"], jev: true },
       { id: "router-subagent", hooks: ["agent.spawn", "turn.step", "tool.call"], jev: true },
       { id: "subagent-status", hooks: ["agent.spawn", "turn.step", "turn.complete", "session.start", "ui.render", "tool.call"], jev: false },
       { id: "turn-usage", hooks: ["turn.step", "tool.call"], jev: false },

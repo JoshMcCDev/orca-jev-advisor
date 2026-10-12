@@ -549,6 +549,16 @@ export function decideStage(input: StageDecisionInput): StageDecision {
 }
 
 /**
+ * Track R: whether `decision` switches only because the cache is known
+ * cold -- the same input with a warm cache would have held. Hysteresis and
+ * every guard are the same on both sides, so this is break-even alone.
+ */
+export function switchedByColdCache(input: StageDecisionInput, decision: StageDecision): boolean {
+  if (input.cacheWarm !== false || !decision.changed) return false;
+  return !decideStage({ ...input, cacheWarm: true }).changed;
+}
+
+/**
  * 0.6.2 E2: Jev's tier resolves to the model the session already runs, so
  * only the effort can follow the work. A raise is quality: it applies at
  * once with confidence at or above CONFIDENCE_FLOOR, and no guard blocks it. A lowering rewrites

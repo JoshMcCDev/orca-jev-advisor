@@ -80,6 +80,10 @@ interface FakeHost {
   engineVersion: { version: string; base?: string } | null;
   /** 0.8.0 V3: what `$.clock.after` scheduled, in order; a test runs them with runTimers. */
   timers: (() => unknown)[];
+  /** Track R: added to every `$.clock.now()`, so a test can leave a gap between two turns. */
+  clockOffsetMs: number;
+  /** Track R: what `tail -n 300 <transcript>` prints, by transcript path; any other path exits 1. */
+  readonly transcripts: Map<string, string>;
 }
 
 function makeFakeHost(): FakeHost {
@@ -103,6 +107,8 @@ function makeFakeHost(): FakeHost {
     processCalls: [],
     engineVersion: null,
     timers: [],
+    clockOffsetMs: 0,
+    transcripts: new Map<string, string>(),
   };
 }
 
@@ -185,7 +191,7 @@ function makeFakeEngine(host: FakeHost): unknown {
       },
     },
     clock: {
-      now: async () => clockNow++,
+      now: async () => clockNow++ + host.clockOffsetMs,
       // Never resolves: every race in these tests (Jev's own budget, and
       // resolveOrcaContext's process-run timeout) is won by the other side
       // (a fake fetch/process.run that always settles on its own), so a
@@ -216,6 +222,9 @@ function makeFakeEngine(host: FakeHost): unknown {
         const repo = argv[0] === "git" && argv[1] === "-C" ? host.gitRepos.get(argv[2] ?? "") : undefined;
         if (repo !== undefined && argv[3] === "rev-parse") return { exitCode: 0, stdout: `${repo.toplevel}\n`, stderr: "" };
         if (repo !== undefined && argv[3] === "branch") return { exitCode: 0, stdout: `${repo.branch}\n`, stderr: "" };
+        // Track R: the transcript tail the router reads its cache TTL from.
+        const transcript = argv[0] === "tail" ? host.transcripts.get(argv[argv.length - 1] ?? "") : undefined;
+        if (transcript !== undefined) return { exitCode: 0, stdout: transcript, stderr: "" };
         return { exitCode: 1, stdout: "", stderr: "" };
       },
     },
@@ -1600,6 +1609,114 @@ test("router, measure, stage: logs stage decisions and changes nothing", async (
   assert.equal(decisions.length, 3);
   assert.equal(decisions[2]?.reason, "downgrade");
   assert.equal(decisions[2]?.applied, false);
+});
+
+// ---------------------------------------------------------------------------
+// Track R (odd/tasks/router-cold-switch.md): after a gap longer than the
+// cache TTL the switch's rewrite happens anyway, so break-even charges none.
+// ---------------------------------------------------------------------------
+
+const TRANSCRIPT = "/home/dev/.claude/projects/sandbox/session-1.jsonl";
+
+function transcriptRow(bucket: "1h" | "5m"): string {
+  const creation = bucket === "1h" ? { ephemeral_1h_input_tokens: 900, ephemeral_5m_input_tokens: 0 } : { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 900 };
+  return JSON.stringify({ type: "assistant", isSidechain: false, timestamp: "2026-09-25T10:00:00.000Z", message: { role: "assistant", usage: { input_tokens: 3, output_tokens: 10, cache_creation: creation } } });
+}
+
+async function fireStop(handlers: Map<string, Hook>, engine: unknown): Promise<unknown> {
+  const stop = handlers.get("classic.Stop");
+  assert.ok(stop, "classic.Stop was never registered");
+  return stop(engine, { hook_event_name: "Stop", session_id: "session-1", transcript_path: TRANSCRIPT, cwd: CWD, stop_hook_active: false }, async (e: unknown) => ({ passed: e }));
+}
+
+function hasKey(value: unknown, key: string): boolean {
+  return typeof value === "object" && value !== null && key in value;
+}
+
+/** Two one-step turns (complex, then a first simple one), the Stop hook reading `bucket`, a gap of `gapMs`, then a second simple turn. Returns the third turn's first step. */
+async function coldGapTurns(host: FakeHost, options: Record<string, unknown>, bucket: "1h" | "5m" | null, gapMs: number): Promise<Record<string, unknown>> {
+  seedRouterAccount(host);
+  if (bucket !== null) host.transcripts.set(TRANSCRIPT, `${transcriptRow(bucket)}\n`);
+  host.fetchQueue.push(tierAnswer("complex"), tierAnswer("simple"), tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, options);
+  await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 1);
+  await playTurn(host, handlers, engine, 2, "thanks, now list the files you touched", 1);
+  if (bucket !== null) await fireStop(handlers, engine);
+  host.clockOffsetMs += gapMs;
+  return playTurn(host, handlers, engine, 3, "and summarise them in one line", 1);
+}
+
+test("R2: the mod loads with its cache_warmth import, and classic.Stop reads the TTL from the transcript tail into $.state", async () => {
+  const host = makeFakeHost();
+  host.transcripts.set(TRANSCRIPT, `${transcriptRow("5m")}\n`);
+  const { handlers, engine } = loadHooks(host);
+  const result = await fireStop(handlers, engine);
+  assert.ok(hasKey(result, "passed"), "Stop goes on to the next hook unchanged");
+  assert.ok(host.processCalls.includes(`tail -n 300 ${TRANSCRIPT}`));
+  assert.deepEqual(host.state.get("routerCache"), { ttlMs: 5 * 60_000, lastMainAt: Date.parse("2026-09-25T10:00:00.000Z") });
+});
+
+test("R2: a Stop the transcript cannot answer, or the router off, leaves the cache unknown and the Stop unchanged", async () => {
+  const host = makeFakeHost();
+  host.failProcess = true;
+  const { handlers, engine } = loadHooks(host);
+  assert.ok(hasKey(await fireStop(handlers, engine), "passed"));
+  assert.equal(host.state.has("routerCache"), false);
+  const off = makeFakeHost();
+  off.transcripts.set(TRANSCRIPT, `${transcriptRow("5m")}\n`);
+  const loaded = loadHooksWith(off, { routerMode: "off" });
+  assert.ok(hasKey(await fireStop(loaded.handlers, loaded.engine), "passed"));
+  assert.equal(off.processCalls.length, 0, "off reads nothing");
+});
+
+test("R2 measure: after a gap past the TTL a held downgrade logs wouldApplyCold, and the step is sent unchanged", async () => {
+  const host = makeFakeHost();
+  const turn3 = await coldGapTurns(host, {}, "5m", 6 * 60_000);
+  assert.equal(turn3.model, "claude-opus-5-5");
+  assert.equal(turn3.effort, "high");
+  const last = routerDecisionLines(host).at(-1);
+  assert.equal(last?.reason, "downgrade");
+  assert.equal(last?.applied, false);
+  assert.equal(last?.cacheWarm, false);
+  assert.equal(last?.switchCost, 0);
+  assert.equal(last?.wouldApplyCold, true);
+  assert.equal(hasKey(last, "appliedCold"), false);
+});
+
+test("R2 active: after a gap past the TTL the held downgrade applies and logs appliedCold", async () => {
+  const host = makeFakeHost();
+  const turn3 = await coldGapTurns(host, { routerMode: "active" }, "5m", 6 * 60_000);
+  assert.equal(turn3.model, "claude-haiku-4-5-20251001");
+  const last = routerDecisionLines(host).at(-1);
+  assert.equal(last?.reason, "downgrade");
+  assert.equal(last?.applied, true);
+  assert.equal(last?.appliedCold, true);
+});
+
+test("R2: a warm cache, or one never read, holds the downgrade as before", async () => {
+  for (const [bucket, warm] of [["1h", true], [null, null]] as const) {
+    const host = makeFakeHost();
+    const turn3 = await coldGapTurns(host, { routerMode: "active" }, bucket, 6 * 60_000);
+    assert.equal(turn3.model, "claude-opus-5-5");
+    const last = routerDecisionLines(host).at(-1);
+    assert.equal(last?.reason, "break-even");
+    assert.equal(last?.cacheWarm, warm);
+    assert.equal(hasKey(last, "wouldApplyCold") || hasKey(last, "appliedCold"), false);
+  }
+});
+
+test("R2: each main step stamps the last main request time; a subagent step does not", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.messages = [{ role: "user", text: "hi", toolUses: [] }];
+  host.fetchQueue.push(tierAnswer("complex"));
+  const { handlers, engine } = loadHooks(host);
+  await stepThrough(handlers, engine, turnStepEvent(FRESH_START));
+  const stamped = host.state.get("routerCache");
+  assert.ok(hasKey(stamped, "lastMainAt"));
+  host.clockOffsetMs += 60_000;
+  await stepThrough(handlers, engine, turnStepEvent({ ...FRESH_START, agentId: "agent-9", index: 0 }));
+  assert.deepEqual(host.state.get("routerCache"), stamped);
 });
 
 // ---------------------------------------------------------------------------

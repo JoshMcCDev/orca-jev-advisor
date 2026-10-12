@@ -21,6 +21,7 @@ import {
   shiftForPressure,
   summarizePreviousTurn,
   summarizeSinceLastPrompt,
+  switchedByColdCache,
 } from "./model_router_stage.ts";
 import type { ActivityMessage } from "./model_router_stage.ts";
 
@@ -358,20 +359,21 @@ test("previous-failure: which failed calls are read-only probes (their errors do
 
 const USAGE = { contextTokens: 80_000, avgOutput: 700, medianStepsPerTurn: 4 };
 
+const STAGE_BASE: Parameters<typeof decideStage>[0] = {
+  tiers: TIERS,
+  jev: { tier: "simple", confidence: 0.9 },
+  currentModel: "claude-opus-5-5",
+  currentEffort: "high",
+  configuredModel: "claude-opus-5-5",
+  configuredEffort: "high",
+  guards: CALM,
+  band: "normal",
+  pending: null,
+  usage: USAGE,
+};
+
 function stage(overrides: Partial<Parameters<typeof decideStage>[0]>): ReturnType<typeof decideStage> {
-  return decideStage({
-    tiers: TIERS,
-    jev: { tier: "simple", confidence: 0.9 },
-    currentModel: "claude-opus-5-5",
-    currentEffort: "high",
-    configuredModel: "claude-opus-5-5",
-    configuredEffort: "high",
-    guards: CALM,
-    band: "normal",
-    pending: null,
-    usage: USAGE,
-    ...overrides,
-  });
+  return decideStage({ ...STAGE_BASE, ...overrides });
 }
 
 test("stage: Jev failure changes nothing", () => {
@@ -867,4 +869,21 @@ test("R1 stage: an effort lowering held by break-even passes on a cold cache", (
   const cold = stage({ ...input, cacheWarm: false });
   assert.equal(cold.reason, "effort-lower");
   assert.equal(cold.effort, "high");
+});
+
+test("R2: a cold switch is one the warm cache would have held", () => {
+  const coldInput = { ...STAGE_BASE, pending: { tier: "simple", turns: 1 }, usage: { ...USAGE, medianStepsPerTurn: 1 }, cacheWarm: false } as const;
+  assert.equal(switchedByColdCache(coldInput, decideStage(coldInput)), true);
+  // A switch that pays even while warm is not the cold cache's doing.
+  const paysAnyway = { ...coldInput, usage: USAGE };
+  assert.equal(decideStage(paysAnyway).changed, true);
+  assert.equal(switchedByColdCache(paysAnyway, decideStage(paysAnyway)), false);
+  // Warm, unknown, or no switch at all: never a cold switch.
+  const warmInput = { ...coldInput, cacheWarm: true };
+  assert.equal(switchedByColdCache(warmInput, decideStage(warmInput)), false);
+  const { cacheWarm: _unknown, ...unknownInput } = coldInput;
+  void _unknown;
+  assert.equal(switchedByColdCache(unknownInput, decideStage(unknownInput)), false);
+  const held = { ...coldInput, pending: null };
+  assert.equal(switchedByColdCache(held, decideStage(held)), false);
 });
