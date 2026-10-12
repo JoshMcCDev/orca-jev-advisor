@@ -85,8 +85,22 @@ Ships Active (no Shadow): it is a deterministic path check.
   has no row either), and this rule has no switch, so no panel change and no
   screenshots. Proof: the parser test and the e2e es/en test RED (the row was
   dropped by `isGateStopReason`), GREEN after.
-- [ ] G6 False positive: find the gate log row, reproduce it in a test, fix it
-  with a negative test if real.
+- [x] G6 False positive: find the gate log row, reproduce it in a test, fix it
+  with a negative test if real. Row: `gate-decisions-2026-10-12T18.jsonl`,
+  id `bd21309a-…`, 18:53:59Z, project `orca-jev-advisor`, family `python3`,
+  source `jev`, verdict `deny`, policy `never_write_to_main`; its pending
+  approval names tool use `toolu_01Nh7…`, which the transcript resolves to
+  `F=<scratchpad>/mods-review.md; python3 -I - "$F" <<'EOF' … EOF` run from
+  the main checkout. Real false positive: the only write is a scratchpad file
+  under `$CLAUDE_CODE_TMPDIR` (`/Volumes/Data/claude-tmp`). The gate is right
+  that Python is never contained and that the session's main checkout is
+  where it acts; the fault was Jev's copy, where the scratchpad (another
+  volume, not a system location) read as an opaque `<path-1>`. Fix: Jev's
+  copy marks a temp-root path as `$TMPDIR/<path-N>`, still pseudonymised.
+  Proof: `gate_scratchpad_write.test.ts` reproduces the three facts (GREEN
+  before and after) and the two rendering tests went RED, then GREEN.
+  Unverified: that Jev now answers "not covered" for this command; it needs a
+  live Jev call, which was not made.
 
 ## Acceptance criteria
 
@@ -99,6 +113,9 @@ Ships Active (no Shadow): it is a deterministic path check.
 
 ## Checks
 
-- `npm run typecheck` exits 0.
-- `npm test` passes in full.
-- `npm run test:panels` passes, if the panel changed.
+- `npm run typecheck` exits 0. Done.
+- `npm test` passes in full: 3838 tests, 3838 pass, 0 fail.
+- `npm run test:panels`: not run, the panel did not change.
+- Pending, for the release step: a live check on the marketplace install with
+  a throwaway repository (the three shapes ask; a clean push does not), and a
+  live Jev call on the G6 command.

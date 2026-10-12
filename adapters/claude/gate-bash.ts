@@ -1998,6 +1998,24 @@ function containedEffectInput(cwd: string): ContainedEffectInput {
   }
 }
 
+/**
+ * Gate secret guard G6: the temp roots as the environment names them and as
+ * they really are, for the copy Jev reads -- a command spells a scratchpad
+ * either way. Never a Windows path.
+ */
+function jevTempRoots(): readonly string[] {
+  if (PLATFORM === 'win32') return []
+  const named = tempRootsFromEnvironment(process.env, tmpdir(), process.getuid?.() ?? null)
+  const real = named.flatMap((root) => {
+    try {
+      return [realpathSync(root)]
+    } catch {
+      return []
+    }
+  })
+  return [...new Set([...named, ...real])]
+}
+
 /** The own-tree reading of this process's filesystem (0.6.28 T6), shared with the trusted reading. */
 function ownTreeInput(): OwnTreeInput {
   return {
@@ -2455,7 +2473,8 @@ async function main(): Promise<void> {
   // keeps it literal) and the repository and branch it is pushed from.
   const repoFacts = readRepoFacts(actingCwd)
   const context = renderRepoContext(repoFacts, IDENTITY_NAMES) + (crossRepoSentence !== null ? ` ${crossRepoSentence}` : '')
-  const jevNames = createJevPseudonyms()
+  // G6 (odd/tasks/gate-secret-guard.md): a temp-root path reads as one.
+  const jevNames = createJevPseudonyms({ tempRoots: jevTempRoots() })
   const jevCrossRepoSentence = targetLocations.length > 0 ? buildCrossRepoSentence(sessionLocation, targetLocations, jevNames) : null
   const pushSentence = mentionOnly || !/\bpush\b/.test(inspected) ? null : buildPushDestinationSentence(pushes, jevNames)
   // 0.6.17 T1 (JEVADV-93): a `gh` merge says what it goes through -- a pull
