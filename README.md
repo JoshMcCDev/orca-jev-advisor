@@ -16,6 +16,18 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.8.2
+
+Two new modules and two measurements, all starting in Shadow: they log what they would do and change nothing until you choose Active.
+
+- **Memory (new module, Shadow only for now).** Works with or without Engram. It detects Engram at session start; with Engram live, Engram would hold everything and your auto-memory only the rules for how to work and the facts about you; without Engram, auto-memory holds everything. In Shadow, after each answered turn, a Haiku call decides whether anything is worth remembering, and on 1 in 5 of those a fork of the session drafts it. Nothing is saved: it only counts, and compares with what your agent saved on its own. **Cost:** one Haiku call per answered turn plus those forks, both against your Max plan quota; the only Engram call is a read-only check once a session. Turn it off in Settings → Jev Advisor → General → Modules → Memory. Active, which saves for the agent, comes in a later release.
+- **CI watcher (new module).** After a push, a pull request or a merge, it watches the CI run with `gh` and tells you when it ends. In Shadow it counts how often the agent polled CI or slept meanwhile; in Active it also tells the agent once, when it is idle, so it does not have to poll. No Jev or model calls.
+- **Steward before the cache goes cold.** An idle, large session is compacted shortly before its prompt cache expires, while compacting is cheap, so coming back does not re-write the whole context. It stays out of the way of Claude Code's own idle compaction. Starts in Measure; the switch is on the steward's row in the Models tab.
+- **Typing before send.** The Skills card shows how long you take between your last keystroke and sending. It decides whether choosing skills while you type is worth building.
+- **Gate:** `git add -A`, `git add .` or a folder now asks when it would stage a secret file such as `.env` (a gitignored one is fine).
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.8.1
 
 - **A secret file no longer reaches a remote silently.** Until now, `git add -f .env`, `git add .env && git commit` and a push of a commit carrying `.env` went through with no question. The command gate now asks before staging, committing or pushing a file that looks like a secret (`.env`, private keys, `credentials*.json`, `.netrc`, `.git-credentials`, and `.npmrc`/`.pypirc` holding a literal token), and the question names the file. `.env.example`, `.env.sample` and `.env.template` are not secrets. A push is checked commit by commit, so a `.env` added and deleted again before the push is still caught. This check is always on while the Gate module is on; a remembered authorization or a cached answer never skips it.
