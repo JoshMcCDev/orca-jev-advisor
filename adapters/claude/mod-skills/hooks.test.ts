@@ -4163,12 +4163,15 @@ interface CiRepoScript {
   branch: string;
   /** `gh pr view` answers, in order; the last repeats. */
   prView: string[];
+  /** `gh run list` answers, in order; the last repeats: the runs gh prints, "fail" for a non-zero exit, "missing" for a gh that cannot start. */
+  polls: (Record<string, unknown>[] | "fail" | "missing")[];
 }
 
-/** Answers git for a repository: its top level, the sha of any ref and the branch checked out; `gh pr view` from `script.prView`. */
+/** Answers git for a repository: its top level, the sha of any ref and the branch checked out; `gh pr view` from `script.prView` and `gh run list` from `script.polls`. */
 function seedCiRepo(host: FakeHost, script: Partial<CiRepoScript> = {}): CiRepoScript {
-  const repo: CiRepoScript = { toplevel: CWD, sha: CI_SHA, branch: "feat/x", prView: [], ...script };
+  const repo: CiRepoScript = { toplevel: CWD, sha: CI_SHA, branch: "feat/x", prView: [], polls: [], ...script };
   const prViews = [...repo.prView];
+  const polls = [...repo.polls];
   const previous = host.processHandler;
   host.processHandler = (argv, init) => {
     if (argv[0] === "git" && argv[1] === "-C") {
@@ -4178,6 +4181,12 @@ function seedCiRepo(host: FakeHost, script: Partial<CiRepoScript> = {}): CiRepoS
       if (rest[0] === "branch") return OK(`${repo.branch}\n`);
     }
     if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "view") return OK(prViews.length > 1 ? (prViews.shift() ?? "") : (prViews[0] ?? ""));
+    if (argv[0] === "gh" && argv[1] === "run" && argv[2] === "list") {
+      const answer = polls.length > 1 ? polls.shift() : polls[0];
+      if (answer === "missing") throw new Error("fake host: gh cannot start");
+      if (answer === "fail") return FAILED;
+      return OK(JSON.stringify(answer ?? []));
+    }
     return previous?.(argv, init);
   };
   return repo;
@@ -4304,4 +4313,174 @@ test("C2 ci-watch: a directory that is no repository starts nothing", async () =
   assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`], "asked once, then stopped");
   assert.equal(host.state.size, 0);
   assert.equal(host.timers.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// C3: the adaptive poll, the band row and the toast. The fake clock never
+// moves with the schedule: the watch counts the delays it asked for.
+// ---------------------------------------------------------------------------
+
+/** One run as `gh run list --json` prints it. */
+function ghRun(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { databaseId: 101, status: "completed", conclusion: "success", headBranch: "feat/x", headSha: CI_SHA, workflowName: "CI", url: "https://github.com/a/b/actions/runs/101", createdAt: "2026-09-25T10:00:30Z", ...overrides };
+}
+const RUNNING = ghRun({ status: "in_progress", conclusion: "" });
+const PASSED = ghRun();
+const FAILED_RUN = ghRun({ conclusion: "failure" });
+
+const PUSH_OUTCOME = (): Record<string, unknown> => bashOutcome("pushed", { push: { branch: "feat/x" } });
+
+function ghPolls(host: FakeHost): string[] {
+  return host.processCalls.filter((call) => call.startsWith("gh run list"));
+}
+
+/** Runs the oldest timer alone, as the engine would when its delay is up. */
+async function runNextTimer(host: FakeHost): Promise<void> {
+  const fn = host.timers.shift();
+  assert.ok(fn, "a timer was due");
+  await fn();
+}
+
+async function pushAndWatch(host: FakeHost, options: { command?: string; outcome?: Record<string, unknown> } = {}): Promise<{ handlers: Map<string, Hook>; engine: unknown }> {
+  const loaded = loadHooks(host);
+  await bashThrough(loaded.handlers, loaded.engine, options.command ?? "git push -u origin feat/x", options.outcome ?? PUSH_OUTCOME());
+  return loaded;
+}
+
+test("C3 ci-watch: polls gh run list for the pushed branch on a slowing schedule, confirms, and says so once the run is done", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [RUNNING], [PASSED], [PASSED]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+
+  assert.equal(ghPolls(host).length, 4);
+  assert.equal(ghPolls(host)[0], "gh run list --branch feat/x --limit 30 --json databaseId,status,conclusion,headBranch,headSha,workflowName,url,createdAt");
+  const pollIndexes = host.processCalls.flatMap((call, index) => (call.startsWith("gh run list") ? [index] : []));
+  assert.ok(pollIndexes.every((index) => host.processInits[index]?.cwd === CWD), "gh runs in the repository");
+  // The start, then 10 s, 15 s, the confirming 10 s, and the row's keep time.
+  assert.deepEqual(host.timerDelays, [200, 10_000, 15_000, 10_000, 120_000]);
+  assert.deepEqual(host.toasts, ["CI 0123456 feat/x: passed"]);
+});
+
+test("C3 ci-watch: a failed run is told with its workflows", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED, ghRun({ databaseId: 102, workflowName: "Deploy", conclusion: "failure" })]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.toasts, ["CI 0123456 feat/x: failed (Deploy)"]);
+});
+
+test("C3 ci-watch: the band shows the watch while it runs and after it ends, then drops it", async () => {
+  const host = makeFakeHost();
+  const docs = ghRun({ databaseId: 102, workflowName: "Docs" });
+  seedCiRepo(host, { polls: [[RUNNING, docs], [PASSED, docs], [PASSED, docs], [PASSED, docs]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host); // the start, and the first poll with it
+  assert.deepEqual(bandLines(await renderBand(handlers, engine, 200)), ["CI 0123456 feat/x: running, 1 of 2 runs done, 0 min"]);
+  await runNextTimer(host); // 10 s: every run finished, once
+  await runNextTimer(host); // the confirming poll, inside the settle window
+  await runNextTimer(host); // and the one that agrees: done
+  assert.deepEqual(bandLines(await renderBand(handlers, engine, 200)), ["CI 0123456 feat/x: passed"]);
+  host.clockOffsetMs += 3 * 60_000;
+  await runNextTimer(host); // the row's keep time is up
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING, "nothing left to draw: the engine's own band");
+});
+
+test("C3 ci-watch: one watch per repository and sha - a second push of the same commit extends the first", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await bashThrough(handlers, engine, "git push origin feat/x", PUSH_OUTCOME());
+  assert.equal(host.timers.length, 2, "each push arms its own start");
+  await runNextTimer(host);
+  await runNextTimer(host); // the second start finds the sha already watched and goes away
+  assert.equal(ghPolls(host).length, 1, "one poll chain");
+  await runTimers(host);
+  assert.equal(host.toasts.length, 1, "told once");
+});
+
+test("C3 ci-watch: a merge is watched on the branch it landed on, by its merge commit", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { prView: [JSON.stringify({ mergeCommit: { oid: CI_MERGE_SHA }, baseRefName: "main" })], polls: [[ghRun({ headSha: CI_MERGE_SHA, headBranch: "main" })]] });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "gh pr merge 53 --squash", bashOutcome("merged", { pr: { number: 53, action: "merged" } }));
+  await runTimers(host);
+  assert.match(ghPolls(host)[0] ?? "", /^gh run list --branch main /);
+  assert.deepEqual(host.toasts, ["CI fedcba9 main: passed"]);
+});
+
+test("C3 ci-watch fails open: gh missing, not signed in, no run, or a run that never ends all end the watch without a word", async () => {
+  const scenarios: { name: string; polls: (Record<string, unknown>[] | "fail" | "missing")[]; expectPolls: number }[] = [
+    { name: "gh cannot start", polls: ["missing"], expectPolls: 1 },
+    { name: "gh fails three times in a row", polls: ["fail"], expectPolls: 3 },
+    { name: "no run appears for the sha", polls: [[ghRun({ headSha: CI_MERGE_SHA })]], expectPolls: 8 },
+    { name: "a run never ends", polls: [[RUNNING]], expectPolls: 45 },
+  ];
+  for (const { name, polls, expectPolls } of scenarios) {
+    const host = makeFakeHost();
+    seedCiRepo(host, { polls });
+    const { handlers, engine } = await pushAndWatch(host);
+    await runTimers(host);
+    assert.equal(ghPolls(host).length, expectPolls, name);
+    assert.deepEqual(host.toasts, [], name);
+    assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING, `${name}: no row left`);
+    assert.equal(host.timers.length, 0, name);
+  }
+});
+
+test("C3 ci-watch: switched off while it runs, the next poll ends it - no gh call, no row, no toast", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host);
+  assert.equal(ghPolls(host).length, 1);
+  setModules(host, { "ci-watch": "off" });
+  await runTimers(host);
+  assert.equal(ghPolls(host).length, 1, "no further gh call");
+  assert.deepEqual(host.toasts, []);
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
+});
+
+test("C3 ci-watch band: the engine's band and a survey are left alone; the router off does not hide the watch; a subagent band stacks above it", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host);
+  const watchLine = "CI 0123456 feat/x: running, 0 of 1 runs done, 0 min";
+  // Not the engine's own drawing beneath (another plugin's band): passed through as it is.
+  const other = { type: "Box", props: { children: [] } };
+  assert.equal(await renderBand(handlers, engine, 200, { beneath: other }), other);
+  // A survey holds the band.
+  assert.equal(await renderBand(handlers, engine, 200, { hasSurvey: true }), ENGINE_DRAWING);
+  // The router off: the watch is still drawn.
+  setModules(host, { "model-router": "off" });
+  assert.deepEqual(bandLines(await renderBand(handlers, engine, 200)), [watchLine]);
+  // The watcher off: nothing of it.
+  setModules(host, { "ci-watch": "off" });
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
+});
+
+test("C3 ci-watch band: a subagent's band keeps its place and the watch is drawn under it", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  host.fetchQueue.push(tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await spawnAs(handlers, engine, spawnEvent({ model: "opus" }), "agent-1", "claude-opus-5-5");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runNextTimer(host);
+  const lines = bandLines(await renderBand(handlers, engine, 200));
+  assert.equal(lines[0], "Running agents: 1");
+  assert.equal(lines.at(-1), "CI 0123456 feat/x: running, 0 of 1 runs done, 0 min");
+  assert.equal(lines.length, 3, "heading, the agent's row, the watch");
+});
+
+test("C3 ci-watch: a reload forgets the watches - a row left in state by the old load is cleared at session.start", async () => {
+  const host = makeFakeHost();
+  host.state.set("ciWatches", { rows: [{ id: "old", sha7: "abcdef0", branch: "main", status: "watching", startedAtMs: Date.parse("2026-09-25T10:00:00Z"), done: 0, total: 1, failed: [], finishedAtMs: null }] });
+  const { handlers, engine } = loadHooks(host);
+  assert.equal(bandLines(await renderBand(handlers, engine, 200)).length, 1, "before: the old row would be drawn");
+  await startSession(handlers, engine);
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
+  assert.deepEqual(host.state.get("ciWatches"), { rows: [] });
 });

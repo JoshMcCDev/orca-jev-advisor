@@ -415,6 +415,12 @@ test("band rows: a running watch, a passed one and a failed one, in both languag
   assert.deepEqual(ciBandRows("en", [{ ...ROW, branch: null }], T0, 120), ["CI 0123456: running, 1 of 3 runs done, 0 min"]);
 });
 
+test("band rows: before any run of the sha has appeared the row says it is waiting for them", () => {
+  const waiting: CiBandRow = { ...ROW, done: 0, total: 0 };
+  assert.deepEqual(ciBandRows("en", [waiting], T0 + 60_000, 120), ["CI 0123456 feat/x: waiting for the runs to appear, 1 min"]);
+  assert.deepEqual(ciBandRows("es", [waiting], T0 + 60_000, 120), ["CI 0123456 feat/x: esperando que aparezcan las ejecuciones, 1 min"]);
+});
+
 test("band rows: every line fits the width, a watch past the cap is dropped, a finished row goes after its keep time", () => {
   for (const line of ciBandRows("en", [{ ...ROW, branch: "feat/a-very-long-branch-name-that-keeps-going-and-going" }], T0, 40)) assert.ok(line.length <= 40, line);
   assert.deepEqual(ciBandRows("en", [ROW], T0 + CI_WATCH_CAP_MS + 1, 120), []);

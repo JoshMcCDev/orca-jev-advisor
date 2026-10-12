@@ -563,7 +563,8 @@ export function ciBandRows(locale: Locale, rows: readonly CiBandRow[], nowMs: nu
     if (row.status === "watching") {
       if (nowMs - row.startedAtMs > CI_WATCH_CAP_MS) continue;
       const minutes = Math.max(0, Math.floor((nowMs - row.startedAtMs) / 60_000));
-      lines.push(fitLine(translate(CI_WATCH_CATALOG, locale, "band.running", { label: labelOf(row), done: String(row.done), total: String(row.total), minutes: String(minutes) }), columns));
+      const text = row.total === 0 ? translate(CI_WATCH_CATALOG, locale, "band.waiting", { label: labelOf(row), minutes: String(minutes) }) : translate(CI_WATCH_CATALOG, locale, "band.running", { label: labelOf(row), done: String(row.done), total: String(row.total), minutes: String(minutes) });
+      lines.push(fitLine(text, columns));
     } else {
       if (row.finishedAtMs === null || nowMs - row.finishedAtMs > CI_ROW_KEEP_MS) continue;
       lines.push(fitLine(ciFinishedText(locale, row), columns));

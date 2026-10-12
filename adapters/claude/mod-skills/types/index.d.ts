@@ -124,8 +124,32 @@ export type RunningSubagentsState = {
   }[]
 }
 
+/**
+ * 0.9.0: the CI watcher's band rows (odd/tasks/ci-watcher.md): one per watch,
+ * running or lately ended, as `ciBandRows` (src/core/ci_watch.ts) draws them.
+ * Kept in `$.state` so a write redraws the band; a reload clears it at
+ * session.start, since the watches themselves do not survive one. Read back
+ * through `parseCiBandRows`, which drops anything malformed.
+ */
+export type CiWatchesState = {
+  rows: {
+    id: string
+    /** The first seven characters of the commit. */
+    sha7: string
+    branch: string | null
+    status: 'watching' | 'success' | 'failure'
+    startedAtMs: number
+    /** Runs finished and runs seen so far. */
+    done: number
+    total: number
+    /** The workflows that did not succeed. */
+    failed: string[]
+    finishedAtMs: number | null
+  }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState }
+    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState; ciWatches: CiWatchesState }
   }
 }

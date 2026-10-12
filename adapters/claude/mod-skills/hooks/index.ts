@@ -163,6 +163,7 @@ import type { AgentPlace, ListedAgent, RunningSubagent, SubagentEffortSource, Su
 import { PENDING_ISOLATION_PLACE, absolutePath, agentPlace, cachedGitPlace, callDirectory, newPlaceCache, samePlace } from '../../../../src/core/agent_place.ts'
 import type { GitPlace, PlaceCache } from '../../../../src/core/agent_place.ts'
 import { subagentBand } from '../../../../src/core/subagent_band.ts'
+import type { SubagentBand } from '../../../../src/core/subagent_band.ts'
 import type { KeptDecision } from '../../../../src/core/model_router_status.ts'
 import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt, switchedByColdCache } from '../../../../src/core/model_router_stage.ts'
 import { cacheWarmth, parseCacheClock, readCacheTail } from '../../../../src/core/cache_warmth.ts'
@@ -185,8 +186,8 @@ import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, inter
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
 import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
 import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
-import { ciBashCallFrom, couldStartCiWatch, detectCiTriggers, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
-import type { CiTriggerKind } from '../../../../src/core/ci_watch.ts'
+import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciWatchStep, couldStartCiWatch, detectCiTriggers, extendCiWatch, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
+import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress } from '../../../../src/core/ci_watch.ts'
 
 const DEFAULT_BUDGET_MS = 800
 const DEFAULT_SHORTLIST = 3
@@ -2504,6 +2505,9 @@ async function recordTypingAtSubmit($: EngineInterface, typing: TypingTracking, 
 // ---------------------------------------------------------------------------
 
 const CI_START_DELAY_MS = 200
+/** One `gh run list` may take this long before the poll counts as failed. */
+const CI_POLL_TIMEOUT_MS = 20_000
+const CI_TOAST_MS = 15_000
 
 /** One watch. Its identity (repository and sha) is known only once `ciWatchStart` has asked git. */
 interface CiWatch {
@@ -2517,10 +2521,15 @@ interface CiWatch {
   repo: string | null
   sha: string | null
   startedAtMs: number
+  progress: CiWatchProgress
+  /** `gh` processes this watch ran. */
+  ghCalls: number
 }
 
 interface CiWatchHost {
   readonly watches: CiWatch[]
+  /** The band's rows, mirrored to `$.state` (key `ciWatches`) so a write redraws the band. */
+  readonly rows: CiBandRow[]
   readonly modulesFile: FeatureModulesFile
 }
 
@@ -2543,7 +2552,7 @@ async function ciWatchObserve($: EngineInterface, host: CiWatchHost, command: st
     const base = await $.session.root()
     const triggers = detectCiTriggers(call, base, await resolveHomeDir($))
     triggers.forEach((trigger, index) => {
-      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0 }
+      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0, progress: newCiWatchProgress(), ghCalls: 0 }
       host.watches.push(watch)
       $.clock.after(CI_START_DELAY_MS, () => ciWatchStart($, host, watch))
     })
@@ -2557,13 +2566,38 @@ function ciWatchDrop(host: CiWatchHost, watch: CiWatch): void {
   if (at >= 0) host.watches.splice(at, 1)
 }
 
-/** The timer a trigger arms: finds the repository and the head sha. A directory that is no repository, a merge with no merge commit yet and any failure drop the watch quietly. */
+/** Mirrors the band's rows to `$.state`; the band re-renders on the write. Best-effort. */
+async function ciPublishRows($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' }, { rows: host.rows.map((row) => ({ ...row, failed: [...row.failed] })) })
+  } catch {
+    // The band is never a reason to fail a watch.
+  }
+}
+
+function ciSetRow(host: CiWatchHost, row: CiBandRow): void {
+  const at = host.rows.findIndex((other) => other.id === row.id)
+  if (at >= 0) host.rows[at] = row
+  else host.rows.push(row)
+}
+
+function ciRemoveRow(host: CiWatchHost, id: string): void {
+  const at = host.rows.findIndex((row) => row.id === id)
+  if (at >= 0) host.rows.splice(at, 1)
+}
+
+function ciWatchingRow(watch: CiWatch, seen: number, running: number): CiBandRow {
+  return { id: watch.id, sha7: (watch.sha ?? '').slice(0, 7), branch: watch.branch, status: 'watching', startedAtMs: watch.startedAtMs, done: seen - running, total: seen, failed: [], finishedAtMs: null }
+}
+
+/** The timer a trigger arms: finds the repository and the head sha, then polls. A directory that is no repository, a merge with no merge commit yet and any failure drop the watch quietly. */
 async function ciWatchStart($: EngineInterface, host: CiWatchHost, watch: CiWatch): Promise<void> {
   try {
     if (moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch') === 'off') return ciWatchDrop(host, watch)
     let sha: string | null = null
     if (watch.trigger === 'pr-merge') {
       const view = await ciAsk($, watch.pr === null ? ['gh', 'pr', 'view', '--json', 'mergeCommit,baseRefName'] : ['gh', 'pr', 'view', String(watch.pr), '--json', 'mergeCommit,baseRefName'], watch.dir)
+      watch.ghCalls += 1
       const merged = view === null ? null : parsePrMergeView(view)
       if (merged === null) return ciWatchDrop(host, watch)
       sha = merged.sha
@@ -2576,12 +2610,93 @@ async function ciWatchStart($: EngineInterface, host: CiWatchHost, watch: CiWatc
       if (watch.branch === null) watch.branch = await ciAsk($, ['git', '-C', watch.dir, 'branch', '--show-current'], null)
     }
     if (sha === null) return ciWatchDrop(host, watch)
-    if (host.watches.some((other) => other !== watch && other.repo === repo && other.sha === sha)) return ciWatchDrop(host, watch)
+    const same = host.watches.find((other) => other !== watch && other.repo === repo && other.sha === sha)
+    if (same !== undefined) {
+      // A later trigger on a commit already watched (a pull request after the push) extends that watch.
+      same.progress = extendCiWatch(same.progress)
+      return ciWatchDrop(host, watch)
+    }
     watch.repo = repo
     watch.sha = sha
     watch.startedAtMs = await $.clock.now()
+    ciSetRow(host, ciWatchingRow(watch, 0, 0))
+    await ciPublishRows($, host)
+    await ciWatchTick($, host, watch)
   } catch {
     ciWatchDrop(host, watch)
+  }
+}
+
+/** One poll of `gh run list` and what follows: the next timer, or the end of the watch. */
+async function ciWatchTick($: EngineInterface, host: CiWatchHost, watch: CiWatch): Promise<void> {
+  try {
+    if (!host.watches.includes(watch) || watch.repo === null || watch.sha === null) return
+    // Read again here: the switch may have moved since the last poll armed this.
+    if (moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch') === 'off') return await ciWatchFinish($, host, watch, 'gh-missing', null, false)
+    let runs: readonly CiRun[] | null
+    try {
+      const argv = ['gh', 'run', 'list', ...(watch.branch === null ? [] : ['--branch', watch.branch]), '--limit', '30', '--json', CI_RUN_FIELDS]
+      const answer = await $.process.run(argv, { cwd: watch.repo, timeoutMs: CI_POLL_TIMEOUT_MS })
+      watch.ghCalls += 1
+      runs = answer.exitCode === 0 ? parseCiRuns(answer.stdout) : null
+    } catch {
+      // gh is not installed (or would not start): nothing more to try.
+      return await ciWatchFinish($, host, watch, 'gh-missing', null, true)
+    }
+    const step = ciWatchStep(watch.progress, runs, { sha: watch.sha, sinceMs: watch.startedAtMs })
+    watch.progress = step.progress
+    if (step.kind === 'wait') {
+      ciSetRow(host, ciWatchingRow(watch, step.seen, step.running))
+      await ciPublishRows($, host)
+      $.clock.after(step.delayMs, () => ciWatchTick($, host, watch))
+      return
+    }
+    if (step.kind === 'done') return await ciWatchFinish($, host, watch, step.verdict.outcome, step.verdict, true)
+    await ciWatchFinish($, host, watch, step.reason, null, true)
+  } catch {
+    ciWatchDrop(host, watch)
+  }
+}
+
+/**
+ * The end of a watch, whatever the way: it leaves the list, its row turns into
+ * the verdict (and the person sees a toast) or goes. `counted` is false when
+ * the module was switched off meanwhile: nothing is shown or kept then.
+ */
+async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWatch, outcome: CiWatchOutcome, verdict: CiVerdict | null, counted: boolean): Promise<void> {
+  ciWatchDrop(host, watch)
+  if (!counted || verdict === null) {
+    ciRemoveRow(host, watch.id)
+    await ciPublishRows($, host)
+    return
+  }
+  const finishedAtMs = await $.clock.now()
+  const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, finishedAtMs }
+  ciSetRow(host, row)
+  await ciPublishRows($, host)
+  $.ui.toast(ciFinishedText(await resolveLocale($), row), { timeoutMs: CI_TOAST_MS })
+  $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
+}
+
+/** The timer after a watch ended: its row has been shown long enough. */
+async function ciRowsExpire($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const keep = host.rows.filter((row) => row.status === 'watching' || (row.finishedAtMs !== null && now - row.finishedAtMs <= CI_ROW_KEEP_MS))
+    host.rows.splice(0, host.rows.length, ...keep)
+    await ciPublishRows($, host)
+  } catch {
+    // The band is never a reason to fail.
+  }
+}
+
+/** A reload runs `register` again and forgets the watches (their timers are gone), but `$.state` kept the rows: clear them, so nothing stays on screen that nothing polls. */
+async function ciWatchOnSessionStart($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    const stored = parseCiBandRows((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' })).value)
+    if (stored.length > 0 && host.rows.length === 0) await ciPublishRows($, host)
+  } catch {
+    // Best-effort.
   }
 }
 
@@ -2652,7 +2767,7 @@ export function register(on: On, options: PluginOptions): void {
   // Where the feature module file lives, worked out on the first hook call that reads it (resolveFeatureModules).
   const modulesFile: FeatureModulesFile = { path: undefined }
   // The CI watcher's watches (plain data; a reload starts with none).
-  const ciWatch: CiWatchHost = { watches: [], modulesFile }
+  const ciWatch: CiWatchHost = { watches: [], rows: [], modulesFile }
 
   const budgetMs = number('budgetMs', DEFAULT_BUDGET_MS)
   const gateThreshold = number('gateThreshold', DEFAULT_GATE_THRESHOLD)
@@ -3243,17 +3358,26 @@ export function register(on: On, options: PluginOptions): void {
   // whenever a plugin beneath already drew one: never a second band over it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    if (moduleState(await resolveFeatureModules($, modulesFile), 'model-router') === 'off') return next(e)
+    const modules = await resolveFeatureModules($, modulesFile)
+    const routerOn = moduleState(modules, 'model-router') !== 'off'
+    const ciOn = moduleState(modules, 'ci-watch') !== 'off'
+    if (!routerOn && !ciOn) return next(e)
     const beneath = await next(e)
     if (beneath.type !== 'engine') return beneath
     try {
-      const stored = parseRunningSubagents((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'runningSubagents' })).value)
-      const { shown } = reconcileRunning(stored, await listAgents($), null, runningSubagents.beforeLoad ?? undefined)
-      const band = subagentBand(await resolveLocale($), shown, e.props.bodyColumns)
-      if (band === null) return beneath
+      const locale = await resolveLocale($)
+      let band: SubagentBand | null = null
+      if (routerOn) {
+        const stored = parseRunningSubagents((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'runningSubagents' })).value)
+        const { shown } = reconcileRunning(stored, await listAgents($), null, runningSubagents.beforeLoad ?? undefined)
+        band = subagentBand(locale, shown, e.props.bodyColumns)
+      }
+      // The CI watcher's rows sit under the subagents', drawn from the copy in `$.state` (reading it subscribes this band to its writes).
+      const watching = ciOn ? ciBandRows(locale, parseCiBandRows((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' })).value), await $.clock.now(), e.props.bodyColumns) : []
+      if (band === null && watching.length === 0) return beneath
       const { Box, Text } = $.ui.resolve(e)
-      const rows = band.rows.map((row) => Text({ wrap: 'truncate-end', children: row.why.length > 0 ? [row.text, Text({ dimColor: true, children: row.why })] : row.text }))
-      return Box({ flexDirection: 'column', children: [Text({ bold: true, wrap: 'truncate-end', children: band.heading }), ...rows] })
+      const agentLines = band === null ? [] : [Text({ bold: true, wrap: 'truncate-end', children: band.heading }), ...band.rows.map((row) => Text({ wrap: 'truncate-end', children: row.why.length > 0 ? [row.text, Text({ dimColor: true, children: row.why })] : row.text }))]
+      return Box({ flexDirection: 'column', children: [...agentLines, ...watching.map((line) => Text({ wrap: 'truncate-end', children: line }))] })
     } catch {
       return beneath
     }
@@ -3289,7 +3413,10 @@ export function register(on: On, options: PluginOptions): void {
   // the running set kept in `$.state` (and any agent the host runs that
   // nothing recorded) is shown at once, not at the next spawn.
   on('session.start', async ($, e, next) => {
-    if (moduleState(await resolveFeatureModules($, modulesFile), 'model-router') === 'off') return next(e)
+    const modules = await resolveFeatureModules($, modulesFile)
+    // The CI watcher: the watches of the old load are gone with their timers; so are their rows.
+    if (moduleState(modules, 'ci-watch') !== 'off') await ciWatchOnSessionStart($, ciWatch)
+    if (moduleState(modules, 'model-router') === 'off') return next(e)
     try {
       await snapshotBeforeLoad($, runningSubagents)
       agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
