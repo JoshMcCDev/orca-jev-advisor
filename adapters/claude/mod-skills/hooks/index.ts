@@ -186,7 +186,7 @@ import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, inter
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
 import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
 import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
-import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciWatchStep, couldStartCiWatch, detectCiTriggers, extendCiWatch, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
+import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
 import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress } from '../../../../src/core/ci_watch.ts'
 
 const DEFAULT_BUDGET_MS = 800
@@ -2524,6 +2524,9 @@ interface CiWatch {
   progress: CiWatchProgress
   /** `gh` processes this watch ran. */
   ghCalls: number
+  /** The agent's own CI polls and long sleeps made while this watch was open: what a note would have replaced. */
+  agentPolls: number
+  agentSleeps: number
 }
 
 interface CiWatchHost {
@@ -2552,7 +2555,7 @@ async function ciWatchObserve($: EngineInterface, host: CiWatchHost, command: st
     const base = await $.session.root()
     const triggers = detectCiTriggers(call, base, await resolveHomeDir($))
     triggers.forEach((trigger, index) => {
-      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0, progress: newCiWatchProgress(), ghCalls: 0 }
+      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0, progress: newCiWatchProgress(), ghCalls: 0, agentPolls: 0, agentSleeps: 0 }
       host.watches.push(watch)
       $.clock.after(CI_START_DELAY_MS, () => ciWatchStart($, host, watch))
     })
@@ -2614,6 +2617,9 @@ async function ciWatchStart($: EngineInterface, host: CiWatchHost, watch: CiWatc
     if (same !== undefined) {
       // A later trigger on a commit already watched (a pull request after the push) extends that watch.
       same.progress = extendCiWatch(same.progress)
+      same.agentPolls += watch.agentPolls
+      same.agentSleeps += watch.agentSleeps
+      same.ghCalls += watch.ghCalls
       return ciWatchDrop(host, watch)
     }
     watch.repo = repo
@@ -2632,7 +2638,8 @@ async function ciWatchTick($: EngineInterface, host: CiWatchHost, watch: CiWatch
   try {
     if (!host.watches.includes(watch) || watch.repo === null || watch.sha === null) return
     // Read again here: the switch may have moved since the last poll armed this.
-    if (moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch') === 'off') return await ciWatchFinish($, host, watch, 'gh-missing', null, false)
+    const state = moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch')
+    if (state === 'off') return await ciWatchFinish($, host, watch, 'gh-missing', null, state)
     let runs: readonly CiRun[] | null
     try {
       const argv = ['gh', 'run', 'list', ...(watch.branch === null ? [] : ['--branch', watch.branch]), '--limit', '30', '--json', CI_RUN_FIELDS]
@@ -2641,7 +2648,7 @@ async function ciWatchTick($: EngineInterface, host: CiWatchHost, watch: CiWatch
       runs = answer.exitCode === 0 ? parseCiRuns(answer.stdout) : null
     } catch {
       // gh is not installed (or would not start): nothing more to try.
-      return await ciWatchFinish($, host, watch, 'gh-missing', null, true)
+      return await ciWatchFinish($, host, watch, 'gh-missing', null, state)
     }
     const step = ciWatchStep(watch.progress, runs, { sha: watch.sha, sinceMs: watch.startedAtMs })
     watch.progress = step.progress
@@ -2651,31 +2658,74 @@ async function ciWatchTick($: EngineInterface, host: CiWatchHost, watch: CiWatch
       $.clock.after(step.delayMs, () => ciWatchTick($, host, watch))
       return
     }
-    if (step.kind === 'done') return await ciWatchFinish($, host, watch, step.verdict.outcome, step.verdict, true)
-    await ciWatchFinish($, host, watch, step.reason, null, true)
+    if (step.kind === 'done') return await ciWatchFinish($, host, watch, step.verdict.outcome, step.verdict, state)
+    await ciWatchFinish($, host, watch, step.reason, null, state)
   } catch {
     ciWatchDrop(host, watch)
   }
 }
 
+/** Appends one decision line to the current hour's `ci-watch-decisions-*.jsonl`, best-effort. */
+async function appendCiWatchDecision($: EngineInterface, atIso: string, line: string): Promise<void> {
+  try {
+    const paths = await resolveHomePaths($)
+    if (!paths) return
+    await appendToFile($, `${paths.cacheDir}/${ciWatchDecisionFileName(atIso)}`, line)
+  } catch {
+    // Logging is best-effort and must never affect the session.
+  }
+}
+
 /**
- * The end of a watch, whatever the way: it leaves the list, its row turns into
- * the verdict (and the person sees a toast) or goes. `counted` is false when
- * the module was switched off meanwhile: nothing is shown or kept then.
+ * The end of a watch, whatever the way: it leaves the list; its row turns
+ * into the verdict (and the person sees a toast) or goes; one decision row is
+ * written. `state` is the module's state as the caller just read it: off means
+ * the switch moved meanwhile, and nothing is shown or kept.
  */
-async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWatch, outcome: CiWatchOutcome, verdict: CiVerdict | null, counted: boolean): Promise<void> {
+async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWatch, outcome: CiWatchOutcome, verdict: CiVerdict | null, state: ModuleState): Promise<void> {
   ciWatchDrop(host, watch)
-  if (!counted || verdict === null) {
+  if (state === 'off') {
     ciRemoveRow(host, watch.id)
     await ciPublishRows($, host)
     return
   }
   const finishedAtMs = await $.clock.now()
-  const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, finishedAtMs }
-  ciSetRow(host, row)
-  await ciPublishRows($, host)
-  $.ui.toast(ciFinishedText(await resolveLocale($), row), { timeoutMs: CI_TOAST_MS })
-  $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
+  if (verdict === null) {
+    ciRemoveRow(host, watch.id)
+    await ciPublishRows($, host)
+  } else {
+    const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, finishedAtMs }
+    ciSetRow(host, row)
+    await ciPublishRows($, host)
+    $.ui.toast(ciFinishedText(await resolveLocale($), row), { timeoutMs: CI_TOAST_MS })
+    $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
+  }
+  const at = new Date(finishedAtMs).toISOString()
+  const record = ciWatchRecord({
+    at,
+    account: await resolveAccountId($),
+    project: baseName(await $.session.root()),
+    sessionId: await readSessionId($),
+    mode: state === 'active' ? 'active' : 'shadow',
+    trigger: watch.trigger,
+    outcome,
+    watchedMs: finishedAtMs - watch.startedAtMs,
+    ghCalls: watch.ghCalls,
+    agentPolls: watch.agentPolls,
+    agentSleeps: watch.agentSleeps,
+    notified: verdict !== null,
+    injected: false,
+  })
+  await appendCiWatchDecision($, at, `${JSON.stringify(record)}\n`)
+}
+
+/** Counts the main thread's own CI poll or long sleep against the newest open watch. Plain data: no `$`. */
+function ciWatchCount(host: CiWatchHost, command: string): void {
+  const kind = classifyAgentCall('Bash', command)
+  const watch = host.watches[host.watches.length - 1]
+  if (kind === null || watch === undefined) return
+  if (kind === 'ci-poll') watch.agentPolls += 1
+  else watch.agentSleeps += 1
 }
 
 /** The timer after a watch ended: its row has been shown long enough. */
@@ -3516,6 +3566,8 @@ export function register(on: On, options: PluginOptions): void {
         }
       }
     }
+    // The CI watcher: the agent's own wait for CI is counted as it starts (a `gh run watch` can run for minutes).
+    if (e.agentId === undefined && e.tool === 'Bash' && moduleState(modules, 'ci-watch') !== 'off') ciWatchCount(ciWatch, e.command)
     const result = await next(e)
     // The CI watcher: a push, pull request or merge in the main thread starts a watch. After `next`; the result below is `next`'s, untouched.
     if (e.agentId === undefined && e.tool === 'Bash' && moduleState(modules, 'ci-watch') !== 'off') await ciWatchObserve($, ciWatch, e.command, result, e.tool_use_id)

@@ -4475,6 +4475,109 @@ test("C3 ci-watch band: a subagent's band keeps its place and the watch is drawn
   assert.equal(lines.length, 3, "heading, the agent's row, the watch");
 });
 
+// ---------------------------------------------------------------------------
+// C4: the measure. What the agent itself spent waiting for the run - CI polls
+// and sleeps of 10 s or more, in the main thread, while a watch is open - is
+// what a note would have replaced. One row per watch, numbers and names only.
+// ---------------------------------------------------------------------------
+
+function ciRows(host: FakeHost): Record<string, unknown>[] {
+  return (host.files.get(CI_LOG_PATH) ?? "").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** A main-thread Bash call that is not a trigger, through the hook: `next` answers plain output. */
+async function plainBash(handlers: Map<string, Hook>, engine: unknown, command: string, agentId?: string): Promise<void> {
+  await bashThrough(handlers, engine, command, bashOutcome("output"), agentId);
+}
+
+test("C4 ci-watch shadow: counts the agent's own CI polls and long sleeps made during the watch, and writes one row when it ends; no prompt is submitted", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [RUNNING], [PASSED], [PASSED]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  // Made before the watch has even found its sha: still during it.
+  await plainBash(handlers, engine, "gh run list --branch feat/x");
+  await runNextTimer(host);
+  await plainBash(handlers, engine, "sleep 60");
+  await plainBash(handlers, engine, "sleep 60 && gh run view 5 --log-failed");
+  await plainBash(handlers, engine, "gh pr checks --watch");
+  await plainBash(handlers, engine, "sleep 2");
+  await plainBash(handlers, engine, "ls -la");
+  await plainBash(handlers, engine, "sleep 90", "agent-1");
+  await plainBash(handlers, engine, "gh run watch 5", "agent-1");
+  host.clockOffsetMs += 187_000;
+  await runTimers(host);
+  // After the end: not counted.
+  await plainBash(handlers, engine, "gh run view 5");
+
+  const rows = ciRows(host);
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0], at: "x", account: "x" }, {
+    at: "x",
+    account: "x",
+    project: "sandbox",
+    sessionId: "session-1",
+    mode: "shadow",
+    trigger: "push",
+    outcome: "success",
+    watchedSeconds: 187,
+    ghCalls: 4,
+    agentPolls: 3,
+    agentSleeps: 1,
+    notified: true,
+    injected: false,
+  });
+  assert.deepEqual(host.submits, [], "shadow never talks to the agent");
+});
+
+test("C4 ci-watch: the row holds no command, path, branch, sha or url", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await plainBash(handlers, engine, "gh run view 5 --repo secret-org/private-repo");
+  await runTimers(host);
+  const text = host.files.get(CI_LOG_PATH) ?? "";
+  assert.ok(text.length > 0, "a row was written");
+  for (const needle of ["private-repo", "secret-org", "feat/x", CI_SHA, "github.com", "gh run"]) assert.ok(!text.includes(needle), needle);
+});
+
+test("C4 ci-watch: a watch that ends without a verdict still writes its row, and the person is told nothing", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+  const [row] = ciRows(host);
+  assert.equal(row?.outcome, "no-runs");
+  assert.equal(row?.notified, false);
+  assert.equal(row?.ghCalls, 8);
+  assert.deepEqual(host.toasts, []);
+
+  const missing = makeFakeHost();
+  seedCiRepo(missing, { polls: ["missing"] });
+  await pushAndWatch(missing);
+  await runTimers(missing);
+  assert.equal(ciRows(missing)[0]?.outcome, "gh-missing");
+  assert.equal(ciRows(missing)[0]?.ghCalls, 0, "a gh that never started ran no process");
+});
+
+test("C4 ci-watch off: no count and no row; a watch switched off in the middle leaves none either", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  setModules(host, { "ci-watch": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "git push", PUSH_OUTCOME());
+  await plainBash(handlers, engine, "gh run watch 5");
+  await runTimers(host);
+  assert.equal(host.files.has(CI_LOG_PATH), false);
+
+  const middle = makeFakeHost();
+  seedCiRepo(middle, { polls: [[RUNNING]] });
+  await pushAndWatch(middle);
+  await runNextTimer(middle);
+  setModules(middle, { "ci-watch": "off" });
+  await runTimers(middle);
+  assert.equal(middle.files.has(CI_LOG_PATH), false);
+});
+
 test("C3 ci-watch: a reload forgets the watches - a row left in state by the old load is cleared at session.start", async () => {
   const host = makeFakeHost();
   host.state.set("ciWatches", { rows: [{ id: "old", sha7: "abcdef0", branch: "main", status: "watching", startedAtMs: Date.parse("2026-09-25T10:00:00Z"), done: 0, total: 1, failed: [], finishedAtMs: null }] });
