@@ -40,6 +40,26 @@ const CREDENTIALS_JSON = /^credentials.*\.json$/;
 /** Names whose secrecy depends on their content. */
 const BY_CONTENT_NAMES: ReadonlySet<string> = new Set([".npmrc", ".pypirc"]);
 
+/**
+ * Every name above as a git glob, for git to list only candidate files (a
+ * first push of a large tree otherwise lists more than a mebibyte of names).
+ * Wider than secretPathKind on purpose -- templates and `.pub` halves match
+ * here and are dropped by it. Plain globs: the caller adds git's
+ * `:(top,glob,icase)` magic.
+ */
+export const SECRET_PATH_GLOBS: readonly string[] = [
+  "**/.env",
+  "**/.env.*",
+  ...SECRET_EXTENSIONS.map((extension) => `**/*${extension}`),
+  ...[...SECRET_NAMES].map((name) => `**/${name}`),
+  "**/id_rsa*",
+  "**/id_dsa*",
+  "**/id_ecdsa*",
+  "**/id_ed25519*",
+  "**/credentials*.json",
+  ...[...BY_CONTENT_NAMES].map((name) => `**/${name}`),
+];
+
 /** The file name of `path`, lower case. */
 function fileName(path: string): string {
   const trimmed = path.replace(/\/+$/, "");

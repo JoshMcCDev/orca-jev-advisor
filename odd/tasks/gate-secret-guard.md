@@ -64,7 +64,13 @@ Ships Active (no Shadow): it is a deterministic path check.
   `local-allow`) GREEN before and after. The 7 existing own-branch push tests
   run from a non-repository went RED on the first cut (unknown read turned
   the local allow off) and GREEN once "no repository / missing source sends
-  nothing" was read as clean.
+  nothing" was read as clean. git lists only candidate names
+  (`SECRET_PATH_GLOBS` in `secret_paths.ts`, as `:(top,glob,icase)` pathspecs,
+  also for the staged and modified reads): a first push of a 13,000-file tree
+  overflowed the read and passed unasked (RED: no verdict), and asks after
+  (GREEN). A unit test pins that the globs cover every flagged name; a real-git
+  e2e test pushes `config/.env.production`, `certs/x.pem`, `.ssh/id_ed25519`
+  and a token `.npmrc`, and each asks.
 - [x] G4 Precedence: runs before the 0.6.28 remembered authorizations and the
   shape cache replay; a policy deny stays a deny; a local-rule deny stays a deny.
   The check sits after the local deny rules and the policy filtering, before
@@ -117,7 +123,7 @@ Ships Active (no Shadow): it is a deterministic path check.
 ## Checks
 
 - `npm run typecheck` exits 0. Done.
-- `npm test` passes in full: 3838 tests, 3838 pass, 0 fail.
+- `npm test` passes in full: 3842 tests, 3842 pass, 0 fail.
 - `npm run test:panels`: not run, the panel did not change.
 - Pending, for the release step: a live check on the marketplace install with
   a throwaway repository (the three shapes ask; a clean push does not), and a

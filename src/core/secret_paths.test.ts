@@ -4,38 +4,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { contentHoldsSecret, isSecretPath, secretPathKind } from "./secret_paths.ts";
+import { SECRET_PATH_GLOBS, contentHoldsSecret, isSecretPath, secretPathKind } from "./secret_paths.ts";
 
 const NO_CONTENT = (): string | null => null;
 
+const SECRET_EXAMPLES: readonly string[] = [
+  ".env",
+  "./.env",
+  "config/.env",
+  ".env.local",
+  ".env.production",
+  "apps/web/.env.development.local",
+  "server.pem",
+  "certs/api.key",
+  "id_rsa",
+  ".ssh/id_rsa",
+  "id_ed25519",
+  "id_ecdsa",
+  "keys/id_dsa",
+  "client.p12",
+  "client.pfx",
+  "release.jks",
+  "android/app/upload.keystore",
+  "credentials.json",
+  "gcp/credentials-prod.json",
+  ".netrc",
+  ".git-credentials",
+  ".ENV",
+];
+
 test("secret paths: dotenv files, keys, certificates and credentials, at any depth", () => {
-  for (const path of [
-    ".env",
-    "./.env",
-    "config/.env",
-    ".env.local",
-    ".env.production",
-    "apps/web/.env.development.local",
-    "server.pem",
-    "certs/api.key",
-    "id_rsa",
-    ".ssh/id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    "keys/id_dsa",
-    "client.p12",
-    "client.pfx",
-    "release.jks",
-    "android/app/upload.keystore",
-    "credentials.json",
-    "gcp/credentials-prod.json",
-    ".netrc",
-    ".git-credentials",
-    ".ENV",
-  ]) {
+  for (const path of SECRET_EXAMPLES) {
     assert.equal(secretPathKind(path), "secret", path);
     assert.equal(isSecretPath(path, NO_CONTENT), true, path);
   }
+});
+
+/** A `**\/`-led glob as git's `:(glob,icase)` magic reads it: any directory depth, `*` within one name. */
+function globMatches(glob: string, path: string): boolean {
+  const body = glob.replace(/^\*\*\//, "").split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*");
+  return new RegExp(`^(?:.*/)?${body}$`, "i").test(path.replace(/^\.\//, ""));
+}
+
+test("secret paths: the globs git prefilters with cover every path the guard flags", () => {
+  for (const path of [...SECRET_EXAMPLES, ".npmrc", "packages/a/.npmrc", ".pypirc", "id_rsa_work", "keys/id_ecdsa-old"]) {
+    assert.notEqual(secretPathKind(path), null, path);
+    assert.ok(SECRET_PATH_GLOBS.some((glob) => globMatches(glob, path)), `${path} is listed by git`);
+  }
+  assert.ok(SECRET_PATH_GLOBS.every((glob) => glob.startsWith("**/") && !glob.includes(":")), "plain globs; the caller adds git's magic");
 });
 
 test("secret paths: templates and public halves are never secret", () => {

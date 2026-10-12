@@ -4298,6 +4298,37 @@ test('secret guard G3: a .env added and then deleted inside the outgoing range s
   assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), '.env')
 })
 
+test('secret guard G3: an outgoing range too large to list in full still asks about the secret in it', () => {
+  const home = makeHome()
+  const repo = secretRepo({ upstream: false })
+  // Over a mebibyte of `A\t<path>` lines, the size of a first push of a
+  // generated or vendored tree: git must list only the candidate names.
+  const bulk = join(repo, 'generated', 'a-deeply-nested-directory-of-generated-sources-for-the-gate-test')
+  mkdirSync(bulk, { recursive: true })
+  for (let index = 0; index < 13000; index += 1) writeFileSync(join(bulk, `generated-source-file-number-${String(index).padStart(5, '0')}.ts`), '')
+  git(['add', '-A'], repo)
+  git(['commit', '-q', '-m', 'generated'], repo)
+  commitSecret(repo)
+  assertSecretAsk(home, answerFor(home, 'git push -u origin feat/x', repo), '.env')
+})
+
+test('secret guard G3: each kind of secret file in an outgoing range asks, read through real git', () => {
+  const cases = [
+    ['config/.env.production', 'API_KEY=1\n'],
+    ['certs/x.pem', '-----BEGIN PRIVATE KEY-----\n'],
+    ['.ssh/id_ed25519', '-----BEGIN OPENSSH PRIVATE KEY-----\n'],
+    ['.npmrc', '//registry.npmjs.org/:_authToken=npm_abcdef0123456789\n'],
+  ]
+  for (const [path, content] of cases) {
+    const home = makeHome()
+    const repo = secretRepo()
+    mkdirSync(dirname(join(repo, path)), { recursive: true })
+    writeFileSync(join(repo, path), content)
+    commitSecret(repo, path)
+    assertSecretAsk(home, answerFor(home, 'git push origin feat/x', repo), path)
+  }
+})
+
 test('secret guard G3: a new branch with no upstream is read from where it left origin\'s default branch', () => {
   const home = makeHome()
   const repo = secretRepo({ upstream: false })

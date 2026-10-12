@@ -104,6 +104,7 @@ import { TEAM_OWNERS_MIRROR_FILE, parseTeamOwners } from '../../src/core/team_ow
 import { TRUSTED_PROGRAMS_MIRROR_FILE, parseTrustedPrograms } from '../../src/core/trusted_programs.ts'
 import { qualifiesForLocalGitAllow } from '../../src/core/push_own_branch.ts'
 import { findSecretPublish } from '../../src/core/secret_publish.ts'
+import { SECRET_PATH_GLOBS } from '../../src/core/secret_paths.ts'
 import type { SecretPublishFinding, SecretPublishReader, SecretPublishResult } from '../../src/core/secret_publish.ts'
 import { deliveryClassesOf } from '../../src/core/delivery_class.ts'
 import type { DeliveryClass } from '../../src/core/delivery_class.ts'
@@ -2057,6 +2058,9 @@ function commandIsOwnTreeWork(command: string, cwd: string): boolean {
   }
 }
 
+/** git lists only the candidate names (secret_paths.ts), from the repository root wherever the command runs: a large range stays small. */
+const SECRET_PATHSPECS: readonly string[] = SECRET_PATH_GLOBS.map((glob) => `:(top,glob,icase)${glob}`)
+
 /** Larger than this, a file is not read for a credential: no `.npmrc` or `.pypirc` is. */
 const SECRET_CONTENT_MAX_BYTES = 64 * 1024
 
@@ -2075,8 +2079,8 @@ const SECRET_PUBLISH_READER: SecretPublishReader = {
     })
   },
   workingContent: (dir, path) => readSecretCandidate(resolve(dir, path)),
-  stagedPaths: (dir) => nulSeparated(gitOutput(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=d', '-z'], dir)),
-  modifiedTrackedPaths: (dir) => nulSeparated(gitOutput(['diff', '--name-only', '--no-renames', '--diff-filter=d', '-z'], dir)),
+  stagedPaths: (dir) => nulSeparated(gitOutput(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=d', '-z', '--', ...SECRET_PATHSPECS], dir)),
+  modifiedTrackedPaths: (dir) => nulSeparated(gitOutput(['diff', '--name-only', '--no-renames', '--diff-filter=d', '-z', '--', ...SECRET_PATHSPECS], dir)),
   indexContent: (dir, path) => gitOutput(['show', `:${path}`], dir),
   treeContent: (dir, path) => {
     const root = gitOutput(['rev-parse', '--show-toplevel'], dir)?.trim()
@@ -2090,7 +2094,7 @@ const SECRET_PUBLISH_READER: SecretPublishReader = {
   // (`--ignore-missing`) and a directory that is no repository send nothing:
   // that push fails on its own.
   outgoingLog: (dir, sources, remote) =>
-    gitOutput(['-c', 'core.quotePath=false', 'log', '--ignore-missing', '--format=commit %h', '--name-status', '--no-renames', ...sources, '--not', remote === null ? '--remotes' : `--remotes=${remote}`, '--'], dir) ??
+    gitOutput(['-c', 'core.quotePath=false', 'log', '--ignore-missing', '--format=commit %h', '--name-status', '--no-renames', ...sources, '--not', remote === null ? '--remotes' : `--remotes=${remote}`, '--', ...SECRET_PATHSPECS], dir) ??
     (gitOutput(['rev-parse', '--git-dir'], dir) === null ? '' : null),
   commitContent: (dir, commit, path) => gitOutput(['show', `${commit}:${path}`], dir),
 }
