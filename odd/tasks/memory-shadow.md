@@ -41,16 +41,16 @@ Out: any write (Engram or files), the `tool.call` intercept, the prompt section,
 
 Strict TDD: a test written and observed failing, then green, then refactor and one Conventional Commit. A box is ticked only with observed proof.
 
-- [ ] T0 Task file (this file).
-- [ ] T1 Judge: `policy` superseding `policy` at 0.7 or above is recorded (`memory_judge.ts`).
-- [ ] T2 Registry: memory offers `off` and `shadow`; `active` returns with M9.
-- [ ] M8a `src/core/memory_shadow.ts`:
+- [x] T0 Task file (this file).
+- [x] T1 Judge: `policy` superseding `policy` at 0.7 or above is recorded (`memory_judge.ts`).
+- [x] T2 Registry: memory offers `off` and `shadow`; `active` returns with M9.
+- [x] M8a `src/core/memory_shadow.ts`:
   - the row and its file name;
   - fork sampling;
   - classifying a main-thread call (`mem_save`, `mem_judge`, a Write or Edit into the memory dir);
   - agreement;
   - the weekly summary.
-- [ ] M8b Mod wiring:
+- [x] M8b Mod wiring:
   - `session.start` detect;
   - turn-end timer: free checks, Haiku gate, sampled fork, dry judge, one row;
   - `tool.call` observe after `next`;
@@ -64,14 +64,14 @@ Strict TDD: a test written and observed failing, then green, then refactor and o
     - the only MCP call is `mem_current_project`.
   - A subagent turn, a non-answer turn, a slash command or our own marker does nothing.
   - `next(e)` comes back unchanged.
-- [ ] M14 Card:
+- [x] M14 Card:
   - offers Off and Shadow;
   - shows the backend and its signal, the sampling fact, what Haiku and the fork see, the quota note and the weekly counts;
   - is fed by read-measurements.mjs, with memory co-owning `measurements-summary`;
   - `memory` leaves `UNCARDED`, and the `uncardedModuleStates` passthrough goes;
   - `panels.spec.mjs` covers the card;
   - screenshots taken.
-- [ ] M15 `measure-module-cost` memory section. From the transcripts:
+- [x] M15 `measure-module-cost` memory section. From the transcripts:
   - main-thread Engram calls, by tool;
   - Engram-only responses, grouped by `message.id`.
 
@@ -107,3 +107,34 @@ Strict TDD: a test written and observed failing, then green, then refactor and o
 - Rows appear and the memory dir gets zero writes.
 - The fork's `cache_read` is high, so the fork reuses the warm cache.
 - The card's counts match the log.
+
+## Outcome
+
+- The Memory card was photographed with the ready fixture:
+  - English at 1440 and 390, light;
+  - Spanish at 390, light.
+
+  No colour was added, so there is no dark shot. The images are kept out of the repository.
+- The memory dir and the spool get no writes in any Shadow test. `mem_current_project` is the only MCP call.
+- `measure-module-cost` on the owner's logs, 2026-10-05 to 2026-10-12, `~/.claude/projects` only:
+  - 866 main-thread Engram calls: `mem_judge` 543, `mem_save` 211.
+  - 495 responses held an Engram call, and 412 held only Engram calls:
+    - 182 with a save;
+    - 178 with judges and no save.
+  - 0 module rows yet.
+
+## Hand-off to Active (M9 to M13)
+
+- Put `active` back in the registry and on the card (`feature_modules.ts`, `config.html` MODULE_ROWS), with the panels.spec cases. Write the hidden-state test the other way round.
+- Shadow never calls Engram beyond `mem_current_project`. When Engram is live, the gate's index and the draft's topics come from `MEMORY.md` and the auto-memory frontmatter. Active can read the Engram topic list instead.
+- The dry judge pairs a draft with the main thread's own `mem_save` candidates, title only. Active judges real candidates:
+  - from its own `mem_save`;
+  - with `mem_get_observation` for the text;
+  - Haiku per candidate (memory_judge.ts);
+  - `decideVerdict`, including the owner's supersedes rule.
+
+  The spool still does not persist `candidates[]` (memory-core hand-off).
+- The fork is sampled 1 in 5 in Shadow only. Active drafts every UPDATE, and the card's cost line must change with it.
+- `observeMemoryCall` already classifies the main thread's `mem_save`, `mem_judge` and memory-dir writes. M11's intercept is the same match, answered with a string instead of `next`.
+- The backend state (`$.state` `memory`) carries the health outcome, so a re-check does not repeat the call. M9 re-detects after a failed write.
+- `engram version` is never run, so `binary` never decides in the mod. Add it only if a person with only the binary needs telling apart.

@@ -12,10 +12,11 @@
 //
 // Sources:
 //   - the plugin's cache dir (src/core/paths.ts): gate decisions, mod-skills
-//     and mod-tools measurements, router, steward and verify-done decisions,
+//     and mod-tools measurements, router, steward, verify-done and memory decisions,
 //     model reclassifications;
 //   - Claude Code transcripts (default `~/.claude/projects`, symlinks followed):
-//     tool calls, person prompts, completed turns, our hook timings;
+//     tool calls, person prompts, completed turns, our hook timings, and the
+//     main thread's Engram calls by response (message.id);
 //   - every settings.json Claude Code reads (home and each Orca account): the
 //     hooks this plugin installed;
 //   - Orca's plugin audit log (`<userData>/plugins-data/audit.log*`): the
@@ -29,6 +30,7 @@ import { join } from 'node:path'
 import { STEWARD_DECISIONS_FILE_PATTERN } from '../src/core/context_steward.ts'
 import { VERIFY_DONE_DECISIONS_FILE_PATTERN } from '../src/core/verify_done.ts'
 import { CI_WATCH_DECISIONS_FILE_PATTERN } from '../src/core/ci_watch.ts'
+import { MEMORY_DECISIONS_FILE_PATTERN } from '../src/core/memory_shadow.ts'
 import { ROUTER_DECISIONS_FILE_PATTERN } from '../src/core/jev_health_usage.ts'
 import { gateDecisionFilesToRead, measurementFilesToRead, modelMeasurementFilesToRead } from '../src/core/measurement_files.ts'
 import { auditSetsByKey, buildModuleCostReport, finishTranscriptTally, formatModuleCostReport, newTranscriptTally, ourHooksFromSettings, tallyTranscriptLine } from '../src/core/module_cost.ts'
@@ -133,7 +135,8 @@ function main () {
     models: hoursFrom(modelMeasurementFilesToRead(names), sinceMs),
     steward: hoursFrom(names.filter((name) => STEWARD_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs),
     verifyDone: hoursFrom(names.filter((name) => VERIFY_DONE_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs),
-    ciWatch: hoursFrom(names.filter((name) => CI_WATCH_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs)
+    ciWatch: hoursFrom(names.filter((name) => CI_WATCH_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs),
+    memory: hoursFrom(names.filter((name) => MEMORY_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs)
   }
   const rows = Object.fromEntries(Object.entries(files).map(([log, list]) => [log, readRows(cacheDir, list)]))
 

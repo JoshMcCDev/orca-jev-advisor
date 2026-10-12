@@ -303,6 +303,7 @@ test("report: per module totals, per prompt and per turn ratios, and a markdown 
         { at: AT, outcome: "no-runs", ghCalls: 8, agentPolls: 0, agentSleeps: 0, injected: false },
         { at: "2026-09-01T00:00:00.000Z", outcome: "success", ghCalls: 99, agentPolls: 99, agentSleeps: 99, injected: true },
       ],
+      memory: [],
     },
     audit: { times: new Map([["board", [Date.parse(AT), Date.parse(AT) + 3_600_000]], ["measurementsSummary", [Date.parse(AT)]]]), firstMs: Date.parse(AT), lastMs: Date.parse(AT) + 3_600_000 },
   });
@@ -347,4 +348,84 @@ test("report: per module totals, per prompt and per turn ratios, and a markdown 
   assert.match(text, /\| verify-done \| 0 \| - \| - \| 4 \| 0\.4 \|/);
   assert.match(text, /ci-watch: 3 watches \(2 ended with a verdict, 1 failed\), 29 gh calls; during them the agent made 6 CI polls and 4 sleeps of 10 s or more that a note would replace, 1 notes sent\. Main thread in the window: 50 CI polls, 30 sleeps of 10 s or more, 80 sleeps of any length\./);
   assert.match(text, /verify-done: 2 would-block turns \(claimed done, unverified\) of 4 logged; 3 claims of done, 1 Jev failures\. Transcripts: 4 of 10 person turns are candidates \(0\.4 per prompt\)\./);
+});
+
+// ---------------------------------------------------------------------------
+// Memory (odd/tasks/memory-shadow.md, M15): what the main thread spends on
+// Engram today, from the transcripts, and what the module spends in the
+// background, from its own log. Claude Code writes one transcript line per
+// content block, so a response is its message.id, never a line.
+// ---------------------------------------------------------------------------
+
+function engramLine(messageId: string, toolUseId: string, tool: string, extra: Record<string, unknown> = {}): string {
+  return line({ type: "assistant", uuid: `${messageId}-${toolUseId}`, timestamp: AT, ...extra, message: { id: messageId, content: [{ type: "tool_use", id: toolUseId, name: tool }] } });
+}
+
+test("transcript tally: main-thread Engram calls by tool, and the responses that held only Engram calls, by message id", () => {
+  const tally = newTranscriptTally();
+  for (const text of [
+    line({ type: "user", uuid: "p1", timestamp: AT, message: { content: "guarda esto" } }),
+    // One response written as two lines: a save and a judge.
+    engramLine("m1", "e1", "mcp__engram__mem_save"),
+    engramLine("m1", "e2", "mcp__engram__mem_judge"),
+    // A judge alone, its line written twice.
+    engramLine("m2", "j1", "mcp__engram__mem_judge"),
+    engramLine("m2", "j1", "mcp__engram__mem_judge"),
+    // A search next to real work: it holds an Engram call, but not only Engram calls.
+    engramLine("m3", "s1", "mcp__engram__mem_search"),
+    engramLine("m3", "b1", "Bash"),
+    // A subagent's save is not the main thread's.
+    engramLine("m4", "x1", "mcp__engram__mem_save", { isSidechain: true }),
+    // The plugin's server spelling.
+    engramLine("m6", "p1", "mcp__plugin_engram_engram__mem_save"),
+    // Outside the window.
+    line({ type: "assistant", uuid: "old", timestamp: "2026-09-01T00:00:00.000Z", message: { id: "m0", content: [{ type: "tool_use", id: "o1", name: "mcp__engram__mem_save" }] } }),
+  ]) {
+    tallyTranscriptLine(tally, text, WINDOW);
+  }
+  const report = buildModuleCostReport({ window: WINDOW, tally, hooks: [], rows: { gate: [], skills: [], tools: [], router: [], models: [], steward: [], verifyDone: [], ciWatch: [], memory: [] }, audit: { times: new Map(), firstMs: null, lastMs: null } });
+  assert.deepEqual(report.memory.engramCalls, { mem_save: 2, mem_judge: 2, mem_search: 1 });
+  assert.equal(report.memory.engramCallTotal, 5);
+  assert.equal(report.memory.engramCallsPerPrompt, 5);
+  assert.equal(report.memory.responsesWithEngram, 4);
+  assert.equal(report.memory.engramOnlyResponses, 3);
+  assert.equal(report.memory.engramOnlySaveResponses, 2, "m1 and m6 hold a save");
+  assert.equal(report.memory.engramOnlyJudgeOnlyResponses, 1, "m2: judges and no save");
+});
+
+test("report: the memory module's own background cost from its log, per prompt, in a line of its own", () => {
+  const tally = newTranscriptTally();
+  tally.prompts = 10;
+  const row = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+    at: AT, backend: "live", decidedBy: "tools+health", permission: "ok", gate: "skip", gateTokens: { input: 1000, output: 2, cacheRead: 0, cacheWrite: 0 },
+    fork: null, forkTokens: null, wouldSave: { user: 0, feedback: 0, project: 0, reference: 0 }, judgeBuilds: 0, mainEngramSaves: 0, mainJudges: 0, mainAutoMemoryWrites: 0, agreement: "neither", ...overrides,
+  });
+  const report = buildModuleCostReport({
+    window: WINDOW,
+    tally,
+    hooks: [],
+    rows: {
+      gate: [], skills: [], tools: [], router: [], models: [], steward: [], verifyDone: [], ciWatch: [],
+      memory: [
+        row({}),
+        row({ gate: "update", fork: "drafted", forkTokens: { input: 10, output: 300, cacheRead: 150_000, cacheWrite: 0 }, judgeBuilds: 2, agreement: "module-only" }),
+        row({ gate: "no-answer", gateTokens: null, agreement: "unknown" }),
+        row({ at: "2026-09-01T00:00:00.000Z" }),
+      ],
+    },
+    audit: { times: new Map(), firstMs: null, lastMs: null },
+  });
+  assert.equal(report.memory.gates, 3);
+  assert.equal(report.memory.gateFailures, 1);
+  assert.equal(report.memory.updates, 1);
+  assert.equal(report.memory.gatesPerPrompt, 0.3);
+  assert.equal(report.memory.forks, 1);
+  assert.equal(report.memory.forksPerPrompt, 0.1);
+  assert.equal(report.memory.judgeBuilds, 2);
+  assert.deepEqual(report.memory.haikuTokens, { input: 2000, output: 4 });
+  assert.deepEqual(report.memory.forkTokens, { input: 10, output: 300, cacheRead: 150_000 });
+  assert.equal(report.modules.some((module) => (module.module as string) === "memory"), false, "the Jev table keeps its own ids: memory uses Haiku");
+  const text = formatModuleCostReport(report).join("\n");
+  assert.match(text, /memory \(main thread, transcripts\): 0 Engram calls \(0 per prompt\); 0 responses held an Engram call, 0 held only Engram calls \(0 with a save, 0 with judges and no save\)\./);
+  assert.match(text, /memory \(module, its log\): 3 Haiku gates \(0\.3 per prompt, 1 failed, 1 UPDATE\), 1 forks \(0\.1 per prompt\), 2 judge builds \(0\.2 per prompt, none asked\); Haiku tokens 2000 in \/ 4 out; fork tokens 10 in \/ 300 out \/ 150000 cache read\./);
 });
