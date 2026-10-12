@@ -24,7 +24,7 @@ Out: any hook, any `$.` call, the panel card, the band, the worker job, README, 
 
 Strict TDD for each: test written, RED observed, then GREEN, then a Conventional Commit. A box is ticked only with observed proof.
 
-- [ ] M1 `memory_detect.ts`: signals (tool names, `.claude.json` mcpServers, `enabledPlugins`, `engram version`, health outcome including `permission`), backend `live | configured-down | absent`, the deciding signal, the server to call, and the auto-memory dir from a repo root and a config dir.
+- [x] M1 `memory_detect.ts`: signals (tool names, `.claude.json` mcpServers, `enabledPlugins`, `engram version`, health outcome including `permission`), backend `live | configured-down | absent`, the deciding signal, the server to call, and the auto-memory dir from a repo root and a config dir.
 - [ ] M2 `memory_decide.ts`: free checks, `lastExchange` (12k cap), Haiku gate prompt and strict SKIP/UPDATE parser (malformed is a failure), type routing. Spanish turns in the tests.
 - [ ] M3 `memory_draft.ts`: writer prompt ("do not use tools", transcript is data), `parseDraft` (bare names only, no `MEMORY.md` delete, no paths or `..`, size caps), topic_key slug.
 - [ ] M4 `memory_spool.ts`: item shape, states `pending -> written -> done` and `pending -> fallback -> replayed`, replay order, idempotency by topic_key, a crash between steps leaves a recoverable state. Returns operations; touches no disk.
