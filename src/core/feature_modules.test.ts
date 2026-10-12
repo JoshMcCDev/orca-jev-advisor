@@ -117,14 +117,14 @@ test("ci-watch: off, shadow and active; its own state is the switch, no existing
   assert.equal(parseFeatureModules(fileWith({ "ci-watch": "active" }))["ci-watch"], "active");
   assert.equal(parseFeatureModules(fileWith({ "ci-watch": "off" }))["ci-watch"], "off");
   assert.equal(parseFeatureModules(fileWith({ "ci-watch": "paused" }))["ci-watch"], "shadow", "a state it does not offer reads as its default");
-  // Only ci-watch's and memory's own switches opt out of "shadow caps an existing mode".
-  assert.deepEqual(FEATURE_MODULES.filter((module) => module.ownSwitch === true).map((module) => module.id), ["ci-watch", "memory"]);
+  // Only ci-watch's own switch opts out of "shadow caps an existing mode".
+  assert.deepEqual(FEATURE_MODULES.filter((module) => module.ownSwitch === true).map((module) => module.id), ["ci-watch"]);
 });
 
-test("memory: off, shadow and active; three mod features and nothing else (odd/tasks/memory-core.md, M7)", () => {
+test("memory: off and shadow until Active is wired (odd/tasks/memory-shadow.md T2); three mod features and nothing else", () => {
   const entry = FEATURE_MODULES.find((module) => module.id === "memory");
   assert.ok(entry !== undefined);
-  assert.deepEqual(entry.states, ["off", "shadow", "active"]);
+  assert.deepEqual(entry.states, ["off", "shadow"]);
   assert.equal(entry.defaultState, "shadow");
   // It uses Haiku, not Jev, so none of its features is a Jev feature.
   assert.deepEqual(entry.modFeatures, [
@@ -141,7 +141,9 @@ test("memory: off, shadow and active; three mod features and nothing else (odd/t
     assert.equal(on.includes(id), true, id);
     assert.equal(modFeaturesOn(withStates({ memory: "off" })).includes(id), false, id);
   }
-  assert.equal(parseFeatureModules(fileWith({ memory: "active" })).memory, "active");
+  // No hidden state: a hand-edited "active" has no code behind it yet, so it reads as the default.
+  assert.equal(parseFeatureModules(fileWith({ memory: "active" })).memory, "shadow");
+  assert.equal(validateFeatureModulesInput({ modules: { ...VALID_INPUT.modules, memory: "active" } }).ok, false);
   assert.equal(parseFeatureModules(fileWith({ memory: "paused" })).memory, "shadow");
 });
 
@@ -167,8 +169,8 @@ test("defaults: every installed hook, every mod feature and every worker job sta
 });
 
 test("parse: a valid file sets each module's state", () => {
-  const modules = parseFeatureModules(fileWith({ gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "active" }));
-  assert.deepEqual(modules, { gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "active" });
+  const modules = parseFeatureModules(fileWith({ gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "off" }));
+  assert.deepEqual(modules, { gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "off" });
 });
 
 test("parse: malformed or non-object content falls back to the defaults, never throws", () => {

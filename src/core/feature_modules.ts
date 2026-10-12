@@ -38,7 +38,7 @@
 // of measurement is the point (odd/tasks/verify-done-module.md). ci-watch,
 // new in 0.9.0, is in the same case and also defaults to `shadow`.
 // memory (odd/tasks/memory-core.md) is new in the same way and also
-// defaults to `shadow`.
+// defaults to `shadow`; it will offer `active` once its writes are wired.
 //
 // Pure: no I/O and no node: import, so the mod sandbox can load it too.
 
@@ -319,10 +319,11 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     // is the store. Haiku decides and judges, a fork drafts, so no feature
     // here is a Jev feature. It has no mode of its own, so its state is its
     // one switch: shadow decides, judges (dry) and drafts (sampled) and
-    // writes nothing; active writes. No settings hook and no worker job yet:
-    // the panel's status job arrives with the panel card.
+    // writes nothing (odd/tasks/memory-shadow.md). Active, which writes,
+    // is offered once it is wired (M9 to M13): until then a stored "active"
+    // reads as the default, so no state exists that no code runs.
     id: "memory",
-    states: MODULE_STATES,
+    states: ["off", "shadow"],
     defaultState: "shadow",
     hooks: [],
     modFeatures: [
@@ -332,7 +333,6 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     ],
     workerJobs: [],
     modes: [],
-    ownSwitch: true,
   },
 ];
 
