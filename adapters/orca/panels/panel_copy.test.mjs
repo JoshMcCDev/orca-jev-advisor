@@ -78,6 +78,14 @@ const NEW_ROUTER_KEYS_BY_FILE = {
   ],
 }
 
+// Track R (odd/tasks/router-cold-switch.md): the router card's cold-switch line.
+NEW_ROUTER_KEYS_BY_FILE['board.html'].push('consumption.modelRouterColdSwitches')
+
+test('board.html: the cold-switch line reads as a sentence in es and en, with its count and its window', () => {
+  const values = translationValues('board.html').filter((v) => v.key === 'consumption.modelRouterColdSwitches').map((v) => v.value)
+  assert.deepEqual(values, ['Cambios tras una caché fría: {{n}} (7 días)', 'Switches after a cold cache: {{n}} (7 days)'])
+})
+
 for (const [file, keys] of Object.entries(NEW_ROUTER_KEYS_BY_FILE)) {
   test(`${file}: JEV-060 slice 2 T9's new i18n keys are each declared once in es and once in en`, () => {
     const values = translationValues(file)

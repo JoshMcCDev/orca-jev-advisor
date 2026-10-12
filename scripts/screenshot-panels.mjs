@@ -780,6 +780,8 @@ const ROUTER_READY = {
       },
       savedEstimate: 0.0847,
       switchesEstimated: 3,
+      // Track R: countColdSwitches over 7 days (read-consumption.mjs).
+      coldSwitches: 2,
     },
     // summarizeStewardDecisions' shape plus verifyStewardSaving's; synthetic figures.
     steward: {

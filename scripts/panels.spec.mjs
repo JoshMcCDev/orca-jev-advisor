@@ -2652,6 +2652,29 @@ test('a populated modelRouter renders decisions by point/tier, applied vs measur
   }
 })
 
+test('R3: the router card says how many switches came after a cold cache in 7 days, and says nothing without the count', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const withCount = await openBoardPanel({
+    consumptionSummary: { ...POPULATED_CONSUMPTION, modelRouter: { ...POPULATED_MODEL_ROUTER, coldSwitches: 3 } }
+  })
+  try {
+    const text = await withCount.page.evaluate(() => document.getElementById('consumption-body').innerText)
+    assert.match(text, /Switches after a cold cache: 3 \(7 days\)/)
+    assert.deepEqual(withCount.errors, [])
+  } finally {
+    await withCount.browser.close()
+  }
+  const older = await openBoardPanel({
+    consumptionSummary: { ...POPULATED_CONSUMPTION, modelRouter: POPULATED_MODEL_ROUTER }
+  })
+  try {
+    const text = await older.page.evaluate(() => document.getElementById('consumption-body').innerText)
+    assert.doesNotMatch(text, /cold cache/, 'a summary from before the count shows no line, never a zero')
+    assert.deepEqual(older.errors, [])
+  } finally {
+    await older.browser.close()
+  }
+})
+
 test('an absent modelRouter renders one honest "no decisions yet" line, never a zeroed summary', { skip: chromium ? false : 'playwright is not installed' }, async () => {
   const { browser, page, errors } = await openBoardPanel({ consumptionSummary: POPULATED_CONSUMPTION })
   try {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { summarizeRouterDecisions } from "./model_router_summary.ts";
+import { countColdSwitches, summarizeRouterDecisions } from "./model_router_summary.ts";
 
 const NOW = Date.parse("2026-09-27T12:00:00.000Z");
 const DAY = 24 * 3600_000;
@@ -58,4 +58,18 @@ test("summary: estimated saving = Σ(stepSaving × steps actually run on the new
 test("summary: a measured (not applied) downgrade never counts toward the saving", () => {
   const measured = decision({ applied: false, point: "stage", reason: "downgrade", switchCost: 0.16, stepSaving: 0.0185 });
   assert.equal(summarizeRouterDecisions([measured], [usage("2026-09-27T10:01:00.000Z", "claude-haiku-4-5-20251001")], NOW, DAY).savedEstimate, null);
+});
+
+test("R3: switches after a cold cache counts measure and active rows in the window, nothing else", () => {
+  const WEEK = 7 * DAY;
+  const rows = [
+    decision({ point: "stage", applied: false, wouldApplyCold: true }),
+    decision({ point: "stage", applied: true, appliedCold: true, at: "2026-09-21T13:00:00.000Z" }),
+    decision({ point: "stage", applied: true }),
+    decision({ point: "stage", applied: true, appliedCold: true, at: "2026-09-20T11:00:00.000Z" }),
+    decision({ point: "stage", applied: false, wouldApplyCold: "yes" }),
+    "not a row",
+  ];
+  assert.equal(countColdSwitches(rows, NOW, WEEK), 2);
+  assert.equal(countColdSwitches([], NOW, WEEK), 0);
 });

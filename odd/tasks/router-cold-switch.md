@@ -27,10 +27,10 @@ Out: the steward's pre-cold tier (track S), a cache countdown band, a version bu
 
 Strict TDD for each: RED observed, then GREEN, then a Conventional Commit on this branch.
 
-- [ ] R0 `src/core/cache_warmth.ts` + test: 1h, 5m, missing usage (unknown), malformed row, sidechain rows skipped, `cacheWarm` warm/cold/unknown.
-- [ ] R1 `breakEven` / `effortBreakEven` / `decideStage` take `cacheWarm`; cold makes `switchCost` 0; `routerDecisionRecord` gets `cacheWarm`. `model_router_stage.test.ts` and `model_router_decide.test.ts` stay green.
-- [ ] R2 Mod wiring: `routerCache` in `$.state`; `classic.Stop` TTL read; measure logs `wouldApplyCold` and changes nothing, active applies and logs `appliedCold`. `hooks.test.ts` loads the mod with the new `src/core` import; sticky model across reloads unchanged.
-- [ ] R3 Board card line in es and en, from a 7-day count in `read-consumption.mjs`; panel copy test; one screenshot at 1440 and one at 390, read.
+- [x] R0 `src/core/cache_warmth.ts` + test: 1h, 5m, missing usage (unknown), malformed row, sidechain rows skipped, `cacheWarm` warm/cold/unknown.
+- [x] R1 `breakEven` / `effortBreakEven` / `decideStage` take `cacheWarm`; cold makes `switchCost` 0; `routerDecisionRecord` gets `cacheWarm`. `model_router_stage.test.ts` and `model_router_decide.test.ts` stay green.
+- [x] R2 Mod wiring: `routerCache` in `$.state`; `classic.Stop` TTL read; measure logs `wouldApplyCold` and changes nothing, active applies and logs `appliedCold`. `hooks.test.ts` loads the mod with the new `src/core` import; sticky model across reloads unchanged.
+- [x] R3 Board card line in es and en, from a 7-day count in `read-consumption.mjs`; panel copy test; one screenshot at 1440 and one at 390, read.
 
 ## Acceptance criteria
 

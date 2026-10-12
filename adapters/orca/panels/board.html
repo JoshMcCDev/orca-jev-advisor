@@ -690,6 +690,7 @@
           'consumption.modelRouterTierComplex': 'Analizar',
           'consumption.modelRouterTierFrontier': 'Razonar a fondo',
           'consumption.modelRouterAppliedMeasured': 'Aplicadas {{applied}} · no aplicadas {{measured}}',
+          'consumption.modelRouterColdSwitches': 'Cambios tras una caché fría: {{n}} (7 días)',
           'consumption.modelRouterSavedEstimate': 'Ahorro estimado a precio de lista: ${{amount}}.',
           'consumption.modelRouterExtraCost': 'Costo extra estimado a precio de lista: ${{amount}}.',
           'consumption.modelRouterEstimateScope': 'Cubre solo las bajadas de modelo en un cambio de etapa: los pasos que corrieron en el modelo más barato, menos la reescritura de caché que costó cada cambio.',
@@ -891,6 +892,7 @@
           'consumption.modelRouterTierComplex': 'Analyse',
           'consumption.modelRouterTierFrontier': 'Deep reasoning',
           'consumption.modelRouterAppliedMeasured': 'Applied {{applied}} · not applied {{measured}}',
+          'consumption.modelRouterColdSwitches': 'Switches after a cold cache: {{n}} (7 days)',
           'consumption.modelRouterSavedEstimate': 'Estimated saving at list prices: ${{amount}}.',
           'consumption.modelRouterExtraCost': 'Estimated extra cost at list prices: ${{amount}}.',
           'consumption.modelRouterEstimateScope': 'Covers downgrades at a stage change only: the steps that ran on the cheaper model, minus the cache rewrite each switch cost.',
@@ -1848,6 +1850,8 @@
         if (!anyPoint) parts.push(line(t('consumption.modelRouterNoDecisions'), 'empty-line'))
 
         parts.push(line(t('consumption.modelRouterAppliedMeasured', { applied: num(modelRouter.applied), measured: num(modelRouter.measured) })))
+        // Track R: switches the cold cache made free (7 days). A summary from before the count has none: no line, never a zero.
+        if (typeof modelRouter.coldSwitches === 'number') parts.push(line(t('consumption.modelRouterColdSwitches', { n: num(modelRouter.coldSwitches) })))
         // Never a negative "saving": a total below zero is what the
         // switches cost (review finding 8), and the line always says what
         // the estimate covers.

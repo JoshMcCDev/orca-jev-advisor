@@ -161,6 +161,21 @@ test('modelRouter summarizes decisions from model-router-decisions-*.jsonl once 
   assert.equal(result.modelRouter.byPoint.stage.complex, 1)
 })
 
+test('R3: modelRouter.coldSwitches counts the switches after a cold cache over 7 days, beyond the 24h summary', () => {
+  const home = makeHome()
+  const now = Date.now()
+  const threeDaysAgo = now - 3 * 24 * 60 * 60 * 1000
+  writeDecisionFile(home, now, [
+    decisionRow({ point: 'stage', applied: false, wouldApplyCold: true }),
+    decisionRow({ point: 'stage', applied: true }),
+  ])
+  writeDecisionFile(home, threeDaysAgo, [decisionRow({ at: new Date(threeDaysAgo).toISOString(), point: 'stage', applied: true, appliedCold: true })])
+  const result = run(home)
+  assert.equal(result.ok, true)
+  assert.equal(result.modelRouter.total, 2, 'the summary itself stays on 24h')
+  assert.equal(result.modelRouter.coldSwitches, 2)
+})
+
 test('modelRouter is an empty-but-present summary when the decision file exists with zero rows', () => {
   const home = makeHome()
   const now = Date.now()
