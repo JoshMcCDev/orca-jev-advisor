@@ -76,9 +76,15 @@ Ships Active (no Shadow): it is a deterministic path check.
   (G0) GREEN since G3; cached policy deny RED (`ask`) then GREEN (`deny`);
   local-rule deny (`feat/x:main`), prohibiting policy with a cached allow or
   no key, and no-cache/no-authorization/retry-asks-again tests GREEN.
-- [ ] G5 Visibility: es/en ask text names the file and the reason; distinct
+- [x] G5 Visibility: es/en ask text names the file and the reason; distinct
   `stopReason` in `GateStopReason` and its guard; panel row only if the panel
-  lists fixed rules.
+  lists fixed rules. The ask (`permissionDecisionReason`) and the person's
+  line (`systemMessage`) name the file, the commit for a push, and why, in
+  es and en. `secret-publish` is in `GateStopReason`, its guard and its doc.
+  The panel lists only the switchable deny-tier rules (the `ownConfig` rule
+  has no row either), and this rule has no switch, so no panel change and no
+  screenshots. Proof: the parser test and the e2e es/en test RED (the row was
+  dropped by `isGateStopReason`), GREEN after.
 - [ ] G6 False positive: find the gate log row, reproduce it in a test, fix it
   with a negative test if real.
 

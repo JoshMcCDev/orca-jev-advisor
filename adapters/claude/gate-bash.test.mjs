@@ -25,6 +25,7 @@ import { parseSeedPolicies } from '../../src/core/policy_seed.ts'
 import { gatePolicyFingerprint } from '../../src/core/gate_policy_fingerprint.ts'
 import { adviceRetryKey } from '../../src/core/gate_advice_retry.ts'
 import { gateDecisionFileName, gateDecisionFilesToRead } from '../../src/core/measurement_files.ts'
+import { parseGateDecisionRecords } from '../../src/core/gate_measurement.ts'
 import { GATE_CATALOG } from '../../src/core/i18n_gate.ts'
 import { translate } from '../../src/core/i18n.ts'
 
@@ -4368,6 +4369,25 @@ test('secret guard G4: the ask is never cached or remembered, and a retry in the
   for (let attempt = 0; attempt < 2; attempt += 1) assertSecretAsk(home, keyedAnswerFor(home, 'git push origin feat/x', repo, 'secret-retry'), '.env')
   assert.equal(existsSync(verdictCachePath(home)), false, 'no verdict is cached for a finding that depends on the repository')
   assert.deepEqual(readAuthorizations(home).repos, {}, 'nothing is remembered')
+})
+
+test('secret guard G5: the ask names the file, the commit and why, in Spanish and in English, and its row parses', () => {
+  const repo = secretRepo()
+  commitSecret(repo)
+  const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+  const es = makeHome()
+  writeLocale(es, 'es')
+  const spanish = answerFor(es, 'git push origin feat/x', repo)
+  assertSecretAsk(es, spanish, '.env')
+  assert.match(spanish.reason, new RegExp(`Este push sube \\.env, del commit ${commit},.*no se puede retirar`))
+  assert.match(spanish.message, /^jev · \.env parece un archivo secreto, decide tú: `git push origin feat\/x`$/)
+  const en = makeHome()
+  const english = answerFor(en, 'git add -f .env', repo)
+  assert.match(english.reason, /^This stages \.env for a commit\. It looks like a secret file \(keys, tokens or passwords\): once it reaches a remote, it cannot be taken back\.$/)
+  assert.match(english.message, /^jev · \.env looks like a secret file, you decide: `git add -f \.env`$/)
+  const parsed = parseGateDecisionRecords(gateLogText(en))
+  assert.equal(parsed.length, 1, 'the panel and the measurements read the row, never drop it')
+  assert.equal(parsed[0].stopReason, 'secret-publish')
 })
 
 test('secret guard G0: git push origin feat/x carrying a commit with .env asks, naming the file', () => {

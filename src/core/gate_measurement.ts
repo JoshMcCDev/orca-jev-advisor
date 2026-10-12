@@ -95,6 +95,11 @@ export type GateVerdict = "allow" | "ask" | "deny" | "advise";
  *                    list (src/core/trusted_programs.ts), with only safe,
  *                    contained or own-tree segments beside them; same
  *                    policy rule as "own-tree".
+ *   "secret-publish" -- the gate secret guard (src/core/secret_publish.ts):
+ *                    the command stages, commits or pushes a secret path,
+ *                    so the person was asked, the file named (verdict
+ *                    "ask", source "local-rule"). Only a policy deny is
+ *                    stronger; never cached and never authorized.
  *
  * Reuses GateSource's own vocabulary wherever the two line up exactly
  * (local-rule, cache) rather than inventing parallel names for the same
@@ -422,7 +427,8 @@ function isGateStopReason(value: unknown): value is GateStopReason {
     value === "authorized" ||
     value === "contained" ||
     value === "own-tree" ||
-    value === "trusted"
+    value === "trusted" ||
+    value === "secret-publish"
   );
 }
 

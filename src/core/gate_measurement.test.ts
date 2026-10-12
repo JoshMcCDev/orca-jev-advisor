@@ -385,6 +385,21 @@ test("an allow with stopReason 'trusted' round-trips -- a trusted program's line
   assert.deepEqual(parseGateDecisionRecords(serializeGateRecord(record)), [record]);
 });
 
+test("an ask with stopReason 'secret-publish' round-trips -- the secret guard's ask is never dropped by the parser", () => {
+  const record = buildGateDecisionRecord({
+    id: "sr-secret",
+    at: "2026-10-12T00:00:00.000Z",
+    project: null,
+    command: "git push origin feat/x",
+    source: "local-rule",
+    verdict: "ask",
+    latencyMs: null,
+    pluginVersion: "0.8.1",
+    stopReason: "secret-publish",
+  });
+  assert.deepEqual(parseGateDecisionRecords(serializeGateRecord(record)), [record]);
+});
+
 test("an 'advise' verdict round-trips and is never dropped as an unrecognised verdict", () => {
   const record = buildGateDecisionRecord({
     id: "sr-advise",
