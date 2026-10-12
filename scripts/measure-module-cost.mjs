@@ -28,6 +28,7 @@ import { join } from 'node:path'
 
 import { STEWARD_DECISIONS_FILE_PATTERN } from '../src/core/context_steward.ts'
 import { VERIFY_DONE_DECISIONS_FILE_PATTERN } from '../src/core/verify_done.ts'
+import { CI_WATCH_DECISIONS_FILE_PATTERN } from '../src/core/ci_watch.ts'
 import { ROUTER_DECISIONS_FILE_PATTERN } from '../src/core/jev_health_usage.ts'
 import { gateDecisionFilesToRead, measurementFilesToRead, modelMeasurementFilesToRead } from '../src/core/measurement_files.ts'
 import { auditSetsByKey, buildModuleCostReport, finishTranscriptTally, formatModuleCostReport, newTranscriptTally, ourHooksFromSettings, tallyTranscriptLine } from '../src/core/module_cost.ts'
@@ -131,7 +132,8 @@ function main () {
     router: hoursFrom(names.filter((name) => ROUTER_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs),
     models: hoursFrom(modelMeasurementFilesToRead(names), sinceMs),
     steward: hoursFrom(names.filter((name) => STEWARD_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs),
-    verifyDone: hoursFrom(names.filter((name) => VERIFY_DONE_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs)
+    verifyDone: hoursFrom(names.filter((name) => VERIFY_DONE_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs),
+    ciWatch: hoursFrom(names.filter((name) => CI_WATCH_DECISIONS_FILE_PATTERN.test(name)).sort(), sinceMs)
   }
   const rows = Object.fromEntries(Object.entries(files).map(([log, list]) => [log, readRows(cacheDir, list)]))
 
