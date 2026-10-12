@@ -4578,6 +4578,146 @@ test("C4 ci-watch off: no count and no row; a watch switched off in the middle l
   assert.equal(middle.files.has(CI_LOG_PATH), false);
 });
 
+// ---------------------------------------------------------------------------
+// C5: Active tells the agent once, when the session is idle. The note is
+// short, goes through `$.prompt.submit` as the plugin's (never as the person's
+// words), and never for a subagent or a watch that ended without a verdict.
+// ---------------------------------------------------------------------------
+
+const CI_NOTE = "CI for 0123456 on feat/x: success, https://github.com/a/b/actions/runs/101";
+
+async function startTurn(handlers: Map<string, Hook>, engine: unknown, turnId: string): Promise<void> {
+  const start = handlers.get("turn.start");
+  assert.ok(start, "turn.start was never registered");
+  await start(engine, { text: "", turnId }, async (e: unknown) => ({ turnId: (e as { turnId: string }).turnId }));
+}
+
+test("C5 ci-watch active: once the run ends and no turn is running, exactly one note goes to the agent", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED], [PASSED], [PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.submits, [{ text: CI_NOTE }], "one note, the plugin's own words: no asUser");
+  assert.deepEqual(host.toasts, ["CI 0123456 feat/x: passed"], "the person is told as well");
+  const [row] = ciRows(host);
+  assert.equal(row?.mode, "active");
+  assert.equal(row?.injected, true);
+});
+
+test("C5 ci-watch active: a failed run names its workflows in the note", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED, ghRun({ databaseId: 102, workflowName: "Deploy", conclusion: "failure", url: "https://github.com/a/b/actions/runs/102" })]] });
+  setModules(host, { "ci-watch": "active" });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.submits, [{ text: "CI for 0123456 on feat/x: failure (Deploy), https://github.com/a/b/actions/runs/102" }]);
+});
+
+test("C5 ci-watch active: while a turn runs the note waits for the turn to end, and goes once", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  const { handlers, engine } = loadHooks(host);
+  await startTurn(handlers, engine, "turn-1");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(host);
+  assert.deepEqual(host.submits, [], "a turn is running: nothing is submitted over it");
+  assert.equal(host.files.has(CI_LOG_PATH), false, "the row is written when the note's fate is known");
+
+  await completeTurn(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(host.submits, [{ text: CI_NOTE }]);
+  assert.equal(ciRows(host)[0]?.injected, true);
+
+  await completeTurn(handlers, engine);
+  await runTimers(host);
+  assert.equal(host.submits.length, 1, "at most once per watch");
+  assert.equal(ciRows(host).length, 1);
+});
+
+test("C5 ci-watch active: a subagent's turn ending does not release the note", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  const { handlers, engine } = loadHooks(host);
+  await startTurn(handlers, engine, "turn-1");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(host);
+  await completeSubagent(handlers, engine, "agent-1");
+  await runTimers(host);
+  assert.deepEqual(host.submits, []);
+});
+
+test("C5 ci-watch: a note waiting for idle is dropped if the module is no longer Active when the turn ends", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  const { handlers, engine } = loadHooks(host);
+  await startTurn(handlers, engine, "turn-1");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(host);
+  setModules(host, { "ci-watch": "shadow" });
+  await completeTurn(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(host.submits, []);
+  assert.equal(ciRows(host)[0]?.injected, false);
+  assert.equal(ciRows(host)[0]?.mode, "shadow");
+
+  const off = makeFakeHost();
+  seedCiRepo(off, { polls: [[PASSED]] });
+  setModules(off, { "ci-watch": "active" });
+  const second = loadHooks(off);
+  await startTurn(second.handlers, second.engine, "turn-1");
+  await bashThrough(second.handlers, second.engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(off);
+  setModules(off, { "ci-watch": "off" });
+  await completeTurn(second.handlers, second.engine);
+  await runTimers(off);
+  assert.deepEqual(off.submits, []);
+});
+
+test("C5 ci-watch active: a watch that ends without a verdict sends nothing", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[]] });
+  setModules(host, { "ci-watch": "active" });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.submits, []);
+  assert.equal(ciRows(host)[0]?.injected, false);
+});
+
+test("C5 ci-watch: the note costs no Jev call and is not a person turn", async () => {
+  const host = makeFakeHost();
+  seedProjectSkill(host, "graft-helper", "Look up code with graft", "Use graft to read the code.");
+  seedSamplingConfig(host, { enabled: true, sampleRate: 1, dailyPromptCap: 1000 });
+  const { handlers, engine } = loadHooks(host);
+  // The control: a person's prompt does ask Jev in this setup.
+  await submitPrompt(handlers, engine, "fix the parser please");
+  assert.ok(host.fetchCalls.length > 0, "the control prompt reached Jev");
+  host.fetchCalls.length = 0;
+  const submit = handlers.get("prompt.submit");
+  assert.ok(submit);
+  const note = { text: CI_NOTE, wait: false, origin: { kind: "plugin", name: "orca-jev-mod-skills" } };
+  const passed = await submit(engine, note, promptSubmitNext);
+  assert.equal(host.fetchCalls.length, 0, "no Jev call for the note");
+  assert.equal(passed, note, "the event goes on as it came");
+  // A text that only looks like the note, from a person, is still a prompt like any other.
+  host.fetchCalls.length = 0;
+  await submitPrompt(handlers, engine, CI_NOTE);
+  assert.ok(host.fetchCalls.length > 0, "only the plugin's own note is skipped");
+});
+
+test("C5 ci-watch with K0b: the note is not a scored prompt, so it writes no typing row", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await submitFrom(handlers, engine, CI_NOTE, "plugin");
+  assert.equal(host.files.has(TYPING_PATH), false, "no typing row for the plugin's own note");
+  // The control: another plugin prompt is scored and writes its row.
+  await submitFrom(handlers, engine, "run the release checks", "plugin");
+  assert.deepEqual(typingRows(host).map((row) => row.kind), ["injected"]);
+});
+
 test("C3 ci-watch: a reload forgets the watches - a row left in state by the old load is cleared at session.start", async () => {
   const host = makeFakeHost();
   host.state.set("ciWatches", { rows: [{ id: "old", sha7: "abcdef0", branch: "main", status: "watching", startedAtMs: Date.parse("2026-09-25T10:00:00Z"), done: 0, total: 1, failed: [], finishedAtMs: null }] });

@@ -186,8 +186,8 @@ import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, inter
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
 import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
 import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
-import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
-import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress } from '../../../../src/core/ci_watch.ts'
+import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciNoteText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, isCiWatchNote, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
+import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress, CiWatchRecordInput } from '../../../../src/core/ci_watch.ts'
 
 const DEFAULT_BUDGET_MS = 800
 const DEFAULT_SHORTLIST = 3
@@ -2505,6 +2505,8 @@ async function recordTypingAtSubmit($: EngineInterface, typing: TypingTracking, 
 // ---------------------------------------------------------------------------
 
 const CI_START_DELAY_MS = 200
+/** After a main turn ends, a waiting note goes this much later: the session is idle by then. */
+const CI_NOTE_DELAY_MS = 250
 /** One `gh run list` may take this long before the poll counts as failed. */
 const CI_POLL_TIMEOUT_MS = 20_000
 const CI_TOAST_MS = 15_000
@@ -2529,10 +2531,20 @@ interface CiWatch {
   agentSleeps: number
 }
 
+/** A note for the agent waiting for the session to be idle, with the decision row its fate will complete. */
+interface CiNote {
+  readonly text: string
+  readonly record: Omit<CiWatchRecordInput, 'mode' | 'injected'>
+}
+
 interface CiWatchHost {
   readonly watches: CiWatch[]
   /** The band's rows, mirrored to `$.state` (key `ciWatches`) so a write redraws the band. */
   readonly rows: CiBandRow[]
+  /** Notes waiting for the main turn to end. */
+  readonly notes: CiNote[]
+  /** The main turn running now (turn.start to turn.complete), null when the session is idle. */
+  readonly runningTurn: () => string | null
   readonly modulesFile: FeatureModulesFile
 }
 
@@ -2701,12 +2713,11 @@ async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWat
     $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
   }
   const at = new Date(finishedAtMs).toISOString()
-  const record = ciWatchRecord({
+  const record: CiNote['record'] = {
     at,
     account: await resolveAccountId($),
     project: baseName(await $.session.root()),
     sessionId: await readSessionId($),
-    mode: state === 'active' ? 'active' : 'shadow',
     trigger: watch.trigger,
     outcome,
     watchedMs: finishedAtMs - watch.startedAtMs,
@@ -2714,9 +2725,53 @@ async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWat
     agentPolls: watch.agentPolls,
     agentSleeps: watch.agentSleeps,
     notified: verdict !== null,
-    injected: false,
-  })
-  await appendCiWatchDecision($, at, `${JSON.stringify(record)}\n`)
+  }
+  // Active tells the agent too, once the session is idle; the row is written when that is settled.
+  const note: CiNote | null = state === 'active' && verdict !== null ? { text: ciNoteText({ sha7: (watch.sha ?? '').slice(0, 7), branch: watch.branch }, verdict), record } : null
+  if (note === null) return await ciWriteRecord($, record, state, false)
+  if (host.runningTurn() !== null) {
+    host.notes.push(note)
+    return
+  }
+  await ciSubmitNote($, host, note)
+}
+
+/** Appends the watch's decision row. */
+async function ciWriteRecord($: EngineInterface, record: CiNote['record'], state: ModuleState, injected: boolean): Promise<void> {
+  await appendCiWatchDecision($, record.at, `${JSON.stringify(ciWatchRecord({ ...record, mode: state === 'active' ? 'active' : 'shadow', injected }))}\n`)
+}
+
+/**
+ * Hands one note to the agent as a plugin's prompt (never `asUser`: the model
+ * reads it framed as the plugin's). Read again here: if the module is no
+ * longer Active the note is dropped, and its row says it was not sent. Not
+ * awaited: the engine runs the prompt once idle, and a watch's row must not
+ * wait for a whole turn.
+ */
+async function ciSubmitNote($: EngineInterface, host: CiWatchHost, note: CiNote): Promise<void> {
+  const state = moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch')
+  if (state === 'off') return
+  let sent = false
+  if (state === 'active') {
+    try {
+      void Promise.resolve($.prompt.submit({ text: note.text })).catch(() => undefined)
+      sent = true
+    } catch {
+      // The note is only a help: the turn goes on without it.
+    }
+  }
+  await ciWriteRecord($, note.record, state, sent)
+}
+
+/** The timer a main turn's end arms when a note is waiting: the session is idle now, unless the next turn has already started. */
+async function ciSubmitPending($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    if (host.runningTurn() !== null) return
+    const note = host.notes.shift()
+    if (note !== undefined) await ciSubmitNote($, host, note)
+  } catch {
+    // Fails open.
+  }
 }
 
 /** Counts the main thread's own CI poll or long sleep against the newest open watch. Plain data: no `$`. */
@@ -2816,8 +2871,6 @@ export function register(on: On, options: PluginOptions): void {
   const routerMode = parseRouterMode(options.routerMode)
   // Where the feature module file lives, worked out on the first hook call that reads it (resolveFeatureModules).
   const modulesFile: FeatureModulesFile = { path: undefined }
-  // The CI watcher's watches (plain data; a reload starts with none).
-  const ciWatch: CiWatchHost = { watches: [], rows: [], modulesFile }
 
   const budgetMs = number('budgetMs', DEFAULT_BUDGET_MS)
   const gateThreshold = number('gateThreshold', DEFAULT_GATE_THRESHOLD)
@@ -2912,6 +2965,8 @@ export function register(on: On, options: PluginOptions): void {
   // Track S: the steward's idle timer and what it must know about compactions (PreColdIdle).
   const preColdIdle: PreColdIdle = { armedAt: null, timer: null, lastAutoCompactAt: null, autoCompactRunning: false, ownCallPending: false }
   const compactionWatch: Pick<StewardHost, 'runningTurn' | 'cold'> = { runningTurn: () => activeTurnId, cold: preColdIdle }
+  // The CI watcher's watches and the notes waiting for the main turn to end (plain data; a reload starts with none).
+  const ciWatch: CiWatchHost = { watches: [], rows: [], notes: [], runningTurn: () => activeTurnId, modulesFile }
 
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
     // A subagent's own listing is left alone, since nothing here suggests
@@ -2944,9 +2999,11 @@ export function register(on: On, options: PluginOptions): void {
     const modules = await resolveFeatureModules($, modulesFile)
     const skillState = moduleState(modules, 'skill-selection')
     // K0: the typing lead time, measured first so its clock read is the
-    // submission's. Scored means what the skill scorer below would see.
+    // submission's. Scored means what the skill scorer below would see, so
+    // the CI watcher's own note (skipped below) is not scored either.
     const typedText = e.text.trim()
-    await recordTypingAtSubmit($, typing, e.origin.kind, typedText.length > 0 && !typedText.startsWith('/'), skillState !== 'off')
+    const ciWatchNote = e.origin.kind === 'plugin' && isCiWatchNote(typedText)
+    await recordTypingAtSubmit($, typing, e.origin.kind, typedText.length > 0 && !typedText.startsWith('/') && !ciWatchNote, skillState !== 'off')
     if (moduleState(modules, 'model-router') !== 'off') {
       try {
         const origin: RouterPromptOrigin = { kind: e.origin.kind }
@@ -2963,6 +3020,9 @@ export function register(on: On, options: PluginOptions): void {
     // unsampled measurement-mode prompt, a thrown error) must never leave a
     // stale `true` from an earlier turn for prompt.attachment to read.
     pendingListingWithheld = false
+
+    // The CI watcher's own note (origin: this plugin): nothing to route and no skill to pick, so no Jev call.
+    if (ciWatchNote) return next(e)
 
     // Nothing to route for an empty prompt or a typed slash command --
     // the latter already names its own skill (and, for tools, already
@@ -3493,6 +3553,14 @@ export function register(on: On, options: PluginOptions): void {
     }
     if (e.agentId === undefined) {
       activeTurnId = null
+      // The CI watcher: a note waiting for the session to be idle goes now (its own timer; none is armed when no note waits).
+      if (ciWatch.notes.length > 0) {
+        try {
+          $.clock.after(CI_NOTE_DELAY_MS, () => ciSubmitPending($, ciWatch))
+        } catch {
+          // No timer, no note: the turn ends as it would have.
+        }
+      }
       if (e.reason === 'answer' && moduleState(modules, 'steward') !== 'off') {
         const host: StewardHost = {
           runningTurn: () => activeTurnId,
