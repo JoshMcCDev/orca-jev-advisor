@@ -229,7 +229,8 @@ export interface EngramSaveArgs {
 
 const ENGRAM_TYPE: Readonly<Record<MemoryType, string>> = {
   user: "learning",
-  // A standing rule: a conflicting one is a policy conflict, which Engram's judge leaves to the person.
+  // A standing rule. Engram 2.1.0 accepts any type and gives `policy` its own review decay; a conflict on it
+  // goes to the person, while a confident supersedes by a newer feedback is recorded (memory_judge.ts decideVerdict).
   feedback: "policy",
   project: "discovery",
   reference: "discovery",

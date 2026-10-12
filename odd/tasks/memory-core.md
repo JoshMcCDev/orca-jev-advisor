@@ -49,5 +49,5 @@ Strict TDD for each: test written, RED observed, then GREEN, then a Conventional
 - `src/core/module_cost.ts` keeps its own six ids on purpose: memory uses Haiku, not Jev, so a row there would read zero. Track M15 adds it.
 - Once M8 schedules a turn-end timer, the tests that count timers (`steward.test.ts`, `hooks.test.ts`) need `memory: "off"`, as verify-done needed.
 - The spool item does not persist `candidates[]` from `mem_save`; M9 must store them or query Engram again.
-- Feedback is saved to Engram as type `policy`, so a `supersedes` or `conflicts_with` on feedback is always left to the person. The owner should confirm this mapping.
+- Feedback is saved to Engram as type `policy`. Engram 2.1.0 accepts it: types are free-form and `policy` has its own review decay. Track M-shadow changed the judge rule at the owner's request. A `supersedes` between two policies at confidence 0.7 or above is recorded. A `conflicts_with` on a policy still goes to the person.
 - The engine's hash for project slugs over 200 characters is not modelled in `autoMemoryDir`.

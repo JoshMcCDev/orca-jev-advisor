@@ -137,8 +137,19 @@ test("rule: low confidence and a protected type together say low confidence (the
   assert.deepEqual(decideVerdict(verdict("supersedes", 0.4), { savedType: "policy", candidateType: "policy" }), { action: "pending", why: "low-confidence" });
 });
 
-test("rule: a feedback save (type policy in Engram) that supersedes an old rule waits for the person", () => {
-  assert.deepEqual(decideVerdict(verdict("supersedes", 0.95), { savedType: "policy", candidateType: "policy" }), { action: "pending", why: "protected-type" });
+// The owner's rule (odd/tasks/memory-shadow.md): fewer questions. A newer
+// feedback that replaces an older one is the person's own latest word, so a
+// confident supersedes between two policies is recorded, not asked.
+test("rule: a feedback save (type policy in Engram) that supersedes an older feedback at 0.7 or above is recorded", () => {
+  assert.deepEqual(decideVerdict(verdict("supersedes", 0.95), { savedType: "policy", candidateType: "policy" }), { action: "record" });
+  assert.deepEqual(decideVerdict(verdict("supersedes", 0.7), { savedType: "policy", candidateType: "policy" }), { action: "record" });
+  assert.deepEqual(decideVerdict(verdict("supersedes", 0.69), { savedType: "policy", candidateType: "policy" }), { action: "pending", why: "low-confidence" });
+});
+
+test("rule: a feedback that conflicts with another, or supersedes a decision or architecture, still goes to the person", () => {
+  assert.deepEqual(decideVerdict(verdict("conflicts_with", 0.95), { savedType: "policy", candidateType: "policy" }), { action: "pending", why: "protected-type" });
+  assert.deepEqual(decideVerdict(verdict("supersedes", 0.95), { savedType: "policy", candidateType: "decision" }), { action: "pending", why: "protected-type" });
+  assert.deepEqual(decideVerdict(verdict("supersedes", 0.95), { savedType: "architecture", candidateType: "policy" }), { action: "pending", why: "protected-type" });
 });
 
 // ---------------------------------------------------------------------------

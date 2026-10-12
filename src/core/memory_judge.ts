@@ -6,7 +6,8 @@
 // Haiku reads only those two observations' text (never the conversation) and
 // names their relation; Engram's own rule then decides who may record it: a
 // verdict below 0.7 confidence, or `supersedes`/`conflicts_with` on an
-// architecture, policy or decision observation, is left PENDING for the person.
+// architecture, policy or decision observation, is left PENDING for the person
+// (save one owner's exception: feedback superseding feedback, see decideVerdict).
 // A background job cannot ask in the middle of a turn, so pending items wait
 // for the band's Resolve button; the person's answer becomes the evidence of
 // `mem_judge`.
@@ -111,14 +112,23 @@ export interface DecisionTypes {
   readonly candidateType: string;
 }
 
+/** The Engram type feedback is saved as (memory_spool.ts ENGRAM_TYPE). */
+const FEEDBACK_ENGRAM_TYPE = "policy";
+
 /**
  * Engram's rule for who may record a verdict. The type test looks at both
  * observations: either one being an architecture, policy or decision makes a
  * `supersedes` or `conflicts_with` the person's call. Low confidence is named
  * first when both apply.
+ *
+ * One exception, the owner's (odd/tasks/memory-shadow.md): a feedback that
+ * supersedes an older feedback, both `policy`, is the person's own latest
+ * word, so a confident verdict is recorded instead of asked. A conflict
+ * between two feedbacks still goes to the person.
  */
 export function decideVerdict(verdict: Verdict, types: DecisionTypes): Decision {
   if (verdict.confidence < CONFIDENCE_FLOOR) return { action: "pending", why: "low-confidence" };
+  if (verdict.relation === "supersedes" && types.savedType === FEEDBACK_ENGRAM_TYPE && types.candidateType === FEEDBACK_ENGRAM_TYPE) return { action: "record" };
   const disagrees = verdict.relation === "supersedes" || verdict.relation === "conflicts_with";
   if (disagrees && (HUMAN_ONLY_TYPES.has(types.savedType) || HUMAN_ONLY_TYPES.has(types.candidateType))) return { action: "pending", why: "protected-type" };
   return { action: "record" };
