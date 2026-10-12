@@ -4540,7 +4540,7 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
     assert.equal(typeof request.id, 'string')
-    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow' })
+    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }, 'memory has no card yet and rides along unchanged')
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, 'the real writer takes the map the panel sent')
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="gate"]').textContent), undefined, { timeout: 25000 })
     assert.equal(await page.evaluate(() => document.querySelector('[data-module-said="steward"]').textContent), '', 'only the pressed card answers')
@@ -4549,13 +4549,13 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
   }
 })
 
-test('Modules: verify-done offers Off and Shadow only, and switching it off sends a seven-module map the real writer accepts', MODULES_SKIP, async () => {
+test('Modules: verify-done offers Off and Shadow only, and switching it off sends the whole eight-module map the real writer accepts', MODULES_SKIP, async () => {
   const { browser, page, errors } = await openPanel(SCENARIOS.ready)
   try {
     await page.click('[data-module-states="verify-done"] button[data-value="off"]')
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
-    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off', 'ci-watch': 'shadow' })
+    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off', 'ci-watch': 'shadow', memory: 'shadow' })
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="verify-done"]').textContent), undefined, { timeout: 25000 })
     assert.deepEqual(errors, [])

@@ -37,8 +37,8 @@ function readModules (content) {
   return JSON.parse(execFileSync(process.execPath, [SCRIPT_PATH, 'feature-modules-read'], { env, encoding: 'utf8' }))
 }
 
-// Every module that existed before 0.8.0 defaults to active; verify-done and ci-watch, new, to shadow.
-const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow' }
+// Every module that existed before 0.8.0 defaults to active; verify-done, ci-watch and memory, new, to shadow.
+const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }
 
 test('feature-modules-read: a missing file reads as the defaults', () => {
   assert.deepEqual(readModules(undefined), { ok: true, value: DEFAULTS })
@@ -73,7 +73,7 @@ function runMode (mode, { input, existing } = {}) {
   return { result, file, configDir, content: existsSync(file) ? readFileSync(file, 'utf8') : null }
 }
 
-const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off', 'ci-watch': 'active' }
+const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off', 'ci-watch': 'active', memory: 'active' }
 
 test('feature-modules-save: writes the chosen states, pretty-printed, and answers with them', () => {
   const { result, content, configDir } = runMode('feature-modules-save', { input: JSON.stringify({ modules: CHOSEN }) })
@@ -132,9 +132,16 @@ function panelModuleRows () {
   return [...html.matchAll(/\{ id: '([\w-]+)', states: \[([^\]]*)\], cost:/g)].map((match) => ({ id: match[1], states: [...match[2].matchAll(/'([\w-]+)'/g)].map((state) => state[1]) }))
 }
 
-test('the panel offers a card for every registered module, with exactly the states the registry allows', async () => {
+// Registry modules whose card is not on the panel yet. The panel sends their
+// state back unchanged on every switch (config.html uncardedModuleStates), so
+// the writer still gets the whole map. Remove an id when its card lands:
+// `memory` waits for the panel card of odd/tasks/memory-core.md's track (M14).
+const UNCARDED = ['memory']
+
+test('the panel offers a card for every registered module that has one, with exactly the states the registry allows', async () => {
   const { FEATURE_MODULES } = await import('../../src/core/feature_modules.ts')
-  assert.deepEqual(panelModuleRows(), FEATURE_MODULES.map((module) => ({ id: module.id, states: [...module.states] })))
+  for (const id of UNCARDED) assert.ok(FEATURE_MODULES.some((module) => module.id === id), `${id} is registered`)
+  assert.deepEqual(panelModuleRows(), FEATURE_MODULES.filter((module) => !UNCARDED.includes(module.id)).map((module) => ({ id: module.id, states: [...module.states] })))
 })
 
 test("the ci-watch card's gh-call ceiling is the schedule's own (CI_WATCH_MAX_POLLS)", async () => {
@@ -147,7 +154,7 @@ test("the ci-watch card's gh-call ceiling is the schedule's own (CI_WATCH_MAX_PO
 test('feature-modules-save: the map the panel sends, for every state its cards offer, is accepted by the real sidecar', () => {
   const rows = panelModuleRows()
   // What the panel holds when nothing was chosen yet: each card at the state the status reports, the defaults.
-  const shown = Object.fromEntries(rows.map((row) => [row.id, DEFAULTS[row.id]]))
+  const shown = Object.fromEntries([...rows.map((row) => row.id), ...UNCARDED].map((id) => [id, DEFAULTS[id]]))
   for (const row of rows) {
     for (const state of row.states) {
       const next = { ...shown, [row.id]: state }

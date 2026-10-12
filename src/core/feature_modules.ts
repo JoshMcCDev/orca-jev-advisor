@@ -37,15 +37,17 @@
 // 0.8.0, has no earlier behaviour to keep and defaults to `shadow`: its week
 // of measurement is the point (odd/tasks/verify-done-module.md). ci-watch,
 // new in 0.9.0, is in the same case and also defaults to `shadow`.
+// memory (odd/tasks/memory-core.md) is new in the same way and also
+// defaults to `shadow`.
 //
 // Pure: no I/O and no node: import, so the mod sandbox can load it too.
 
 /** The module state file, in the plugin config directory (src/core/paths.ts resolveConfigDir). */
 export const FEATURE_MODULES_FILE = "feature-modules.json";
 
-export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done" | "ci-watch";
+export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done" | "ci-watch" | "memory";
 
-export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch"];
+export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch", "memory"];
 
 export type ModuleState = "off" | "shadow" | "active";
 
@@ -63,7 +65,7 @@ export interface HookEntry {
   readonly script: string;
 }
 
-export type ModFeatureId = "router-tier" | "router-subagent" | "subagent-status" | "turn-usage" | "steward" | "skill-selection" | "tool-selection" | "verify-done" | "ci-watch";
+export type ModFeatureId = "router-tier" | "router-subagent" | "subagent-status" | "turn-usage" | "steward" | "skill-selection" | "tool-selection" | "verify-done" | "ci-watch" | "memory-save" | "memory-tidy" | "memory-ui";
 
 /** A feature of the shared mod copy (adapters/claude/mod-skills/hooks/index.ts) and the engine hooks it runs from. */
 export interface ModFeature {
@@ -311,6 +313,27 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     modes: [],
     ownSwitch: true,
   },
+  {
+    // odd/tasks/memory-core.md: Engram, when present, is the store of record
+    // and auto-memory mirrors feedback and user; with no Engram, auto-memory
+    // is the store. Haiku decides and judges, a fork drafts, so no feature
+    // here is a Jev feature. It has no mode of its own, so its state is its
+    // one switch: shadow decides, judges (dry) and drafts (sampled) and
+    // writes nothing; active writes. No settings hook and no worker job yet:
+    // the panel's status job arrives with the panel card.
+    id: "memory",
+    states: MODULE_STATES,
+    defaultState: "shadow",
+    hooks: [],
+    modFeatures: [
+      { id: "memory-save", hooks: ["turn.complete", "tool.call", "session.start"], jev: false },
+      { id: "memory-tidy", hooks: ["turn.complete", "session.compact", "command.run"], jev: false },
+      { id: "memory-ui", hooks: ["ui.render"], jev: false },
+    ],
+    workerJobs: [],
+    modes: [],
+    ownSwitch: true,
+  },
 ];
 
 export type FeatureModules = { readonly [K in ModuleId]: ModuleState };
@@ -323,6 +346,7 @@ export const DEFAULT_FEATURE_MODULES: FeatureModules = {
   board: "active",
   "verify-done": "shadow",
   "ci-watch": "shadow",
+  memory: "shadow",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -365,6 +389,7 @@ export function parseFeatureModules(content: string): FeatureModules {
     board: stateOf("board", read("board")),
     "verify-done": stateOf("verify-done", read("verify-done")),
     "ci-watch": stateOf("ci-watch", read("ci-watch")),
+    memory: stateOf("memory", read("memory")),
   };
 }
 

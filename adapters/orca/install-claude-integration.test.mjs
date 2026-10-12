@@ -1908,8 +1908,8 @@ test('modules T3: with no module file every module is on, all eight hooks are in
   const result = run('install', home)
   assert.equal(result.ok, true)
   assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT)
-  // verify-done (0.8.0) and ci-watch (0.9.0) start in shadow: they have no hooks, so their lines read as matching.
-  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow' })
+  // verify-done (0.8.0), ci-watch (0.9.0) and memory start in shadow: they have no hooks, so their lines read as matching.
+  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' })
   assert.equal(result.modCopyNeeded, true)
 
   const status = run('status', home)
@@ -1922,6 +1922,7 @@ test('modules T3: with no module file every module is on, all eight hooks are in
   assert.deepEqual(status.modules.board, { state: 'active', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.modules['verify-done'], { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.modules['ci-watch'], { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
+  assert.deepEqual(status.modules.memory, { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.targets[0].modules.gate, { state: 'active', present: 5, total: 5 })
   assert.equal(status.modCopy.needed, true)
 })
@@ -2034,7 +2035,7 @@ test('modules T3: the mod copy stays installed while any mod module is on', () =
 
 test('modules T3: with every mod module off the mod copy is kept anyway, so the never-go-back guard keeps its evidence, and status says it is not needed', () => {
   const home = makeHome()
-  writeModules(home, { modules: { 'model-router': 'off', steward: 'off', 'skill-selection': 'off', 'verify-done': 'off', 'ci-watch': 'off' } })
+  writeModules(home, { modules: { 'model-router': 'off', steward: 'off', 'skill-selection': 'off', 'verify-done': 'off', 'ci-watch': 'off', memory: 'off' } })
   const result = run('install', home)
   assert.equal(result.modCopyNeeded, false)
   assert.equal(existsSync(join(modCopyPathFor(home), '.claude-plugin', 'plugin.json')), true)

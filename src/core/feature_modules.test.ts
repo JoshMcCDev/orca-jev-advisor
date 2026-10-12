@@ -66,8 +66,8 @@ function installerHookKeys(): readonly string[] {
   return rows.map((row) => `${row[1] ?? ""} ${row[2] === "FILE_TOOLS_MATCHER" ? fileTools : (row[2] ?? "").slice(1, -1)} ${row[3] ?? ""}`);
 }
 
-test("the registry holds exactly the seven modules, in MODULE_IDS order", () => {
-  assert.deepEqual(MODULE_IDS, ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch"]);
+test("the registry holds exactly the eight modules, in MODULE_IDS order", () => {
+  assert.deepEqual(MODULE_IDS, ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch", "memory"]);
   assert.deepEqual(FEATURE_MODULES.map((module) => module.id), MODULE_IDS);
 });
 
@@ -80,9 +80,9 @@ test("the registry module is pure: no node: import, so the mod sandbox can load 
   assert.doesNotMatch(source, /from "node:/);
 });
 
-test("defaults: every earlier module is active, so an upgrade with no file keeps 0.6.28 behaviour; verify-done and ci-watch, new, start in shadow", () => {
-  assert.deepEqual(DEFAULT_FEATURE_MODULES, { gate: "active", "model-router": "active", steward: "active", "skill-selection": "active", board: "active", "verify-done": "shadow", "ci-watch": "shadow" });
-  for (const module of FEATURE_MODULES) assert.equal(module.defaultState, module.id === "verify-done" || module.id === "ci-watch" ? "shadow" : "active", module.id);
+test("defaults: every earlier module is active, so an upgrade with no file keeps 0.6.28 behaviour; verify-done, ci-watch and memory, new, start in shadow", () => {
+  assert.deepEqual(DEFAULT_FEATURE_MODULES, { gate: "active", "model-router": "active", steward: "active", "skill-selection": "active", board: "active", "verify-done": "shadow", "ci-watch": "shadow", memory: "shadow" });
+  for (const module of FEATURE_MODULES) assert.equal(module.defaultState, module.id === "verify-done" || module.id === "ci-watch" || module.id === "memory" ? "shadow" : "active", module.id);
   assert.deepEqual(parseFeatureModules(""), DEFAULT_FEATURE_MODULES);
 });
 
@@ -117,8 +117,32 @@ test("ci-watch: off, shadow and active; its own state is the switch, no existing
   assert.equal(parseFeatureModules(fileWith({ "ci-watch": "active" }))["ci-watch"], "active");
   assert.equal(parseFeatureModules(fileWith({ "ci-watch": "off" }))["ci-watch"], "off");
   assert.equal(parseFeatureModules(fileWith({ "ci-watch": "paused" }))["ci-watch"], "shadow", "a state it does not offer reads as its default");
-  // Only ci-watch's own switch opts out of "shadow caps an existing mode".
-  assert.deepEqual(FEATURE_MODULES.filter((module) => module.ownSwitch === true).map((module) => module.id), ["ci-watch"]);
+  // Only ci-watch's and memory's own switches opt out of "shadow caps an existing mode".
+  assert.deepEqual(FEATURE_MODULES.filter((module) => module.ownSwitch === true).map((module) => module.id), ["ci-watch", "memory"]);
+});
+
+test("memory: off, shadow and active; three mod features and nothing else (odd/tasks/memory-core.md, M7)", () => {
+  const entry = FEATURE_MODULES.find((module) => module.id === "memory");
+  assert.ok(entry !== undefined);
+  assert.deepEqual(entry.states, ["off", "shadow", "active"]);
+  assert.equal(entry.defaultState, "shadow");
+  // It uses Haiku, not Jev, so none of its features is a Jev feature.
+  assert.deepEqual(entry.modFeatures, [
+    { id: "memory-save", hooks: ["turn.complete", "tool.call", "session.start"], jev: false },
+    { id: "memory-tidy", hooks: ["turn.complete", "session.compact", "command.run"], jev: false },
+    { id: "memory-ui", hooks: ["ui.render"], jev: false },
+  ]);
+  assert.deepEqual(entry.hooks, []);
+  assert.deepEqual(entry.workerJobs, []);
+  assert.deepEqual(entry.modes, []);
+  // An upgrade with no module file measures; Off runs none of it.
+  const on = modFeaturesOn(parseFeatureModules(""));
+  for (const id of ["memory-save", "memory-tidy", "memory-ui"] as const) {
+    assert.equal(on.includes(id), true, id);
+    assert.equal(modFeaturesOn(withStates({ memory: "off" })).includes(id), false, id);
+  }
+  assert.equal(parseFeatureModules(fileWith({ memory: "active" })).memory, "active");
+  assert.equal(parseFeatureModules(fileWith({ memory: "paused" })).memory, "shadow");
 });
 
 test("defaults: each feature's own mode decides, exactly as today", () => {
@@ -143,8 +167,8 @@ test("defaults: every installed hook, every mod feature and every worker job sta
 });
 
 test("parse: a valid file sets each module's state", () => {
-  const modules = parseFeatureModules(fileWith({ gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active" }));
-  assert.deepEqual(modules, { gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active" });
+  const modules = parseFeatureModules(fileWith({ gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "active" }));
+  assert.deepEqual(modules, { gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "active" });
 });
 
 test("parse: malformed or non-object content falls back to the defaults, never throws", () => {
@@ -212,10 +236,13 @@ test("modFeaturesOn and modCopyNeeded: the mod copy stays while any mod module i
   assert.equal(modFeaturesOn(skillsOff).includes("tool-selection"), false);
   assert.equal(modFeaturesOn(skillsOff).includes("router-tier"), true);
   assert.equal(modCopyNeeded(skillsOff), true);
-  const modModulesOff = withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", "ci-watch": "off" });
+  const modModulesOff = withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", "ci-watch": "off", memory: "off" });
   assert.deepEqual(modFeaturesOn(modModulesOff), []);
   assert.equal(modCopyNeeded(modModulesOff), false);
-  // verify-done and ci-watch in shadow are mod modules on: either keeps the copy alone.
+  // verify-done, ci-watch or memory in shadow is a mod module on: any one keeps the copy alone.
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "ci-watch": "off", memory: "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", memory: "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", "ci-watch": "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off" })), true);
   assert.equal(modCopyNeeded(withStates({ gate: "off", board: "off" })), true);
@@ -334,7 +361,7 @@ test("a module offers shadow exactly when one of its existing modes has a measur
 // T5: the writer path (the worker's feature-modules-save sidecar) refuses what
 // parseFeatureModules would silently turn into defaults, so a corrupt request
 // is reported instead of written.
-const VALID_INPUT = { modules: { gate: "off", "model-router": "shadow", steward: "active", "skill-selection": "shadow", board: "off", "verify-done": "shadow", "ci-watch": "active" } };
+const VALID_INPUT = { modules: { gate: "off", "model-router": "shadow", steward: "active", "skill-selection": "shadow", board: "off", "verify-done": "shadow", "ci-watch": "active", memory: "shadow" } };
 
 test("validateFeatureModulesInput accepts every module with a state it offers", () => {
   const result = validateFeatureModulesInput(VALID_INPUT);

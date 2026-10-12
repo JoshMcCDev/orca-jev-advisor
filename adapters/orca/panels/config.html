@@ -4190,6 +4190,9 @@
         { id: 'ci-watch', states: ['off', 'shadow', 'active'], cost: { polls: 45 }, weekly: true, background: { open: 0, closed: 0, kind: 'processes' } }
       ]
       var moduleStates = null
+      // A module the registry has and this list has no card for yet (memory, until its card lands) keeps the state the
+      // installer reported: the writer refuses a map missing a module, so every switch sends these along unchanged.
+      var uncardedModuleStates = {}
       var moduleRowsBuilt = false
       var moduleBusy = false
 
@@ -4310,6 +4313,13 @@
           setPressedValue(group, states[row.id])
         })
         moduleStates = known ? states : null
+        uncardedModuleStates = {}
+        if (all) {
+          Object.keys(all).forEach(function (id) {
+            var info = all[id]
+            if (!moduleRow(id) && info && typeof info === 'object' && ['off', 'shadow', 'active'].indexOf(info.state) !== -1) uncardedModuleStates[id] = info.state
+          })
+        }
         applyModuleVisibility()
       }
 
@@ -4349,6 +4359,7 @@
         if (moduleBusy || moduleStates === null || moduleStates[id] === state) return
         var next = {}
         MODULE_ROWS.forEach(function (row) { next[row.id] = moduleStates[row.id] })
+        Object.keys(uncardedModuleStates).forEach(function (other) { next[other] = uncardedModuleStates[other] })
         next[id] = state
         var saidNode = moduleQuery('said', id)
         moduleBusy = true
