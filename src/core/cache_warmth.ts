@@ -14,10 +14,18 @@
 // Unknown is warm: no TTL, no last request, or a malformed row keeps the
 // router exactly as it was before this file.
 //
+// R5 (odd/tasks/router-cache-ttl.md): on Team and Enterprise accounts the
+// built-in security plugin withholds `classic.*` events from installed
+// plugins, so the TTL cannot wait for `classic.Stop`. The router reads the
+// tail itself, from the session's transcript: `<config dir>/projects/<slug
+// of where the session started>/<session id>.jsonl`, else wherever `find`
+// finds `<session id>.jsonl` two levels under `<config dir>/projects`.
+//
 // Pure: no I/O, no clock (the caller passes `nowMs`).
 // ---------------------------------------------------------------------------
 
 import { isRecord } from "../guards.ts";
+import { projectSlug } from "./memory_detect.ts";
 
 export const CACHE_TTL_1H_MS = 60 * 60_000;
 export const CACHE_TTL_5M_MS = 5 * 60_000;
@@ -86,4 +94,39 @@ function finiteOrNull(value: unknown): number | null {
 export function parseCacheClock(raw: unknown): CacheClock {
   if (!isRecord(raw)) return { ttlMs: null, lastMainAt: null };
   return { ttlMs: finiteOrNull(raw.ttlMs), lastMainAt: finiteOrNull(raw.lastMainAt) };
+}
+
+/** R5: whether the clock still lacks its TTL or its last request, so the transcript is worth reading. */
+export function cacheClockUnknown(clock: CacheClock): boolean {
+  return clock.ttlMs === null || clock.lastMainAt === null;
+}
+
+/** A tail read into the stored clock: the tail's TTL when it has one, and the later of the two request times. */
+export function mergeCacheTail(stored: CacheClock, tail: CacheClock): CacheClock {
+  const lastMainAt = stored.lastMainAt === null ? tail.lastMainAt : tail.lastMainAt === null ? stored.lastMainAt : Math.max(stored.lastMainAt, tail.lastMainAt);
+  return { ttlMs: tail.ttlMs ?? stored.ttlMs, lastMainAt };
+}
+
+function withoutTrailingSlashes(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
+/** R5: where Claude Code writes this session's transcript. `sessionRoot` is where the session started (`$.session.root()`). */
+export function transcriptPathOf(input: { readonly configDir: string; readonly sessionRoot: string; readonly sessionId: string }): string {
+  return `${withoutTrailingSlashes(input.configDir)}/projects/${projectSlug(input.sessionRoot)}/${input.sessionId}.jsonl`;
+}
+
+/** A session id plain enough to be a file name and never a `find` pattern. */
+const PLAIN_SESSION_ID = /^[A-Za-z0-9_-]+$/;
+
+/** R5: the argv that finds this session's transcript under any project folder (a moved root); null for an id that is not plain. */
+export function transcriptFindArgv(configDir: string, sessionId: string): readonly string[] | null {
+  if (!PLAIN_SESSION_ID.test(sessionId)) return null;
+  return ["find", `${withoutTrailingSlashes(configDir)}/projects`, "-maxdepth", "2", "-type", "f", "-name", `${sessionId}.jsonl`];
+}
+
+/** R5: the first line of `find`'s output that is this session's transcript; null when there is none. */
+export function foundTranscriptPath(stdout: string, sessionId: string): string | null {
+  const suffix = `/${sessionId}.jsonl`;
+  return stdout.split("\n").map((line) => line.trim()).find((line) => line.endsWith(suffix)) ?? null;
 }

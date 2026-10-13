@@ -1791,6 +1791,61 @@ test("R2: each main step stamps the last main request time; a subagent step does
 });
 
 // ---------------------------------------------------------------------------
+// R5 (odd/tasks/router-cache-ttl.md): on Team/Enterprise accounts the
+// built-in security plugin withholds `classic.*` events, so `classic.Stop`
+// never reads the TTL. The router reads the transcript tail itself.
+// ---------------------------------------------------------------------------
+
+/** Where Claude Code keeps this fake session's transcript: `<CLAUDE_CONFIG_DIR>/projects/<slug of CWD>/session-1.jsonl`. */
+const OWN_TRANSCRIPT = `${ACCOUNT_DIR}/projects/-home-dev-Projects-sandbox/session-1.jsonl`;
+
+/** Three one-step turns (complex, simple, simple) with no Stop at all, and a gap of `gapMs` before the third. `withConfigDir` false leaves CLAUDE_CONFIG_DIR unset (`~/.claude`). Returns the stage rows. */
+async function stoplessTurns(host: FakeHost, gapMs: number, withConfigDir = true): Promise<Record<string, unknown>[]> {
+  seedRouterAccount(host);
+  if (!withConfigDir) host.env.delete("CLAUDE_CONFIG_DIR");
+  host.fetchQueue.push(tierAnswer("complex"), tierAnswer("simple"), tierAnswer("simple"));
+  const { handlers, engine } = loadHooks(host);
+  await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 1);
+  await playTurn(host, handlers, engine, 2, "thanks, now list the files you touched", 1);
+  host.clockOffsetMs += gapMs;
+  await playTurn(host, handlers, engine, 3, "and summarise them in one line", 1);
+  return routerDecisionLines(host).filter((row) => row.point === "stage");
+}
+
+test("R5: with classic.Stop never fired, the router reads the TTL from the session's own transcript, so both stage rows know the cache", async () => {
+  const host = makeFakeHost();
+  host.transcripts.set(OWN_TRANSCRIPT, `${transcriptRow("5m")}\n`);
+  const stages = await stoplessTurns(host, 6 * 60_000);
+  assert.deepEqual(stages.map((row) => row.cacheWarm), [true, false]);
+  assert.ok(host.processCalls.includes(`tail -n 300 ${OWN_TRANSCRIPT}`));
+  assert.equal((host.state.get("routerCache") as { ttlMs: unknown }).ttlMs, 5 * 60_000);
+  assert.equal(host.processCalls.filter((call) => call.startsWith("tail ")).length, 1, "read once: the clock is known after it");
+});
+
+test("R5: without CLAUDE_CONFIG_DIR the config dir is ~/.claude, and a transcript elsewhere under its projects is found by session id", async () => {
+  const host = makeFakeHost();
+  const moved = "/home/dev/.claude/projects/-home-dev-Projects-old-place/session-1.jsonl";
+  host.transcripts.set(moved, `${transcriptRow("1h")}\n`);
+  host.processHandler = (argv) => (argv[0] === "find" ? { exitCode: 0, stdout: `${moved}\n`, stderr: "" } : undefined);
+  const stages = await stoplessTurns(host, 6 * 60_000, false);
+  assert.deepEqual(stages.map((row) => row.cacheWarm), [true, true]);
+  assert.ok(host.processCalls.includes("tail -n 300 /home/dev/.claude/projects/-home-dev-Projects-sandbox/session-1.jsonl"), "the session's own path first");
+  assert.ok(host.processCalls.includes("find /home/dev/.claude/projects -maxdepth 2 -type f -name session-1.jsonl"));
+  assert.ok(host.processCalls.includes(`tail -n 300 ${moved}`));
+});
+
+test("R5: a transcript that cannot be read leaves the cache unknown and the turn routed as before", async () => {
+  const host = makeFakeHost();
+  host.processHandler = (argv) => {
+    if (argv[0] === "find") throw new Error("fake host: find cannot start");
+    return undefined;
+  };
+  const stages = await stoplessTurns(host, 6 * 60_000);
+  assert.deepEqual(stages.map((row) => row.cacheWarm), [null, null]);
+  assert.deepEqual(stages.map((row) => row.reason), ["hysteresis", "break-even"]);
+});
+
+// ---------------------------------------------------------------------------
 // JEV-060 slice 2, T8: subagent routing (point B) on agent.spawn.
 // ---------------------------------------------------------------------------
 

@@ -166,7 +166,7 @@ import { subagentBand } from '../../../../src/core/subagent_band.ts'
 import type { SubagentBand } from '../../../../src/core/subagent_band.ts'
 import type { KeptDecision } from '../../../../src/core/model_router_status.ts'
 import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt, switchedByColdCache } from '../../../../src/core/model_router_stage.ts'
-import { cacheWarmth, parseCacheClock, readCacheTail } from '../../../../src/core/cache_warmth.ts'
+import { cacheClockUnknown, cacheWarmth, foundTranscriptPath, mergeCacheTail, parseCacheClock, readCacheTail, transcriptFindArgv, transcriptPathOf } from '../../../../src/core/cache_warmth.ts'
 import type { ActivityMessage, LiveRateLimit, EffortOutputs, SessionUsage, StageDecision, StageDecisionInput } from '../../../../src/core/model_router_stage.ts'
 import type { DestinationKind, QuotaBand, QuotaSource, SessionEffort, TeammateTaskSeen, TierEffort, TierEffortMap, TurnActivity } from '../../../../src/core/model_router_decide.ts'
 import { isTeammateCall, matchTeammateTask, rememberTeammateTask } from '../../../../src/core/teammate_route.ts'
@@ -1428,7 +1428,7 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
   const { tiers, band, quotaSource, tierEffort } = await resolveRouterAccount($, account)
   const destination = await resolveSessionDestination($, await $.session.cwd())
   const jev = await askTierJudgment($, options, promptText, activity, band, destination.destinationKind)
-  const cacheWarm = cacheWarmth(await readCacheClock($), await $.clock.now())
+  const cacheWarm = cacheWarmth((await readCacheClockAtStage($)).clock, await $.clock.now())
   const stageInput: StageDecisionInput = {
     tiers,
     tierEffort,
@@ -1518,14 +1518,63 @@ async function stampMainStep($: EngineInterface): Promise<void> {
  */
 async function readCacheTtl($: EngineInterface, transcriptPath: string | undefined): Promise<void> {
   if (transcriptPath === undefined || transcriptPath.length === 0) return
-  const result = await makeProcessRun($)(['tail', '-n', '300', transcriptPath])
-  if (result.exitCode !== 0) return
-  const tail = readCacheTail(result.stdout)
+  const tail = await transcriptTail(makeProcessRun($), transcriptPath)
+  if (tail === null) return
+  await storeCacheTail($, await readCacheClock($), tail)
+}
+
+/** The tail merged into the stored clock (mergeCacheTail), written only when it says something new. */
+async function storeCacheTail($: EngineInterface, stored: RouterCacheState, tail: string): Promise<RouterCacheState> {
+  const merged = mergeCacheTail(stored, readCacheTail(tail))
+  if (merged.ttlMs !== stored.ttlMs || merged.lastMainAt !== stored.lastMainAt) await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerCache' }, merged)
+  return merged
+}
+
+/** `tail -n 300 <path>`'s output, or null when it fails or cannot start. */
+async function transcriptTail(run: ProcessRun, path: string): Promise<string | null> {
+  try {
+    const result = await run(['tail', '-n', '300', path])
+    return result.exitCode === 0 ? result.stdout : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * R5 (odd/tasks/router-cache-ttl.md): the cache clock at a stage decision.
+ * While its TTL or last request is unknown -- always, on an account whose
+ * `classic.Stop` never arrives -- the session's own transcript tail is read
+ * here and stored, so in practice once per session. The transcript is the
+ * session's own (config dir, slug of `$.session.root()`, session id), else
+ * the one `find` finds by session id under the config dir's projects (the
+ * root moved). `tailFailed`: a read was needed and none answered. Never
+ * throws: a failure leaves the clock as stored.
+ */
+async function readCacheClockAtStage($: EngineInterface): Promise<{ readonly clock: RouterCacheState; readonly tailFailed: boolean }> {
   const stored = await readCacheClock($)
-  const lastMainAt = stored.lastMainAt === null ? tail.lastMainAt : tail.lastMainAt === null ? stored.lastMainAt : Math.max(stored.lastMainAt, tail.lastMainAt)
-  const ttlMs = tail.ttlMs ?? stored.ttlMs
-  if (ttlMs === stored.ttlMs && lastMainAt === stored.lastMainAt) return
-  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerCache' }, { ttlMs, lastMainAt })
+  if (!cacheClockUnknown(stored)) return { clock: stored, tailFailed: false }
+  try {
+    const tail = await sessionTranscriptTail($)
+    if (tail === null) return { clock: stored, tailFailed: true }
+    return { clock: await storeCacheTail($, stored, tail), tailFailed: false }
+  } catch {
+    return { clock: stored, tailFailed: true }
+  }
+}
+
+/** R5: this session's transcript tail, from its own path or, failing that, the one `find` names; null when neither answers. POSIX `tail`/`find` only. */
+async function sessionTranscriptTail($: EngineInterface): Promise<string | null> {
+  const configDir = await memoryConfigDir($)
+  const sessionId = await readSessionId($)
+  if (configDir === null || sessionId === null) return null
+  const run = makeProcessRun($)
+  const own = await transcriptTail(run, transcriptPathOf({ configDir, sessionRoot: await $.session.root(), sessionId }))
+  if (own !== null) return own
+  const argv = transcriptFindArgv(configDir, sessionId)
+  if (argv === null) return null
+  const found = await run(argv)
+  const path = found.exitCode === 0 ? foundTranscriptPath(found.stdout, sessionId) : null
+  return path === null ? null : transcriptTail(run, path)
 }
 
 /**
