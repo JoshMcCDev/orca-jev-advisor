@@ -20,6 +20,7 @@ import { baseModelId, collapseTier, modelRank, ROUTER_TIERS, tierOfModel } from 
 import type { EngineFallbackReason, EngineNotes, ResolvedTiers, RouterTier } from "./model_router_accounts.ts";
 import { redactSecretsForJev } from "./secret_redaction.ts";
 import type { WorkKindRecord } from "./work_kind.ts";
+import type { CacheUnknown } from "./cache_warmth.ts";
 
 export type RouterEffort = "low" | "medium" | "high" | "xhigh";
 
@@ -302,7 +303,17 @@ export function shiftForPressure(tier: RouterTier, band: QuotaBand, guards: read
 // §6.3 session start (point A)
 // ---------------------------------------------------------------------------
 
-export type StartReason = "jev-failed" | "held-by-guard" | "same" | "switch";
+export type StartReason = "jev-failed" | "jev-payment" | "held-by-guard" | "same" | "switch";
+
+/**
+ * G8 (odd/tasks/router-cache-ttl.md): a decision made without Jev because
+ * Jev answered HTTP 402 -- the key's account has no credit or plan -- is
+ * named `jev-payment` instead of `jev-failed`. It decides nothing else
+ * differently.
+ */
+export function withJevPayment<D extends { readonly reason: string }>(decision: D, payment: boolean): D | (Omit<D, "reason"> & { readonly reason: "jev-payment" }) {
+  return payment && decision.reason === "jev-failed" ? { ...decision, reason: "jev-payment" } : decision;
+}
 
 export interface RouterDecision {
   /** The (collapsed) tier Jev chose; null when Jev failed. */
@@ -462,6 +473,8 @@ export interface RouterDecisionRecord {
   readonly engineVersionUnknown?: true;
   /** Track R: whether the prompt cache was warm when a stage decision weighed a switch; null unknown (which counts as warm). */
   readonly cacheWarm?: boolean | null;
+  /** R6: why `cacheWarm` is null; present only then. */
+  readonly cacheUnknown?: CacheUnknown;
   /** Track R, measure mode: a switch only the cold cache made pay, not applied. */
   readonly wouldApplyCold?: true;
   /** Track R, active mode: a switch only the cold cache made pay, applied. */
@@ -479,6 +492,8 @@ export interface RouterDecisionRecordInput {
   readonly quotaBand: QuotaBand;
   readonly quotaSource?: QuotaSource | null;
   readonly breakEven?: { readonly contextTokens: number; readonly switchCost: number; readonly stepSaving: number; readonly expectedSteps: number } | null;
+  /** R7: a quality switch's rewrite cost (`qualitySwitchCost`), logged when there is no break-even to carry one. */
+  readonly switchCost?: number | null;
   readonly origin?: string | null;
   readonly effort?: SessionEffort | null;
   /** JEVADV-63: null when not given -- an honest "not yet known" state, not a bug. */
@@ -494,6 +509,8 @@ export interface RouterDecisionRecordInput {
   readonly engine?: EngineNotes;
   /** Track R: whether the prompt cache was warm at a stage decision; null unknown; absent on rows that never weigh it. */
   readonly cacheWarm?: boolean | null;
+  /** R6: why the cache is unknown (`cacheUnknownOf`); written only when `cacheWarm` is null. */
+  readonly cacheUnknown?: CacheUnknown | null;
   /** Track R: `switchedByColdCache` -- the switch passed break-even only because the cache was cold. */
   readonly coldSwitch?: boolean;
 }
@@ -512,7 +529,7 @@ export function routerDecisionRecord(input: RouterDecisionRecordInput): RouterDe
     reason: input.decision.reason,
     guard: input.decision.guard,
     contextTokens: breakEven?.contextTokens ?? null,
-    switchCost: breakEven?.switchCost ?? null,
+    switchCost: breakEven?.switchCost ?? input.switchCost ?? null,
     stepSaving: breakEven?.stepSaving ?? null,
     expectedSteps: breakEven?.expectedSteps ?? null,
     quotaBand: input.quotaBand,
@@ -530,6 +547,7 @@ export function routerDecisionRecord(input: RouterDecisionRecordInput): RouterDe
     ...(input.engine?.fallbackReason === undefined ? {} : { fallbackReason: input.engine.fallbackReason }),
     ...(input.engine?.engineVersionUnknown === undefined ? {} : { engineVersionUnknown: input.engine.engineVersionUnknown }),
     ...(input.cacheWarm === undefined ? {} : { cacheWarm: input.cacheWarm }),
+    ...(input.cacheWarm === null && input.cacheUnknown !== undefined && input.cacheUnknown !== null ? { cacheUnknown: input.cacheUnknown } : {}),
     ...(input.coldSwitch !== true ? {} : input.applied ? { appliedCold: true as const } : { wouldApplyCold: true as const }),
   };
 }

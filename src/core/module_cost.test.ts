@@ -72,6 +72,8 @@ test("tools: the wide stage is one call per batch of the roster", () => {
 test("router: a row with a confidence or jev-failed is a call; an engine turn (no confidence) is not", () => {
   assert.deepEqual(routerJevCalls({ at: AT, point: "start", tier: "simple", confidence: 0.9, reason: "same" }), { calls: 1, failures: 0, latencyMs: [] });
   assert.deepEqual(routerJevCalls({ at: AT, point: "stage", tier: null, confidence: null, reason: "jev-failed" }), { calls: 1, failures: 1, latencyMs: [] });
+  // G8: a 402 (the key has no credit) is a failed call too.
+  assert.deepEqual(routerJevCalls({ at: AT, point: "stage", tier: null, confidence: null, reason: "jev-payment" }), { calls: 1, failures: 1, latencyMs: [] });
   assert.deepEqual(routerJevCalls({ at: AT, point: "stage", tier: null, confidence: null, reason: "floor-restore" }), { calls: 0, failures: 0, latencyMs: [] });
 });
 

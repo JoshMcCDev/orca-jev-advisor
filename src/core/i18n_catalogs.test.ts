@@ -74,3 +74,14 @@ test("English gate reasons do not use ' -- ' between clauses either", () => {
     .map(([key]) => key);
   assert.deepEqual(problems, []);
 });
+
+test("G8: the no-credit gate notice names the missing credit, never an unreachable Jev, in both languages", () => {
+  const es = GATE_CATALOG.es.jevNoCredit;
+  const en = GATE_CATALOG.en.jevNoCredit;
+  assert.match(es, /crédito/);
+  assert.match(es, /402/);
+  assert.doesNotMatch(es, /no se pudo contactar|tenés|podés|revisá/);
+  assert.match(en, /credit/);
+  assert.match(en, /402/);
+  assert.doesNotMatch(en, /reach/i);
+});

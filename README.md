@@ -16,6 +16,14 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.8.3
+
+- **Model router on Team and Enterprise accounts.** The router now knows whether your prompt cache is warm or cold on every account. Until now, on Team and Enterprise organizations Claude Code kept back the turn-end event the router used, so it never knew, and it priced every switch as if the cache were warm. It now reads the cache from the session's transcript itself, on macOS and Linux. When it still cannot tell, the decision log says why.
+- **What a quality switch cost.** A switch up to a stronger model or a higher effort now logs what re-writing the context cost. The decision itself is unchanged: quality never waits.
+- **Jev key without credit.** When Jev answers 402, the notice says your Jev key has no credit or plan, instead of "Jev unreachable". Commands still pass, as before.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.8.2
 
 Two new modules and two measurements, all starting in Shadow: they log what they would do and change nothing until you choose Active.

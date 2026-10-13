@@ -77,7 +77,7 @@
  * cache explicitly instead of closing over it.
  */
 import type { AgentSpawnInput, AgentSpawnResult, EngineInterface, Frozen, Next, On, PluginOptions, Register, SessionCompactResult, StreamHookBody, StreamNext, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
-import { JevRequestError, callJev } from '../../../../src/core/jev.ts'
+import { JevRequestError, callJev, isJevPaymentFailure, jevFailureOf } from '../../../../src/core/jev.ts'
 import { resolveOrcaContext } from '../../../../src/core/orca_context.ts'
 import type { OrcaContext, ProcessRun, RunResult } from '../../../../src/core/orca_context.ts'
 import { modSkillsProjectName } from '../../../../src/core/project_name.ts'
@@ -141,7 +141,7 @@ import { parseModelsMirror } from '../../../../src/core/model_mirror.ts'
 import { contextWindowOfModel, engineNotesOf, parseVaultEnv, resolveAccountTiers, tierOfModel } from '../../../../src/core/model_router_accounts.ts'
 import { ENGINE_VERSION_FILE, engineVersionRecord } from '../../../../src/core/engine_support.ts'
 import type { EngineNotes, ResolvedTiers, RouterTier } from '../../../../src/core/model_router_accounts.ts'
-import { buildTierQuestions, buildTierState, decideStart, interpretTier, routerDecisionFileName, routerDecisionRecord, toRouterEffort } from '../../../../src/core/model_router_decide.ts'
+import { buildTierQuestions, buildTierState, decideStart, interpretTier, routerDecisionFileName, routerDecisionRecord, toRouterEffort, withJevPayment } from '../../../../src/core/model_router_decide.ts'
 import type { RouterDecision, TierJudgment } from '../../../../src/core/model_router_decide.ts'
 import { parseRouterMode, routerEffortFromSettings, routerEffortPersonTiers, workKindModeFromSettings } from '../../../../src/core/model_router_mode.ts'
 import { holdEffort, stepPhase, toolFailed, withLastFailed, withStep } from '../../../../src/core/step_phase.ts'
@@ -165,8 +165,8 @@ import type { GitPlace, PlaceCache } from '../../../../src/core/agent_place.ts'
 import { subagentBand } from '../../../../src/core/subagent_band.ts'
 import type { SubagentBand } from '../../../../src/core/subagent_band.ts'
 import type { KeptDecision } from '../../../../src/core/model_router_status.ts'
-import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt, switchedByColdCache } from '../../../../src/core/model_router_stage.ts'
-import { cacheWarmth, parseCacheClock, readCacheTail } from '../../../../src/core/cache_warmth.ts'
+import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, qualitySwitchCost, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt, switchedByColdCache } from '../../../../src/core/model_router_stage.ts'
+import { cacheClockUnknown, cacheUnknownOf, cacheWarmth, foundTranscriptPath, mergeCacheTail, parseCacheClock, readCacheTail, transcriptFindArgv, transcriptPathOf } from '../../../../src/core/cache_warmth.ts'
 import type { ActivityMessage, LiveRateLimit, EffortOutputs, SessionUsage, StageDecision, StageDecisionInput } from '../../../../src/core/model_router_stage.ts'
 import type { DestinationKind, QuotaBand, QuotaSource, SessionEffort, TeammateTaskSeen, TierEffort, TierEffortMap, TurnActivity } from '../../../../src/core/model_router_decide.ts'
 import { isTeammateCall, matchTeammateTask, rememberTeammateTask } from '../../../../src/core/teammate_route.ts'
@@ -177,7 +177,7 @@ import { decideSubagent, subagentStepEffort } from '../../../../src/core/model_r
 import type { SubagentDecision } from '../../../../src/core/model_router_subagent.ts'
 import { isPersonPromptOrigin } from '../../../../src/core/model_router_origin.ts'
 import type { MemoryShadowState, RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardColdState, StewardState } from '../types/index.d.ts'
-import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, preColdInstructions, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
+import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, withStewardPayment, preColdInstructions, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
 import type { PreColdRecordFields, StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
 import { stewardFromSettings } from '../../../../src/core/model_router_mode.ts'
 import { PRE_COLD_MAX_WAKES, PRE_COLD_TTL_MS, decidePreCold, engineIdleCompactMinTokens, inEngineZone, isEngineIdleCompaction, preColdCompactCost, preColdEarliestMs, preColdMode } from '../../../../src/core/steward_pre_cold.ts'
@@ -1211,21 +1211,22 @@ async function resolveSessionDestination($: EngineInterface, cwd: string): Promi
 }
 
 /** Jev's tier judgment for this turn's prompt, or null on any failure (no key, timeout, malformed answer). */
-async function askTierJudgment($: EngineInterface, options: PluginOptions, promptText: string, activity: TurnActivity | null, band: QuotaBand, destinationKind: DestinationKind | null): Promise<TierJudgment | null> {
-  return (await askTierAndKind($, options, promptText, activity, band, destinationKind, false)).tier
+async function askTierJudgment($: EngineInterface, options: PluginOptions, promptText: string, activity: TurnActivity | null, band: QuotaBand, destinationKind: DestinationKind | null): Promise<{ tier: TierJudgment | null; payment: boolean }> {
+  const { tier, payment } = await askTierAndKind($, options, promptText, activity, band, destinationKind, false)
+  return { tier, payment }
 }
 
-/** The tier judgment and, 0.6.16 T2, at a spawn (`withKind`) the work kind: both from the one Jev call; nulls on any failure. */
-async function askTierAndKind($: EngineInterface, options: PluginOptions, promptText: string, activity: TurnActivity | null, band: QuotaBand, destinationKind: DestinationKind | null, withKind: boolean): Promise<{ tier: TierJudgment | null; kind: WorkKindJudgment | null }> {
+/** The tier judgment and, 0.6.16 T2, at a spawn (`withKind`) the work kind: both from the one Jev call; nulls on any failure. `payment` (G8): the failure was Jev's 402, a key without credit. */
+async function askTierAndKind($: EngineInterface, options: PluginOptions, promptText: string, activity: TurnActivity | null, band: QuotaBand, destinationKind: DestinationKind | null, withKind: boolean): Promise<{ tier: TierJudgment | null; kind: WorkKindJudgment | null; payment: boolean }> {
   try {
     const apiKey = await resolveApiKey($, options)
-    if (apiKey === null) return { tier: null, kind: null }
+    if (apiKey === null) return { tier: null, kind: null, payment: false }
     const state = buildTierState({ promptText, activity, destinationKind, quotaBand: band })
     const questions = withKind ? withWorkKindQuestion(buildTierQuestions()) : buildTierQuestions()
     const response = await callJev(apiKey, state, questions, { budgetMs: ROUTER_BUDGET_MS, fetchImpl: makeJevFetch($), sleepImpl: makeJevSleep($) })
-    return { tier: interpretTier(response.answers), kind: withKind ? interpretWorkKind(response.answers) : null }
-  } catch {
-    return { tier: null, kind: null }
+    return { tier: interpretTier(response.answers), kind: withKind ? interpretWorkKind(response.answers) : null, payment: false }
+  } catch (error) {
+    return { tier: null, kind: null, payment: isJevPaymentFailure(jevFailureOf(error)) }
   }
 }
 
@@ -1369,16 +1370,19 @@ async function routeMainStep($: EngineInterface, e: Frozen<TurnStepInput>, mode:
   const account = await resolveAccountId($)
   const { tiers, band, quotaSource, tierEffort } = await resolveRouterAccount($, account)
   const destination = await resolveSessionDestination($, await $.session.cwd())
-  const jev = await askTierJudgment($, options, promptText, null, band, destination.destinationKind)
-  const decision = decideStart({
-    tierEffort,
-    tiers,
-    jev,
-    configuredModel: e.model,
-    configuredEffort: stickyEffort(e.effort),
-    guards: { text: promptText, activity: null, confidence: jev?.confidence ?? null },
-    band,
-  })
+  const { tier: jev, payment } = await askTierJudgment($, options, promptText, null, band, destination.destinationKind)
+  const decision = withJevPayment(
+    decideStart({
+      tierEffort,
+      tiers,
+      jev,
+      configuredModel: e.model,
+      configuredEffort: stickyEffort(e.effort),
+      guards: { text: promptText, activity: null, confidence: jev?.confidence ?? null },
+      band,
+    }),
+    payment,
+  )
   const applied = mode === 'active' && decision.changed
   const at = new Date(await $.clock.now()).toISOString()
   await appendRouterDecision($, at, `${JSON.stringify(routerDecisionRecord({ at, account, point: 'start', decision, applied, quotaBand: band, quotaSource, origin: originKind, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed), ...(jev?.margin === undefined ? {} : { margin: jev.margin }) }))}\n`)
@@ -1427,8 +1431,9 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
   const account = await resolveAccountId($)
   const { tiers, band, quotaSource, tierEffort } = await resolveRouterAccount($, account)
   const destination = await resolveSessionDestination($, await $.session.cwd())
-  const jev = await askTierJudgment($, options, promptText, activity, band, destination.destinationKind)
-  const cacheWarm = cacheWarmth(await readCacheClock($), await $.clock.now())
+  const { tier: jev, payment } = await askTierJudgment($, options, promptText, activity, band, destination.destinationKind)
+  const cacheClock = await readCacheClockAtStage($)
+  const cacheWarm = cacheWarmth(cacheClock.clock, await $.clock.now())
   const stageInput: StageDecisionInput = {
     tiers,
     tierEffort,
@@ -1445,7 +1450,7 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
     cacheWarm: cacheWarm ?? true,
   }
   let decided: StageDecisionInput = stageInput
-  let decision: StageDecision = decideStage(stageInput)
+  let decision: StageDecision = withJevPayment(decideStage(stageInput), payment)
   // The account's real output medians are read only when an effort
   // lowering has come this far (0.6.2 E2): no file is read otherwise.
   if (decision.reason === 'effort-unknown-savings') {
@@ -1457,7 +1462,7 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
   }
   const applied = mode === 'active' && decision.changed
   const at = new Date(await $.clock.now()).toISOString()
-  const record = routerDecisionRecord({ at, account, point: 'stage', decision, applied, quotaBand: band, quotaSource, breakEven: decision.breakEven, origin: originKind, effort: decision.effortTarget, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed), cacheWarm, coldSwitch: switchedByColdCache(decided, decision), ...(jev?.margin === undefined ? {} : { margin: jev.margin }) })
+  const record = routerDecisionRecord({ at, account, point: 'stage', decision, applied, quotaBand: band, quotaSource, breakEven: decision.breakEven, origin: originKind, effort: decision.effortTarget, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed), cacheWarm, cacheUnknown: cacheUnknownOf(cacheClock.clock, cacheClock.tailFailed), switchCost: qualitySwitchCost(decided, decision), coldSwitch: switchedByColdCache(decided, decision), ...(jev?.margin === undefined ? {} : { margin: jev.margin }) })
   await appendRouterDecision($, at, `${JSON.stringify(record)}\n`)
 
   const next: RouterSticky = decision.changed
@@ -1518,14 +1523,63 @@ async function stampMainStep($: EngineInterface): Promise<void> {
  */
 async function readCacheTtl($: EngineInterface, transcriptPath: string | undefined): Promise<void> {
   if (transcriptPath === undefined || transcriptPath.length === 0) return
-  const result = await makeProcessRun($)(['tail', '-n', '300', transcriptPath])
-  if (result.exitCode !== 0) return
-  const tail = readCacheTail(result.stdout)
+  const tail = await transcriptTail(makeProcessRun($), transcriptPath)
+  if (tail === null) return
+  await storeCacheTail($, await readCacheClock($), tail)
+}
+
+/** The tail merged into the stored clock (mergeCacheTail), written only when it says something new. */
+async function storeCacheTail($: EngineInterface, stored: RouterCacheState, tail: string): Promise<RouterCacheState> {
+  const merged = mergeCacheTail(stored, readCacheTail(tail))
+  if (merged.ttlMs !== stored.ttlMs || merged.lastMainAt !== stored.lastMainAt) await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerCache' }, merged)
+  return merged
+}
+
+/** `tail -n 300 <path>`'s output, or null when it fails or cannot start. */
+async function transcriptTail(run: ProcessRun, path: string): Promise<string | null> {
+  try {
+    const result = await run(['tail', '-n', '300', path])
+    return result.exitCode === 0 ? result.stdout : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * R5 (odd/tasks/router-cache-ttl.md): the cache clock at a stage decision.
+ * While its TTL or last request is unknown -- always, on an account whose
+ * `classic.Stop` never arrives -- the session's own transcript tail is read
+ * here and stored, so in practice once per session. The transcript is the
+ * session's own (config dir, slug of `$.session.root()`, session id), else
+ * the one `find` finds by session id under the config dir's projects (the
+ * root moved). `tailFailed`: a read was needed and none answered. Never
+ * throws: a failure leaves the clock as stored.
+ */
+async function readCacheClockAtStage($: EngineInterface): Promise<{ readonly clock: RouterCacheState; readonly tailFailed: boolean }> {
   const stored = await readCacheClock($)
-  const lastMainAt = stored.lastMainAt === null ? tail.lastMainAt : tail.lastMainAt === null ? stored.lastMainAt : Math.max(stored.lastMainAt, tail.lastMainAt)
-  const ttlMs = tail.ttlMs ?? stored.ttlMs
-  if (ttlMs === stored.ttlMs && lastMainAt === stored.lastMainAt) return
-  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerCache' }, { ttlMs, lastMainAt })
+  if (!cacheClockUnknown(stored)) return { clock: stored, tailFailed: false }
+  try {
+    const tail = await sessionTranscriptTail($)
+    if (tail === null) return { clock: stored, tailFailed: true }
+    return { clock: await storeCacheTail($, stored, tail), tailFailed: false }
+  } catch {
+    return { clock: stored, tailFailed: true }
+  }
+}
+
+/** R5: this session's transcript tail, from its own path or, failing that, the one `find` names; null when neither answers. POSIX `tail`/`find` only. */
+async function sessionTranscriptTail($: EngineInterface): Promise<string | null> {
+  const configDir = await memoryConfigDir($)
+  const sessionId = await readSessionId($)
+  if (configDir === null || sessionId === null) return null
+  const run = makeProcessRun($)
+  const own = await transcriptTail(run, transcriptPathOf({ configDir, sessionRoot: await $.session.root(), sessionId }))
+  if (own !== null) return own
+  const argv = transcriptFindArgv(configDir, sessionId)
+  if (argv === null) return null
+  const found = await run(argv)
+  const path = found.exitCode === 0 ? foundTranscriptPath(found.stdout, sessionId) : null
+  return path === null ? null : transcriptTail(run, path)
 }
 
 /**
@@ -1630,7 +1684,7 @@ async function decideAgentRoute($: EngineInterface, task: AgentRouteTask, mode: 
   const jev = judged.tier
   const keywordKind = workKindMode === 'off' ? null : keywordWorkKind(task.description)
   const kind: WorkKindJudgment | null = workKindMode === 'off' ? null : (judged.kind ?? (keywordKind === null ? null : { kind: keywordKind, confidence: null, source: 'keywords' }))
-  const decision = decideSubagent({
+  const decision: SubagentDecision = withJevPayment(decideSubagent({
     tiers,
     jev,
     parentModel: task.parentModel,
@@ -1642,7 +1696,7 @@ async function decideAgentRoute($: EngineInterface, task: AgentRouteTask, mode: 
     // active mode, like every other router decision.
     explicitModels: await readExplicitModels($),
     destinationKind: destination.destinationKind,
-  })
+  }), judged.payment)
   // A guard no longer makes the effort ineligible: it only stops it from
   // falling (0.6.2 F0, review finding 2).
   const guarded = decision.guard !== null
@@ -1743,7 +1797,7 @@ async function routeTeammate($: EngineInterface, e: Frozen<TurnStepInput>, mode:
   const route = await decideAgentRoute($, { description: task.description, prompt: task.prompt, parentModel: e.model, fixedModel, declared: definition.effort, cwd }, mode, routerState, options, project)
   const { applied, decision } = route.pending
   targets.set(agentId, { ...route.pending, logged: false, point: 'teammate', model: applied ? decision.model : null, teammateTask: 'matched' })
-  const routed = mode === 'active' && decision.reason !== 'jev-failed'
+  const routed = mode === 'active' && decision.reason !== 'jev-failed' && decision.reason !== 'jev-payment'
   running.agents.set(agentId, { id: agentId, type: listed.type, description: listed.description, label: applied ? subagentModelLabel(decision.model, route.tiers) : null, effort: null, effortSource: null, why: routed ? 'teammate-routed' : 'teammate', wouldUse: route.wouldUse })
   await persistRunning($, running)
 }
@@ -2009,11 +2063,11 @@ async function appendStewardDecision($: EngineInterface, atIso: string, line: st
   }
 }
 
-/** Jev's verdict on the turn that just ended, or null on any failure. The state carries prompt excerpts and counts, never file contents. */
-async function askStewardJudgment($: EngineInterface, options: PluginOptions, messages: readonly ActivityMessage[], contextTokens: number, turnsSinceCompaction: number | null): Promise<StewardJudgment | null> {
+/** Jev's verdict on the turn that just ended, or null on any failure (`payment`, G8: that failure was Jev's 402). The state carries prompt excerpts and counts, never file contents. */
+async function askStewardJudgment($: EngineInterface, options: PluginOptions, messages: readonly ActivityMessage[], contextTokens: number, turnsSinceCompaction: number | null): Promise<{ jev: StewardJudgment | null; payment: boolean }> {
   try {
     const apiKey = await resolveApiKey($, options)
-    if (apiKey === null) return null
+    if (apiKey === null) return { jev: null, payment: false }
     const prompts = messages.filter(isRealPrompt)
     const state = buildStewardState({
       lastPrompt: prompts.at(-1)?.text ?? '',
@@ -2023,9 +2077,10 @@ async function askStewardJudgment($: EngineInterface, options: PluginOptions, me
       turnsSinceCompaction,
     })
     const response = await callJev(apiKey, state, buildStewardQuestions(), { budgetMs: STEWARD_BUDGET_MS, fetchImpl: makeJevFetch($), sleepImpl: makeJevSleep($) })
-    return interpretSteward(response.answers)
-  } catch {
-    return null
+    return { jev: interpretSteward(response.answers), payment: false }
+  } catch (error) {
+    // G8: a 402 is a key without credit, named apart from any other failure.
+    return { jev: null, payment: isJevPaymentFailure(jevFailureOf(error)) }
   }
 }
 
@@ -2052,10 +2107,10 @@ async function stewardAfterTurn($: EngineInterface, options: PluginOptions, host
     const gate = stewardGate({ mode, isSubagent: false, contextTokens, mainWindow, threshold: settings.threshold, turnsSinceCompaction })
     if (!gate.ask || contextTokens === null) return
     const messages = await $.session.messages()
-    const jev = await askStewardJudgment($, options, messages, contextTokens, turnsSinceCompaction)
+    const { jev, payment } = await askStewardJudgment($, options, messages, contextTokens, turnsSinceCompaction)
     await rememberStewardJudgment($, jev, state.personTurns)
     const softActive = effectiveMode(moduleStewardState, switchMode(settings.softMode === 'active')) === 'active'
-    const decision = decideSteward({ jev, hardLimit: gate.hardLimit, softLimit: gate.softLimit, softActive })
+    const decision = withStewardPayment(decideSteward({ jev, hardLimit: gate.hardLimit, softLimit: gate.softLimit, softActive }), payment)
     // The soft tier ships measured: while its switch is on measure, a turn it
     // would have compacted is decided as before and logged as `wouldFire`.
     const wouldFire: StewardTier | null = !softActive && !decision.compact && softTierFires({ jev, softLimit: gate.softLimit }) ? 'soft-400k' : null

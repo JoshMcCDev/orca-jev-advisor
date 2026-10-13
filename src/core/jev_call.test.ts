@@ -4,7 +4,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { callJev, jevFailureOf, JevRequestError, JevTimeoutError, type CallJevOptions, type JevFetch, type JevFetchResponse, type JevFailure } from "./jev.ts";
+import { callJev, isJevPaymentFailure, jevFailureOf, JevRequestError, JevTimeoutError, type CallJevOptions, type JevFetch, type JevFetchResponse, type JevFailure } from "./jev.ts";
 
 const OK_BODY = JSON.stringify({ model: "jev-latest", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } });
 
@@ -100,6 +100,22 @@ test("the class survives the existing error types", () => {
   assert.deepEqual(jevFailureOf(new JevRequestError("x", null)), { kind: "network" });
   assert.deepEqual(jevFailureOf(new JevRequestError("x", 403)), { kind: "http4xx", status: 403 });
   assert.equal(jevFailureOf(new Error("other")), null);
+});
+
+test("G8: a 402 is a key with no credit or plan; any other failure, or another error, is not", async () => {
+  const h = harness([{ status: 402 }]);
+  let thrown: unknown = null;
+  try {
+    await callJev("k", {}, {}, h.options);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(isJevPaymentFailure(jevFailureOf(thrown)), true);
+  assert.equal(h.fetchCalls(), 1, "never retried");
+  for (const other of [new JevRequestError("x", 401), new JevRequestError("x", 403), new JevRequestError("x", 500), new JevRequestError("x", null), new JevTimeoutError(4000), new Error("other")]) {
+    assert.equal(isJevPaymentFailure(jevFailureOf(other)), false, other.message);
+  }
+  assert.equal(isJevPaymentFailure(null), false);
 });
 
 test("a 5xx is retried once and the retry's answer is used", async () => {

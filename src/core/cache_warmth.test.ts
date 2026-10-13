@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CACHE_TTL_1H_MS, CACHE_TTL_5M_MS, cacheWarm, cacheWarmth, parseCacheClock, readCacheTail } from "./cache_warmth.ts";
+import { CACHE_TTL_1H_MS, CACHE_TTL_5M_MS, cacheClockUnknown, cacheUnknownOf, cacheWarm, cacheWarmth, foundTranscriptPath, mergeCacheTail, parseCacheClock, readCacheTail, transcriptFindArgv, transcriptPathOf } from "./cache_warmth.ts";
 
 const AT = "2026-10-12T10:00:00.000Z";
 const AT_MS = Date.parse(AT);
@@ -69,4 +69,52 @@ test("parseCacheClock keeps only finite numbers, else unknown", () => {
   assert.deepEqual(parseCacheClock({ ttlMs: CACHE_TTL_1H_MS, lastMainAt: AT_MS }), { ttlMs: CACHE_TTL_1H_MS, lastMainAt: AT_MS });
   assert.deepEqual(parseCacheClock({ ttlMs: "1h", lastMainAt: Number.NaN }), { ttlMs: null, lastMainAt: null });
   assert.deepEqual(parseCacheClock(undefined), { ttlMs: null, lastMainAt: null });
+});
+
+// ---------------------------------------------------------------------------
+// R5 (odd/tasks/router-cache-ttl.md): the router reads the transcript tail
+// itself, since `classic.Stop` never arrives on Team/Enterprise accounts.
+// ---------------------------------------------------------------------------
+
+test("R5: the transcript sits under the config dir's projects, in the slug of where the session started", () => {
+  assert.equal(
+    transcriptPathOf({ configDir: "/home/dev/.claude", sessionRoot: "/home/dev/Projects/my.app", sessionId: "4f1c-9a" }),
+    "/home/dev/.claude/projects/-home-dev-Projects-my-app/4f1c-9a.jsonl",
+  );
+  assert.equal(transcriptPathOf({ configDir: "/acc/auth/", sessionRoot: "/w", sessionId: "s1" }), "/acc/auth/projects/-w/s1.jsonl");
+});
+
+test("R5: the fallback looks the session up by id two levels under projects, with no shell", () => {
+  assert.deepEqual(transcriptFindArgv("/home/dev/.claude", "4f1c-9a"), ["find", "/home/dev/.claude/projects", "-maxdepth", "2", "-type", "f", "-name", "4f1c-9a.jsonl"]);
+});
+
+test("R5: a session id that is not a plain id is never handed to find as a pattern", () => {
+  for (const id of ["", "*", "a/b", "../x", "s?1", "s[1]"]) assert.equal(transcriptFindArgv("/c", id), null, id);
+});
+
+test("R5: find's first line that is this session's transcript is the one read", () => {
+  assert.equal(foundTranscriptPath("/c/projects/-w/s1.jsonl\n/c/projects/-v/s1.jsonl\n", "s1"), "/c/projects/-w/s1.jsonl");
+  assert.equal(foundTranscriptPath("\n/c/projects/-w/other.jsonl\n", "s1"), null);
+  assert.equal(foundTranscriptPath("", "s1"), null);
+});
+
+test("R5: the clock is read while its TTL or its last request is unknown", () => {
+  assert.equal(cacheClockUnknown({ ttlMs: null, lastMainAt: AT_MS }), true);
+  assert.equal(cacheClockUnknown({ ttlMs: CACHE_TTL_1H_MS, lastMainAt: null }), true);
+  assert.equal(cacheClockUnknown({ ttlMs: CACHE_TTL_1H_MS, lastMainAt: AT_MS }), false);
+});
+
+test("R5: a tail merges into the stored clock: its TTL when it has one, the later request time", () => {
+  const stored = { ttlMs: null, lastMainAt: AT_MS + 500 };
+  assert.deepEqual(mergeCacheTail(stored, { ttlMs: CACHE_TTL_5M_MS, lastMainAt: AT_MS }), { ttlMs: CACHE_TTL_5M_MS, lastMainAt: AT_MS + 500 });
+  assert.deepEqual(mergeCacheTail({ ttlMs: CACHE_TTL_1H_MS, lastMainAt: null }, { ttlMs: null, lastMainAt: AT_MS }), { ttlMs: CACHE_TTL_1H_MS, lastMainAt: AT_MS });
+  assert.deepEqual(mergeCacheTail({ ttlMs: null, lastMainAt: null }, { ttlMs: null, lastMainAt: null }), { ttlMs: null, lastMainAt: null });
+});
+
+test("R6: an unknown cache says why: the tail read failed, else no TTL, else no last request; a known one says nothing", () => {
+  assert.equal(cacheUnknownOf({ ttlMs: null, lastMainAt: null }, true), "tail-failed");
+  assert.equal(cacheUnknownOf({ ttlMs: null, lastMainAt: AT_MS }, false), "no-ttl");
+  assert.equal(cacheUnknownOf({ ttlMs: null, lastMainAt: null }, false), "no-ttl");
+  assert.equal(cacheUnknownOf({ ttlMs: CACHE_TTL_5M_MS, lastMainAt: null }, false), "no-last-request");
+  assert.equal(cacheUnknownOf({ ttlMs: CACHE_TTL_5M_MS, lastMainAt: AT_MS }, false), null);
 });

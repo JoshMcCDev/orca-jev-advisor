@@ -219,7 +219,12 @@ export function interpretSteward(answers: Record<string, Answer>): StewardJudgme
 // ---------------------------------------------------------------------------
 
 /** Track S: `pre-cold` is the idle tier firing (or, measured, would); `pre-cold-skip` a due wake it stood down on. */
-export type StewardDecisionKind = "boundary" | "new-topic" | "hard-limit" | "soft-limit" | "mid-task" | "low-confidence" | "jev-failed" | "pre-cold" | "pre-cold-skip";
+export type StewardDecisionKind = "boundary" | "new-topic" | "hard-limit" | "soft-limit" | "mid-task" | "low-confidence" | "jev-failed" | "jev-payment" | "pre-cold" | "pre-cold-skip";
+
+/** G8: a steward decision made without Jev because Jev answered 402 (no credit) is named `jev-payment`. */
+export function withStewardPayment(decision: StewardDecision, payment: boolean): StewardDecision {
+  return payment && decision.decision === "jev-failed" ? { ...decision, decision: "jev-payment" } : decision;
+}
 
 export interface StewardDecision {
   readonly decision: StewardDecisionKind;

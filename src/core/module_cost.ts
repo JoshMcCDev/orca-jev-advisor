@@ -105,14 +105,14 @@ export function toolJevCalls(row: unknown): JevCallCount {
 
 /**
  * model-router-decisions: a row Jev answered carries its confidence; a
- * `jev-failed` row is a call that failed. An engine-started turn
+ * `jev-failed` or `jev-payment` (G8: a 402) row is a call that failed. An engine-started turn
  * (routeEngineTurn) writes a row with neither and asked nothing. A failed
  * call whose guards restored the floor also has neither, so it reads as no
  * call (a possible undercount of failures, never of answers).
  */
 export function routerJevCalls(row: unknown): JevCallCount {
   if (!isRecord(row)) return NONE;
-  if (row["reason"] === "jev-failed") return { calls: 1, failures: 1, latencyMs: [] };
+  if (row["reason"] === "jev-failed" || row["reason"] === "jev-payment") return { calls: 1, failures: 1, latencyMs: [] };
   if (numberOrNull(row["confidence"]) !== null) return { calls: 1, failures: 0, latencyMs: [] };
   return NONE;
 }

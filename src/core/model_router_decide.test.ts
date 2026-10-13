@@ -587,6 +587,29 @@ test("R1: a stage row says whether the cache was warm (null unknown), and a row 
   assert.equal("cacheWarm" in routerDecisionRecord(base), false);
 });
 
+test("R6: a row whose cache is unknown says why; a known or absent one carries no cacheUnknown", () => {
+  const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, applied: false, quotaBand: "normal" } as const;
+  for (const reason of ["no-ttl", "no-last-request", "tail-failed"] as const) {
+    assert.equal(routerDecisionRecord({ ...base, cacheWarm: null, cacheUnknown: reason }).cacheUnknown, reason);
+  }
+  assert.equal("cacheUnknown" in routerDecisionRecord({ ...base, cacheWarm: true, cacheUnknown: "no-ttl" }), false);
+  assert.equal("cacheUnknown" in routerDecisionRecord({ ...base, cacheWarm: false, cacheUnknown: null }), false);
+  assert.equal("cacheUnknown" in routerDecisionRecord(base), false);
+});
+
+test("R7: a row given a quality switch's cost logs it as switchCost and nothing else changes; a break-even's own cost wins", () => {
+  const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, applied: true, quotaBand: "normal", cacheWarm: true } as const;
+  const without = routerDecisionRecord(base);
+  const withCost = routerDecisionRecord({ ...base, switchCost: 0.64 });
+  assert.equal(without.switchCost, null);
+  assert.deepEqual(withCost, { ...without, switchCost: 0.64 });
+  assert.equal(routerDecisionRecord({ ...base, switchCost: null }).switchCost, null);
+  const breakEven = { contextTokens: 80_000, switchCost: 0.16, stepSaving: 0.02, expectedSteps: 12 };
+  assert.equal(routerDecisionRecord({ ...base, breakEven, switchCost: 0.64 }).switchCost, 0.16);
+});
+
 test("R2: a cold switch logs wouldApplyCold in measure and appliedCold in active; no other row carries either", () => {
   const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
   const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, quotaBand: "normal", cacheWarm: false } as const;

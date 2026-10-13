@@ -173,6 +173,15 @@ const LEGACY_TOOL_MEASUREMENTS_PATH = `${CACHE_DIR}/mod-tools-measurements.jsonl
 /** The engine's own limit: `$.fs.read` and `$.fs.write` reject above 4 MiB. */
 const FS_LIMIT_BYTES = 4 * 1024 * 1024;
 
+/** G8: a fetchQueue entry the fake fetch answers with this HTTP status (402: the key's account has no credit). */
+function httpFailure(status: number): { readonly httpStatus: number } {
+  return { httpStatus: status };
+}
+
+function isHttpFailure(value: unknown): value is { readonly httpStatus: number } {
+  return typeof value === "object" && value !== null && "httpStatus" in value && typeof value.httpStatus === "number";
+}
+
 /** Builds a fake `$` (EngineInterface) backed by `host`'s mutable state. */
 function makeFakeEngine(host: FakeHost): unknown {
   let clockNow = Date.parse("2026-09-25T10:00:00.000Z");
@@ -268,6 +277,8 @@ function makeFakeEngine(host: FakeHost): unknown {
         host.fetchCalls.push({ url, body: init?.body });
         const next = host.fetchQueue.shift();
         if (next === undefined) throw new Error("fake fetch: response queue exhausted -- a test queued fewer canned Jev answers than the code under test called");
+        // G8: a queued `httpFailure(status)` answers that HTTP status instead of a Jev answer.
+        if (isHttpFailure(next)) return { ok: false, status: next.httpStatus, headers: {}, text: "" } satisfies FakeHttpResponse;
         const response: FakeHttpResponse = { ok: true, status: 200, headers: {}, text: JSON.stringify(next) };
         return response;
       },
@@ -1791,6 +1802,110 @@ test("R2: each main step stamps the last main request time; a subagent step does
 });
 
 // ---------------------------------------------------------------------------
+// R5 (odd/tasks/router-cache-ttl.md): on Team/Enterprise accounts the
+// built-in security plugin withholds `classic.*` events, so `classic.Stop`
+// never reads the TTL. The router reads the transcript tail itself.
+// ---------------------------------------------------------------------------
+
+/** Where Claude Code keeps this fake session's transcript: `<CLAUDE_CONFIG_DIR>/projects/<slug of CWD>/session-1.jsonl`. */
+const OWN_TRANSCRIPT = `${ACCOUNT_DIR}/projects/-home-dev-Projects-sandbox/session-1.jsonl`;
+
+/** Three one-step turns (complex, simple, simple) with no Stop at all, and a gap of `gapMs` before the third. `withConfigDir` false leaves CLAUDE_CONFIG_DIR unset (`~/.claude`). Returns the stage rows. */
+async function stoplessTurns(host: FakeHost, gapMs: number, withConfigDir = true): Promise<Record<string, unknown>[]> {
+  seedRouterAccount(host);
+  if (!withConfigDir) host.env.delete("CLAUDE_CONFIG_DIR");
+  host.fetchQueue.push(tierAnswer("complex"), tierAnswer("simple"), tierAnswer("simple"));
+  const { handlers, engine } = loadHooks(host);
+  await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 1);
+  await playTurn(host, handlers, engine, 2, "thanks, now list the files you touched", 1);
+  host.clockOffsetMs += gapMs;
+  await playTurn(host, handlers, engine, 3, "and summarise them in one line", 1);
+  return routerDecisionLines(host).filter((row) => row.point === "stage");
+}
+
+test("R5: with classic.Stop never fired, the router reads the TTL from the session's own transcript, so both stage rows know the cache", async () => {
+  const host = makeFakeHost();
+  host.transcripts.set(OWN_TRANSCRIPT, `${transcriptRow("5m")}\n`);
+  const stages = await stoplessTurns(host, 6 * 60_000);
+  assert.deepEqual(stages.map((row) => row.cacheWarm), [true, false]);
+  assert.ok(host.processCalls.includes(`tail -n 300 ${OWN_TRANSCRIPT}`));
+  assert.equal((host.state.get("routerCache") as { ttlMs: unknown }).ttlMs, 5 * 60_000);
+  assert.equal(host.processCalls.filter((call) => call.startsWith("tail ")).length, 1, "read once: the clock is known after it");
+});
+
+test("R5: without CLAUDE_CONFIG_DIR the config dir is ~/.claude, and a transcript elsewhere under its projects is found by session id", async () => {
+  const host = makeFakeHost();
+  const moved = "/home/dev/.claude/projects/-home-dev-Projects-old-place/session-1.jsonl";
+  host.transcripts.set(moved, `${transcriptRow("1h")}\n`);
+  host.processHandler = (argv) => (argv[0] === "find" ? { exitCode: 0, stdout: `${moved}\n`, stderr: "" } : undefined);
+  const stages = await stoplessTurns(host, 6 * 60_000, false);
+  assert.deepEqual(stages.map((row) => row.cacheWarm), [true, true]);
+  assert.ok(host.processCalls.includes("tail -n 300 /home/dev/.claude/projects/-home-dev-Projects-sandbox/session-1.jsonl"), "the session's own path first");
+  assert.ok(host.processCalls.includes("find /home/dev/.claude/projects -maxdepth 2 -type f -name session-1.jsonl"));
+  assert.ok(host.processCalls.includes(`tail -n 300 ${moved}`));
+});
+
+test("R5: a transcript that cannot be read leaves the cache unknown and the turn routed as before", async () => {
+  const host = makeFakeHost();
+  host.processHandler = (argv) => {
+    if (argv[0] === "find") throw new Error("fake host: find cannot start");
+    return undefined;
+  };
+  const stages = await stoplessTurns(host, 6 * 60_000);
+  assert.deepEqual(stages.map((row) => row.cacheWarm), [null, null]);
+  assert.deepEqual(stages.map((row) => row.cacheUnknown), ["tail-failed", "tail-failed"]);
+  assert.deepEqual(stages.map((row) => row.reason), ["hysteresis", "break-even"]);
+});
+
+test("R6: a transcript with no cache write says no-ttl; a known cache carries no cacheUnknown", async () => {
+  const host = makeFakeHost();
+  host.transcripts.set(OWN_TRANSCRIPT, `${JSON.stringify({ type: "user", timestamp: "2026-09-25T10:00:00.000Z" })}\n`);
+  const stages = await stoplessTurns(host, 6 * 60_000);
+  assert.deepEqual(stages.map((row) => [row.cacheWarm, row.cacheUnknown]), [[null, "no-ttl"], [null, "no-ttl"]]);
+  const known = makeFakeHost();
+  known.transcripts.set(OWN_TRANSCRIPT, `${transcriptRow("5m")}\n`);
+  for (const row of await stoplessTurns(known, 6 * 60_000)) assert.equal(hasKey(row, "cacheUnknown"), false);
+});
+
+test("R7: an applied upgrade logs the rewrite it paid, and a known cold cache makes it 0 without holding the upgrade", async () => {
+  for (const [gapMs, cost] of [[60_000, 0.64], [6 * 60_000, 0]] as const) {
+    const host = makeFakeHost();
+    seedRouterAccount(host);
+    host.transcripts.set(OWN_TRANSCRIPT, `${transcriptRow("5m")}\n`);
+    host.fetchQueue.push(tierAnswer("simple"), tierAnswer("complex"));
+    const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+    const turn1 = await playTurn(host, handlers, engine, 1, "rename userId to accountId", 1);
+    assert.equal(turn1.model, "claude-haiku-4-5-20251001");
+    host.clockOffsetMs += gapMs;
+    const turn2 = await playTurn(host, handlers, engine, 2, "design the cache invalidation across both services", 1);
+    assert.equal(turn2.model, "claude-opus-5-5", "an upgrade never waits");
+    const stage = routerDecisionLines(host).at(-1);
+    assert.equal(stage?.reason, "upgrade");
+    assert.equal(stage?.applied, true);
+    assert.equal(stage?.cacheWarm, gapMs < 5 * 60_000);
+    assert.ok(Math.abs((stage?.switchCost as number) - cost) < 1e-9, `switchCost ${String(stage?.switchCost)}`);
+    assert.equal(stage?.stepSaving, null, "a quality switch has no saving");
+  }
+});
+
+test("G8: a Jev answer of 402 (no credit) names the router rows jev-payment, at start and at a stage, instead of jev-failed", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.fetchQueue.push(httpFailure(402), httpFailure(402));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  const turn1 = await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 1);
+  const turn2 = await playTurn(host, handlers, engine, 2, "thanks, now list the files you touched", 1);
+  assert.deepEqual([turn1.model, turn2.model], ["claude-opus-5-5", "claude-opus-5-5"], "nothing changes, as with any Jev failure");
+  assert.deepEqual(routerDecisionLines(host).map((row) => [row.point, row.reason]), [["start", "jev-payment"], ["stage", "jev-payment"]]);
+  const other = makeFakeHost();
+  seedRouterAccount(other);
+  other.fetchQueue.push(httpFailure(401));
+  const loaded = loadHooks(other);
+  await playTurn(other, loaded.handlers, loaded.engine, 1, "design it", 1);
+  assert.equal(routerDecisionLines(other)[0]?.reason, "jev-failed", "any other failure stays jev-failed");
+});
+
+// ---------------------------------------------------------------------------
 // JEV-060 slice 2, T8: subagent routing (point B) on agent.spawn.
 // ---------------------------------------------------------------------------
 
@@ -1834,6 +1949,20 @@ test("router, active, subagent: no explicit model -- the tier's full id", async 
   assert.equal(decision?.point, "subagent");
   assert.equal(decision?.applied, true);
   assert.equal(JSON.stringify(decision).includes("summarise"), false, "no prompt text in the log");
+});
+
+test("G8: a subagent judged into a 402 logs jev-payment and spawns as it came", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.fetchQueue.push(httpFailure(402));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  const event = spawnEvent();
+  assert.deepEqual(await spawnThrough(handlers, engine, event), event);
+  await stepThrough(handlers, engine, turnStepEvent({ agentId: "agent-1", turnId: "sub-1", index: 0, model: "claude-opus-5-5", effort: undefined }));
+  const [decision] = routerDecisionLines(host);
+  assert.equal(decision?.point, "subagent");
+  assert.equal(decision?.reason, "jev-payment");
+  assert.equal(decision?.applied, false);
 });
 
 test("router, measure, subagent: logs, changes nothing", async () => {

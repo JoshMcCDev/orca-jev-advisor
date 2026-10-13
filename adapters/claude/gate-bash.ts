@@ -129,7 +129,7 @@ import { discardsUncommittedWork, someSegmentMatches, splitOnCommandSeparators, 
 import { resolveImplicitPushDestination, resolvePushRemoteIsLocal } from '../../src/core/push_remote.ts'
 import { isObviouslySafeCommand, mentionsRatherThanRuns } from '../../src/core/gate_safe_command.ts'
 import { decideNoKeyNotice } from '../../src/core/gate_key_notice.ts'
-import { decideUnreachableNotice } from '../../src/core/gate_unreachable_notice.ts'
+import { decideUnreachableNotice, unreachableNoticeKey } from '../../src/core/gate_unreachable_notice.ts'
 import { pruneGateCache } from '../../src/core/gate_cache.ts'
 import { commandWritesGateOwnFile, gateOwnFiles } from '../../src/core/gate_own_files.ts'
 import type { GateCacheEntry } from '../../src/core/gate_cache.ts'
@@ -2618,7 +2618,8 @@ async function main(): Promise<void> {
     const previousUnreachableFailures = readUnreachableFailures()
     const unreachableNotice = decideUnreachableNotice(false, previousUnreachableFailures, UNREACHABLE_WARN_THRESHOLD)
     if (unreachableNotice.nextConsecutiveFailures !== previousUnreachableFailures) writeUnreachableFailures(unreachableNotice.nextConsecutiveFailures)
-    if (unreachableNotice.shouldWarn) passThroughWithNotice(t('jevUnreachable'))
+    // G8: a 402 is the key's account without credit, said as such; the row above keeps it countable, with the 402 in its failure.
+    if (unreachableNotice.shouldWarn) passThroughWithNotice(t(unreachableNoticeKey(outcome.failure)))
     passThrough()
   }
 

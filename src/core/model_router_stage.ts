@@ -406,6 +406,7 @@ export interface StageDecisionInput {
 
 export type StageReason =
   | "jev-failed"
+  | "jev-payment"
   | "same"
   | "upgrade"
   | "low-confidence"
@@ -556,6 +557,29 @@ export function decideStage(input: StageDecisionInput): StageDecision {
 export function switchedByColdCache(input: StageDecisionInput, decision: StageDecision): boolean {
   if (input.cacheWarm !== false || !decision.changed) return false;
   return !decideStage({ ...input, cacheWarm: true }).changed;
+}
+
+/** R7: the reasons that switch for quality -- applied at once, never weighed by break-even. */
+const QUALITY_SWITCHES: readonly StageReason[] = ["upgrade", "floor-restore", "effort-raise"];
+
+/**
+ * R7 (odd/tasks/router-cache-ttl.md): what a quality switch paid to rewrite
+ * the context -- the last main step's context at the cache-write price of
+ * the model it moved to (an effort is cached apart, at the same price). 0
+ * when the cache is known cold, null when the context or that price is
+ * unknown, and null for any other decision (a downgrade or an effort
+ * lowering logs its own, in its break-even). Logged only: the decision never
+ * waits on it.
+ */
+export function qualitySwitchCost(input: StageDecisionInput, decision: StageDecision): number | null {
+  if (!decision.changed || !QUALITY_SWITCHES.includes(decision.reason)) return null;
+  if (input.usage === null) return null;
+  const rank = modelRank(input.tiers, decision.model);
+  const tier = rank === null ? null : (ROUTER_TIERS[rank] ?? null);
+  const prices = tier === null ? null : input.tiers[tier].prices;
+  if (prices === null) return null;
+  if (input.cacheWarm === false) return 0;
+  return input.usage.contextTokens * ratesForPrompt(prices, input.usage.contextTokens).cacheWrite * PER_TOKEN;
 }
 
 /**

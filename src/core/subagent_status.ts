@@ -203,7 +203,7 @@ export interface SubagentWhyInput {
 
 export function subagentWhy(input: SubagentWhyInput): SubagentWhy {
   const { decision, applied, explicit } = input;
-  if (decision === null || decision.reason === "jev-failed") return explicit ? "explicit" : decision === null ? "inherited" : "no-jev";
+  if (decision === null || decision.reason === "jev-failed" || decision.reason === "jev-payment") return explicit ? "explicit" : decision === null ? "inherited" : "no-jev";
   switch (decision.reason) {
     case "explicit":
       return "explicit";
