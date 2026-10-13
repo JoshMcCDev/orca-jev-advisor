@@ -186,7 +186,7 @@ import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, inter
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
 import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
 import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
-import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciNoteText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, isCiWatchNote, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
+import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, CI_TYPICAL_FIELDS, ciBandRows, ciBashCallFrom, ciFinishedText, ciNoteText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, isCiWatchNote, newCiWatchProgress, noteCiLookup, parseCiBandRows, parseCiRuns, parsePrMergeView, parseTypicalSeconds } from '../../../../src/core/ci_watch.ts'
 import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress, CiWatchRecordInput } from '../../../../src/core/ci_watch.ts'
 import { autoMemoryDir, claudeConfigDir, classifyHealthOutcome, detectMemoryBackend, engramServerFromTools, engramUsable, parseEnabledEngramPlugin, parseUserMcpEngram } from '../../../../src/core/memory_detect.ts'
 import type { HealthCall, HealthOutcome, MemoryBackendDecision } from '../../../../src/core/memory_detect.ts'
@@ -2592,6 +2592,9 @@ interface CiWatch {
   /** The agent's own CI polls and long sleeps made while this watch was open: what a note would have replaced. */
   agentPolls: number
   agentSleeps: number
+  /** How long the workflow being watched usually takes; asked once, null while unknown. */
+  typical: { readonly workflow: string; readonly seconds: number } | null
+  typicalAsked: boolean
 }
 
 /** A note for the agent waiting for the session to be idle, with the decision row its fate will complete. */
@@ -2630,7 +2633,7 @@ async function ciWatchObserve($: EngineInterface, host: CiWatchHost, command: st
     const base = await $.session.root()
     const triggers = detectCiTriggers(call, base, await resolveHomeDir($))
     triggers.forEach((trigger, index) => {
-      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0, progress: newCiWatchProgress(), ghCalls: 0, agentPolls: 0, agentSleeps: 0 }
+      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0, progress: newCiWatchProgress(), ghCalls: 0, agentPolls: 0, agentSleeps: 0, typical: null, typicalAsked: false }
       host.watches.push(watch)
       $.clock.after(CI_START_DELAY_MS, () => ciWatchStart($, host, watch))
     })
@@ -2647,7 +2650,7 @@ function ciWatchDrop(host: CiWatchHost, watch: CiWatch): void {
 /** Mirrors the band's rows to `$.state`; the band re-renders on the write. Best-effort. */
 async function ciPublishRows($: EngineInterface, host: CiWatchHost): Promise<void> {
   try {
-    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' }, { rows: host.rows.map((row) => ({ ...row, failed: [...row.failed] })) })
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' }, { rows: host.rows.map((row) => ({ ...row, failed: [...row.failed], running: [...row.running] })) })
   } catch {
     // The band is never a reason to fail a watch.
   }
@@ -2664,8 +2667,36 @@ function ciRemoveRow(host: CiWatchHost, id: string): void {
   if (at >= 0) host.rows.splice(at, 1)
 }
 
-function ciWatchingRow(watch: CiWatch, seen: number, running: number): CiBandRow {
-  return { id: watch.id, sha7: (watch.sha ?? '').slice(0, 7), branch: watch.branch, status: 'watching', startedAtMs: watch.startedAtMs, done: seen - running, total: seen, failed: [], finishedAtMs: null }
+function ciWatchingRow(watch: CiWatch, seen: number, running: number, runningNames: readonly string[]): CiBandRow {
+  return {
+    id: watch.id,
+    sha7: (watch.sha ?? '').slice(0, 7),
+    branch: watch.branch,
+    status: 'watching',
+    startedAtMs: watch.startedAtMs,
+    done: seen - running,
+    total: seen,
+    failed: [],
+    running: [...runningNames],
+    typicalWorkflow: watch.typical?.workflow ?? null,
+    typicalSeconds: watch.typical?.seconds ?? null,
+    durationMs: null,
+    finishedAtMs: null,
+  }
+}
+
+/** Asks once how long a workflow usually takes: the median of its last successful runs. One `gh` call, counted in the watch and in its ceiling; any failure leaves the time unknown. */
+async function ciLookupTypical($: EngineInterface, watch: CiWatch, workflow: string): Promise<void> {
+  watch.typicalAsked = true
+  watch.progress = noteCiLookup(watch.progress)
+  try {
+    const answer = await $.process.run(['gh', 'run', 'list', '--workflow', workflow, '--status', 'success', '--limit', '10', '--json', CI_TYPICAL_FIELDS], { cwd: watch.repo ?? watch.dir, timeoutMs: CI_POLL_TIMEOUT_MS })
+    watch.ghCalls += 1
+    const seconds = answer.exitCode === 0 ? parseTypicalSeconds(answer.stdout) : null
+    if (seconds !== null) watch.typical = { workflow, seconds }
+  } catch {
+    // The usual time is only a help: the band goes without it.
+  }
 }
 
 /** The timer a trigger arms: finds the repository and the head sha, then polls. A directory that is no repository, a merge with no merge commit yet and any failure drop the watch quietly. */
@@ -2700,7 +2731,7 @@ async function ciWatchStart($: EngineInterface, host: CiWatchHost, watch: CiWatc
     watch.repo = repo
     watch.sha = sha
     watch.startedAtMs = await $.clock.now()
-    ciSetRow(host, ciWatchingRow(watch, 0, 0))
+    ciSetRow(host, ciWatchingRow(watch, 0, 0, []))
     await ciPublishRows($, host)
     await ciWatchTick($, host, watch)
   } catch {
@@ -2728,7 +2759,9 @@ async function ciWatchTick($: EngineInterface, host: CiWatchHost, watch: CiWatch
     const step = ciWatchStep(watch.progress, runs, { sha: watch.sha, sinceMs: watch.startedAtMs })
     watch.progress = step.progress
     if (step.kind === 'wait') {
-      ciSetRow(host, ciWatchingRow(watch, step.seen, step.running))
+      const first = step.runningNames[0]
+      if (!watch.typicalAsked && first !== undefined) await ciLookupTypical($, watch, first)
+      ciSetRow(host, ciWatchingRow(watch, step.seen, step.running, step.runningNames))
       await ciPublishRows($, host)
       $.clock.after(step.delayMs, () => ciWatchTick($, host, watch))
       return
@@ -2769,10 +2802,10 @@ async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWat
     ciRemoveRow(host, watch.id)
     await ciPublishRows($, host)
   } else {
-    const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, finishedAtMs }
+    const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0, []), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, durationMs: verdict.durationMs, finishedAtMs }
     ciSetRow(host, row)
     await ciPublishRows($, host)
-    $.ui.toast(ciFinishedText(await resolveLocale($), row), { timeoutMs: CI_TOAST_MS })
+    $.ui.toast(`${ciFinishedText(await resolveLocale($), row)}${verdict.url.length > 0 ? ` · ${verdict.url}` : ''}`, { timeoutMs: CI_TOAST_MS })
     $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
   }
   const at = new Date(finishedAtMs).toISOString()
