@@ -34,6 +34,8 @@ import { fileURLToPath } from "node:url";
 import { register } from "./hooks/index.ts";
 import { walkModSkillsClosure } from "../../../src/core/mod_skills_copy.ts";
 import { isForkSampled } from "../../../src/core/memory_shadow.ts";
+import { memorySpoolRoot } from "../../../src/core/memory_active.ts";
+import { enqueueSave, spoolDonePath, spoolItemPath } from "../../../src/core/memory_spool.ts";
 
 // ---------------------------------------------------------------------------
 // A minimal fake of the Claude Code function-hooks host: only the `on`
@@ -5075,6 +5077,7 @@ test("M8 memory shadow (the default): a sampled UPDATE turn asks Haiku once, for
     account: "x",
     project: "sandbox",
     mode: "shadow",
+    effective: "shadow",
     sessionId: "session-1",
     backend: "live",
     decidedBy: "tools+health",
@@ -5099,6 +5102,13 @@ test("M8 memory shadow (the default): a sampled UPDATE turn asks Haiku once, for
     mainCandidates: 1,
     mainAutoMemoryWrites: 0,
     agreement: "both",
+    spooled: 0,
+    written: 0,
+    updated: 0,
+    backups: 0,
+    dropped: 0,
+    writeFailures: 0,
+    lockHeld: false,
   });
   assert.doesNotMatch(JSON.stringify(row), /Spanish|vos|tú/, "no memory text or title in the row");
   assertNothingWritten(host, seeded);
@@ -5136,6 +5146,7 @@ test("M8 memory off: no detection, no Haiku call, no fork, no row; nothing sched
   setModules(host, { memory: "off", "verify-done": "off", steward: "off" });
   host.modelQueue.push(GATE_UPDATE);
   host.forkQueue.push(DRAFT_REPLY);
+  const seeded = new Set(host.files.keys());
   const { handlers, engine } = loadHooks(host);
   await startSessionWith(handlers, engine);
   const answer = { result: "saved" };
@@ -5151,6 +5162,7 @@ test("M8 memory off: no detection, no Haiku call, no fork, no row; nothing sched
   assert.equal(host.mcpCalls.length, 0);
   assert.equal(host.files.has(MEMORY_ROWS_PATH), false);
   assert.equal(host.state.has("memory"), false);
+  assertNothingWritten(host, seeded);
 });
 
 test("M8 memory: a timer already scheduled does nothing once the module went off", async () => {
@@ -5359,4 +5371,388 @@ test("M8 memory: what was seen belongs to its own turn; the next turn starts fro
   await completeTurn(handlers, engine, { turnId: "turn-b" });
   await runTimers(host);
   assert.deepEqual(memoryRows(host).map((row) => row.mainEngramSaves), [1, 0]);
+});
+
+// ---------------------------------------------------------------------------
+// Memory in Active, files store (odd/tasks/memory-active-files.md, A4): with
+// no Engram, or Engram configured but down, every UPDATE is drafted; each
+// save is spooled before any memory file is touched, then written with its
+// MEMORY.md line, and the item moves to done/. An existing file is copied
+// byte for byte to .memory-backup before it is rewritten. With Engram live,
+// Active keeps measuring and writes nothing. `$.process.run` acts on the
+// fake files as the shell would (mkdir, mv, cp, rm, kill -0).
+// ---------------------------------------------------------------------------
+
+const MEMORY_SPOOL_ROOT = memorySpoolRoot(CACHE_DIR, MEMORY_DIR);
+const MERGE_EMAIL_PATH = `${MEMORY_DIR}/merge-email.md`;
+const DRAFT_UPDATE_TEXT = "---\nname: merge-email\ndescription: \"use the noreply address\"\nmetadata:\n  type: feedback\n---\n\nUse merge-bot@example.com.\n";
+
+function draftReply(draft: { saves?: unknown[]; updates?: unknown[]; deletes?: unknown[] }): unknown {
+  return { isAnswered: true, text: JSON.stringify({ saves: draft.saves ?? [], updates: draft.updates ?? [], deletes: draft.deletes ?? [] }), usage: USAGE(12, 140, 180_000) };
+}
+
+/** `$.process.run` for the memory write path: the shell's mkdir, mv, cp and rm on the fake files, and kill -0 answering `alive`. */
+function memoryShell(host: FakeHost, options: { alive?: boolean; failCopy?: boolean } = {}): void {
+  const done = { exitCode: 0, stdout: "", stderr: "" };
+  const failed = { exitCode: 1, stdout: "", stderr: "no such file" };
+  host.processHandler = (argv) => {
+    const [command, ...rest] = argv;
+    const paths = rest.filter((arg) => !arg.startsWith("-"));
+    const from = paths[0] ?? "";
+    const to = paths[1] ?? "";
+    if (command === "mkdir") return done;
+    if (command === "kill") return options.alive === true ? done : failed;
+    if (command === "rm") {
+      host.files.delete(from);
+      return done;
+    }
+    const text = host.files.get(from);
+    if (command === "mv") {
+      if (text === undefined) return failed;
+      host.files.delete(from);
+      host.files.set(to, text);
+      return done;
+    }
+    if (command === "cp") {
+      if (text === undefined || options.failCopy === true) return failed;
+      host.files.set(to, text);
+      return done;
+    }
+    return undefined;
+  };
+}
+
+/** The order files were written in, by path (every `$.fs.write`, and every copy or move the fake shell makes). */
+function recordWrites(host: FakeHost): string[] {
+  const order: string[] = [];
+  const set = host.files.set.bind(host.files);
+  host.files.set = (path: string, text: string) => {
+    order.push(path);
+    return set(path, text);
+  };
+  return order;
+}
+
+function activeHost(options: { engram?: boolean; down?: boolean } = {}): FakeHost {
+  const host = memoryHost({ engram: options.engram ?? false });
+  if (options.down === true) host.files.set(`${MEMORY_ACCOUNT_DIR}/.claude.json`, JSON.stringify({ mcpServers: { engram: { command: "/opt/homebrew/bin/engram", args: ["mcp"] } } }));
+  setModules(host, { memory: "active" });
+  memoryShell(host);
+  return host;
+}
+
+function spoolFiles(host: FakeHost): string[] {
+  return [...host.files.keys()].filter((path) => path.startsWith(`${CACHE_DIR}/memory-spool/`)).sort();
+}
+
+function writesOf(row: Record<string, unknown> | undefined): Record<string, unknown> {
+  return { spooled: row?.spooled, written: row?.written, updated: row?.updated, backups: row?.backups, dropped: row?.dropped, writeFailures: row?.writeFailures, lockHeld: row?.lockHeld };
+}
+
+async function activeTurn(host: FakeHost, turnId = turnIdWhere(false)): Promise<{ handlers: Map<string, Hook>; engine: unknown; result: unknown }> {
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  const result = await completeTurn(handlers, engine, { turnId });
+  await runTimers(host);
+  return { handlers, engine, result };
+}
+
+test("A4 memory active, no Engram: an UPDATE outside Shadow's sample is drafted; the save is spooled, then written with its MEMORY.md line, then moved to done", async () => {
+  const host = activeHost();
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const order = recordWrites(host);
+  const { result } = await activeTurn(host);
+
+  assert.equal(result, TURN_RESULT, "next(e)'s result is handed back as it was");
+  assert.equal(host.modelCalls.length, 1, "one Haiku gate");
+  assert.equal(host.forkCalls.length, 1, "Active drafts every UPDATE, sampled or not");
+  assert.match(host.forkCalls[0] ?? "", /<file name="merge-email.md">/, "the fork reads the current files, so it can update instead of duplicating");
+  assert.equal(host.mcpCalls.length, 0, "no Engram, no MCP call");
+
+  const file = host.files.get(`${MEMORY_DIR}/spanish-tu.md`) ?? "";
+  assert.match(file, /^---\nname: spanish-tu\ndescription: "Spanish with tú"\nmetadata:\n {2}node_type: memory\n {2}type: feedback\n {2}topic_key: spanish-tu\n {2}originSessionId: session-1\n {2}modified: 2026-09-25T10:00:00\.\d{3}Z\n---\n\nReply in Spanish with tú, never voseo\.\n$/);
+  assert.equal(host.files.get(`${MEMORY_DIR}/MEMORY.md`), "- [Merge email](merge-email.md) — use the noreply address\n- [Spanish with tú](spanish-tu.md) — Reply in Spanish with tú, never voseo.\n", "the old line kept, one pointer added");
+
+  const spooled = spoolFiles(host);
+  assert.equal(spooled.length, 1, "one item, now in done/");
+  assert.match(spooled[0] ?? "", new RegExp(`^${MEMORY_SPOOL_ROOT}/session-1/done/[0-9a-f-]{36}\\.json$`));
+  assert.equal(JSON.parse(host.files.get(spooled[0] ?? "") ?? "{}").state, "done");
+  const livePath = (spooled[0] ?? "").replace("/done/", "/");
+  assert.ok(order.indexOf(livePath) >= 0, "the item was written to the live spool");
+  assert.ok(order.indexOf(livePath) < order.indexOf(`${MEMORY_DIR}/spanish-tu.md`), "spooled before the memory file");
+  assert.ok(order.indexOf(`${MEMORY_DIR}/spanish-tu.md`) < order.indexOf(`${MEMORY_DIR}/MEMORY.md`), "the file before its index line");
+  assert.equal([...host.files.keys()].some((path) => path.includes(".memory-backup")), false, "a new file needs no backup");
+
+  const row = memoryRows(host)[0];
+  assert.equal(row?.mode, "active");
+  assert.equal(row?.effective, "active");
+  assert.equal(row?.backend, "absent");
+  assert.equal(row?.fork, "drafted");
+  assert.equal(row?.forkSampled, true);
+  assert.deepEqual(writesOf(row), { spooled: 1, written: 1, updated: 0, backups: 0, dropped: 0, writeFailures: 0, lockHeld: false });
+  assert.doesNotMatch(JSON.stringify(row), /Spanish|vos|tú|spanish-tu/, "no memory text, title or file name in the row");
+});
+
+test("A4 memory active, Engram configured but down: the file is tagged pending_engram and its item stays parked for the Engram replay", async () => {
+  const host = activeHost({ down: true });
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  await activeTurn(host);
+  assert.match(host.files.get(`${MEMORY_DIR}/spanish-tu.md`) ?? "", /\n {2}pending_engram: true\n/);
+  assert.match(host.files.get(`${MEMORY_DIR}/MEMORY.md`) ?? "", /\(spanish-tu\.md\)/);
+  const spooled = spoolFiles(host);
+  assert.equal(spooled.length, 1);
+  assert.doesNotMatch(spooled[0] ?? "", /\/done\//, "parked in the live folder until Engram can take it");
+  assert.equal(JSON.parse(host.files.get(spooled[0] ?? "") ?? "{}").state, "fallback");
+  const row = memoryRows(host)[0];
+  assert.equal(row?.backend, "configured-down");
+  assert.equal(row?.effective, "active");
+  assert.deepEqual(writesOf(row), { spooled: 1, written: 1, updated: 0, backups: 0, dropped: 0, writeFailures: 0, lockHeld: false });
+});
+
+test("A4 memory active with Engram live: it keeps measuring as Shadow, writes nothing, and the row says effective shadow", async () => {
+  const host = activeHost({ engram: true });
+  host.modelQueue.push(GATE_UPDATE, GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(false) });
+  await runTimers(host);
+  assert.equal(host.forkCalls.length, 1, "Shadow's sample: the second UPDATE is not drafted");
+  const rows = memoryRows(host);
+  assert.deepEqual(rows.map((row) => [row.mode, row.effective, row.fork]), [["active", "shadow", "drafted"], ["active", "shadow", "not-sampled"]]);
+  for (const row of rows) assert.deepEqual(writesOf(row), { spooled: 0, written: 0, updated: 0, backups: 0, dropped: 0, writeFailures: 0, lockHeld: false });
+  assertNothingWritten(host, seeded);
+});
+
+test("A4 memory active: a malformed gate, a draft that is not one and a fork with no answer write nothing, and each is counted", async () => {
+  const cases: { gate: unknown; fork: unknown | null; expect: { gate: string; fork: string | null } }[] = [
+    { gate: { isAnswered: true, text: "MAYBE, it depends", usage: USAGE(900, 4) }, fork: null, expect: { gate: "malformed", fork: null } },
+    { gate: GATE_UPDATE, fork: { isAnswered: true, text: "I would remember the Spanish rule.", usage: USAGE(12, 40, 180_000) }, expect: { gate: "update", fork: "unparsable" } },
+    { gate: GATE_UPDATE, fork: { isAnswered: false, reason: "refused" }, expect: { gate: "update", fork: "no-answer" } },
+  ];
+  for (const { gate, fork, expect } of cases) {
+    const host = activeHost();
+    host.modelQueue.push(gate);
+    if (fork !== null) host.forkQueue.push(fork);
+    const seeded = new Set(host.files.keys());
+    await activeTurn(host);
+    const row = memoryRows(host)[0];
+    const label = JSON.stringify(expect);
+    assert.equal(row?.gate, expect.gate, label);
+    assert.equal(row?.fork, expect.fork, label);
+    assert.equal(row?.effective, "active", label);
+    assert.deepEqual(writesOf(row), { spooled: 0, written: 0, updated: 0, backups: 0, dropped: 0, writeFailures: 0, lockHeld: false }, label);
+    assertNothingWritten(host, seeded);
+  }
+});
+
+test("A4 memory active: an update copies the file byte for byte to .memory-backup, then rewrites it; a save of an existing topic does the same", async () => {
+  const cases: { reply: unknown; text: RegExp }[] = [
+    { reply: draftReply({ updates: [{ name: "merge-email.md", content: DRAFT_UPDATE_TEXT }] }), text: /merge-bot@example\.com/ },
+    { reply: draftReply({ saves: [{ type: "feedback", title: "Merge email", content: "Use the numbered noreply address.", topic_key: "merge-email" }] }), text: /numbered noreply/ },
+  ];
+  for (const { reply, text } of cases) {
+    const host = activeHost();
+    host.modelQueue.push(GATE_UPDATE);
+    host.forkQueue.push(reply);
+    const original = host.files.get(MERGE_EMAIL_PATH) ?? "";
+    const order = recordWrites(host);
+    await activeTurn(host);
+    const backups = [...host.files.keys()].filter((path) => path.startsWith(`${MEMORY_DIR}/.memory-backup/`));
+    assert.equal(backups.length, 1, "one backup");
+    assert.match(backups[0] ?? "", /\/memory\/\.memory-backup\/2026-09-25T10-00-00-\d{3}Z\/merge-email\.md$/, "hidden in the memory folder, one folder per pass");
+    assert.equal(host.files.get(backups[0] ?? ""), original, "the backup is the old file, byte for byte");
+    assert.ok(order.indexOf(backups[0] ?? "") < order.indexOf(MERGE_EMAIL_PATH), "copied before the rewrite");
+    assert.match(host.files.get(MERGE_EMAIL_PATH) ?? "", text);
+    const row = memoryRows(host)[0];
+    assert.equal(row?.updated, 1);
+    assert.equal(row?.backups, 1);
+    assert.equal(row?.written, 0, "nothing new was created");
+    assert.equal(host.files.get(`${MEMORY_DIR}/MEMORY.md`)?.split("\n").filter((line) => line.includes("(merge-email.md)")).length, 1, "one pointer, never two");
+  }
+});
+
+test("A4 memory active: an update of a missing file or without frontmatter is refused; a failed backup rewrites nothing", async () => {
+  const refused = activeHost();
+  refused.modelQueue.push(GATE_UPDATE);
+  refused.forkQueue.push(draftReply({ updates: [{ name: "nowhere.md", content: DRAFT_UPDATE_TEXT }, { name: "merge-email.md", content: "Just the new text, no frontmatter." }] }));
+  const seeded = new Set(refused.files.keys());
+  const original = refused.files.get(MERGE_EMAIL_PATH);
+  await activeTurn(refused);
+  assert.equal(refused.files.get(MERGE_EMAIL_PATH), original);
+  assert.equal(refused.files.has(`${MEMORY_DIR}/nowhere.md`), false);
+  assert.deepEqual(writesOf(memoryRows(refused)[0]), { spooled: 0, written: 0, updated: 0, backups: 0, dropped: 2, writeFailures: 0, lockHeld: false });
+  assertNothingWritten(refused, seeded);
+
+  const noCopy = activeHost();
+  memoryShell(noCopy, { failCopy: true });
+  noCopy.modelQueue.push(GATE_UPDATE);
+  noCopy.forkQueue.push(draftReply({ updates: [{ name: "merge-email.md", content: DRAFT_UPDATE_TEXT }] }));
+  await activeTurn(noCopy);
+  assert.equal(noCopy.files.get(MERGE_EMAIL_PATH), original, "no backup, no rewrite");
+  assert.deepEqual(writesOf(memoryRows(noCopy)[0]), { spooled: 0, written: 0, updated: 0, backups: 0, dropped: 0, writeFailures: 1, lockHeld: false });
+});
+
+test("A4 memory active: deletes are never applied in this release; they are counted as would-delete", async () => {
+  const host = activeHost();
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(draftReply({ deletes: ["merge-email.md"] }));
+  const seeded = new Set(host.files.keys());
+  await activeTurn(host);
+  assert.equal(host.files.has(MERGE_EMAIL_PATH), true);
+  assert.equal(memoryRows(host)[0]?.wouldDelete, 1);
+  assertNothingWritten(host, seeded);
+});
+
+test("A4 memory active: while Claude Code's consolidation holds the folder nothing is written and the save stays spooled", async () => {
+  const host = activeHost();
+  memoryShell(host, { alive: true });
+  host.files.set(`${MEMORY_DIR}/.consolidate-lock`, "4242");
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const memoryBefore = new Map([...host.files].filter(([path]) => path.startsWith(MEMORY_DIR)));
+  await activeTurn(host);
+  for (const [path, text] of memoryBefore) assert.equal(host.files.get(path), text, path);
+  assert.equal([...host.files.keys()].filter((path) => path.startsWith(MEMORY_DIR)).length, memoryBefore.size, "no new memory file");
+  assert.ok(host.processCalls.includes("kill -0 4242"), "the lock's pid was checked");
+  const spooled = spoolFiles(host);
+  assert.equal(spooled.length, 1);
+  assert.doesNotMatch(spooled[0] ?? "", /\/done\//);
+  assert.equal(JSON.parse(host.files.get(spooled[0] ?? "") ?? "{}").state, "pending", "kept for the next replay");
+  assert.deepEqual(writesOf(memoryRows(host)[0]), { spooled: 1, written: 0, updated: 0, backups: 0, dropped: 0, writeFailures: 0, lockHeld: true });
+});
+
+test("A4 memory active: a subagent's turn or a turn that did not end with an answer does nothing", async () => {
+  for (const extra of [{ agentId: "a-1" }, { reason: "aborted", isAborted: true }, { reason: "error" }]) {
+    const host = activeHost();
+    host.modelQueue.push(GATE_UPDATE);
+    host.forkQueue.push(DRAFT_REPLY);
+    const seeded = new Set(host.files.keys());
+    const { handlers, engine } = loadHooks(host);
+    const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(false), ...extra });
+    await runTimers(host);
+    const label = JSON.stringify(extra);
+    assert.equal(result, TURN_RESULT, label);
+    assert.equal(host.modelCalls.length, 0, label);
+    assert.equal(host.forkCalls.length, 0, label);
+    assert.equal(host.files.has(MEMORY_ROWS_PATH), false, label);
+    assertNothingWritten(host, seeded);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The spool replay at session.start (odd/tasks/memory-active-files.md, A5):
+// after the backend is detected, Active on the files store finishes the saves
+// its folder's spool still holds, in planReplay's order. A save writes the
+// same file and the same index line however often it is replayed.
+// ---------------------------------------------------------------------------
+
+const SPANISH_SAVE = { type: "feedback" as const, title: "Spanish with tú", content: "Reply in Spanish with tú, never voseo.", topic_key: "spanish-tu" };
+
+/** A save another session spooled and never finished (it crashed), as the mod writes it. */
+function seedSpooledSave(host: FakeHost, sessionId: string, id: string, at: string): string {
+  const queued = enqueueSave(SPANISH_SAVE, { id, sessionId, now: at }, MEMORY_SPOOL_ROOT);
+  for (const op of queued.ops) if (op.kind === "write") host.files.set(op.path, op.content);
+  return spoolItemPath(MEMORY_SPOOL_ROOT, sessionId, id);
+}
+
+function replayRows(host: FakeHost): Record<string, unknown>[] {
+  return memoryRows(host).filter((row) => row.event === "replay");
+}
+
+function memoryFolder(host: FakeHost): Map<string, string> {
+  return new Map([...host.files].filter(([path]) => path.startsWith(MEMORY_DIR)));
+}
+
+test("A5 memory active: a save a crashed session left in the spool is written once at the next start; a second start adds nothing", async () => {
+  const host = activeHost();
+  const live = seedSpooledSave(host, "session-0", "crashed-1", "2026-09-25T09:00:00.000Z");
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+
+  assert.match(host.files.get(`${MEMORY_DIR}/spanish-tu.md`) ?? "", /\n {2}originSessionId: session-0\n/, "written for the session that drafted it");
+  assert.equal(host.files.get(`${MEMORY_DIR}/MEMORY.md`)?.split("\n").filter((line) => line.includes("(spanish-tu.md)")).length, 1);
+  assert.equal(host.files.has(live), false);
+  assert.equal(JSON.parse(host.files.get(spoolDonePath(MEMORY_SPOOL_ROOT, "session-0", "crashed-1")) ?? "{}").state, "done");
+  const rows = replayRows(host);
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0], at: "x", account: "x" }, {
+    at: "x",
+    account: "x",
+    project: "sandbox",
+    event: "replay",
+    mode: "active",
+    effective: "active",
+    sessionId: "session-1",
+    backend: "absent",
+    decidedBy: "none",
+    permission: "unknown",
+    items: 1,
+    replayed: 1,
+    superseded: 0,
+    written: 1,
+    updated: 0,
+    backups: 0,
+    writeFailures: 0,
+    lockHeld: false,
+  });
+  assert.equal(host.modelCalls.length, 0, "a replay asks no model");
+
+  const after = memoryFolder(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(memoryFolder(host), after, "a second replay changes nothing");
+  assert.equal(replayRows(host).length, 1, "and logs nothing, since it found nothing to do");
+});
+
+test("A5 memory active: a save the lock held back is finished at the next start; another session's fresh item is left to it", async () => {
+  const host = activeHost();
+  memoryShell(host, { alive: true });
+  host.files.set(`${MEMORY_DIR}/.consolidate-lock`, "4242");
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const running = seedSpooledSave(host, "session-9", "running-1", "2026-09-25T09:59:00.000Z");
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  assert.equal(replayRows(host).length, 0, "nothing of this folder is due: the other session's item is a minute old");
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(false) });
+  await runTimers(host);
+  assert.equal(host.files.has(`${MEMORY_DIR}/spanish-tu.md`), false, "held back by the lock");
+  assert.equal(memoryRows(host).at(-1)?.lockHeld, true);
+
+  host.files.delete(`${MEMORY_DIR}/.consolidate-lock`);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  assert.match(host.files.get(`${MEMORY_DIR}/spanish-tu.md`) ?? "", /\n {2}originSessionId: session-1\n/);
+  assert.equal(host.files.has(running), true, "a session that moved a minute ago may still be running: its item is its own");
+  const last = replayRows(host).at(-1);
+  assert.equal(last?.replayed, 1);
+  assert.equal(last?.written, 1);
+});
+
+test("A5 memory: Shadow, and Active with Engram live, replay nothing", async () => {
+  for (const [modules, engram] of [[{ memory: "shadow" }, false], [{ memory: "active" }, true]] as const) {
+    const host = memoryHost({ engram });
+    setModules(host, modules);
+    memoryShell(host);
+    const live = seedSpooledSave(host, "session-0", "crashed-1", "2026-09-25T09:00:00.000Z");
+    const seeded = new Set(host.files.keys());
+    const { handlers, engine } = loadHooks(host);
+    await startSessionWith(handlers, engine);
+    await runTimers(host);
+    const label = JSON.stringify(modules);
+    assert.equal(host.files.has(live), true, label);
+    assert.equal(host.files.has(`${MEMORY_DIR}/spanish-tu.md`), false, label);
+    assert.equal(replayRows(host).length, 0, label);
+    assertNothingWritten(host, seeded);
+  }
 });
