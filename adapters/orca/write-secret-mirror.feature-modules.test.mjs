@@ -37,8 +37,8 @@ function readModules (content) {
   return JSON.parse(execFileSync(process.execPath, [SCRIPT_PATH, 'feature-modules-read'], { env, encoding: 'utf8' }))
 }
 
-// Every module that existed before 0.8.0 defaults to active; verify-done, new, to shadow.
-const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow' }
+// Every module that existed before 0.8.0 defaults to active; verify-done, ci-watch and memory, new, to shadow.
+const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }
 
 test('feature-modules-read: a missing file reads as the defaults', () => {
   assert.deepEqual(readModules(undefined), { ok: true, value: DEFAULTS })
@@ -73,7 +73,7 @@ function runMode (mode, { input, existing } = {}) {
   return { result, file, configDir, content: existsSync(file) ? readFileSync(file, 'utf8') : null }
 }
 
-const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off' }
+const CHOSEN = { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'shadow', board: 'off', 'verify-done': 'off', 'ci-watch': 'active', memory: 'off' }
 
 test('feature-modules-save: writes the chosen states, pretty-printed, and answers with them', () => {
   const { result, content, configDir } = runMode('feature-modules-save', { input: JSON.stringify({ modules: CHOSEN }) })
@@ -135,6 +135,21 @@ function panelModuleRows () {
 test('the panel offers a card for every registered module, with exactly the states the registry allows', async () => {
   const { FEATURE_MODULES } = await import('../../src/core/feature_modules.ts')
   assert.deepEqual(panelModuleRows(), FEATURE_MODULES.map((module) => ({ id: module.id, states: [...module.states] })))
+})
+
+test('the memory card states the fork sample the mod really uses (odd/tasks/memory-shadow.md)', async () => {
+  const { FORK_SAMPLE_EVERY } = await import('../../src/core/memory_shadow.ts')
+  const html = readFileSync(join(__dirname, 'panels', 'config.html'), 'utf8')
+  const card = /\{ id: 'memory', states: \[[^\]]*\], cost: \{ every: (\d+) \}/.exec(html)
+  assert.ok(card, 'the memory row carries its sample')
+  assert.equal(Number(card[1]), FORK_SAMPLE_EVERY)
+})
+
+test("the ci-watch card's gh-call ceiling is the schedule's own (CI_WATCH_MAX_POLLS)", async () => {
+  const { CI_WATCH_MAX_POLLS } = await import('../../src/core/ci_watch.ts')
+  const html = readFileSync(join(__dirname, 'panels', 'config.html'), 'utf8')
+  const polls = /\{ id: 'ci-watch',[^}]*cost: \{ polls: (\d+) \}/.exec(html)?.[1]
+  assert.equal(Number(polls), CI_WATCH_MAX_POLLS)
 })
 
 test('feature-modules-save: the map the panel sends, for every state its cards offer, is accepted by the real sidecar', () => {

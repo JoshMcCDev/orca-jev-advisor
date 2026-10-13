@@ -66,8 +66,8 @@ function installerHookKeys(): readonly string[] {
   return rows.map((row) => `${row[1] ?? ""} ${row[2] === "FILE_TOOLS_MATCHER" ? fileTools : (row[2] ?? "").slice(1, -1)} ${row[3] ?? ""}`);
 }
 
-test("the registry holds exactly the six modules, in MODULE_IDS order", () => {
-  assert.deepEqual(MODULE_IDS, ["gate", "model-router", "steward", "skill-selection", "board", "verify-done"]);
+test("the registry holds exactly the eight modules, in MODULE_IDS order", () => {
+  assert.deepEqual(MODULE_IDS, ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch", "memory"]);
   assert.deepEqual(FEATURE_MODULES.map((module) => module.id), MODULE_IDS);
 });
 
@@ -80,9 +80,9 @@ test("the registry module is pure: no node: import, so the mod sandbox can load 
   assert.doesNotMatch(source, /from "node:/);
 });
 
-test("defaults: every earlier module is active, so an upgrade with no file keeps 0.6.28 behaviour; verify-done, new, starts in shadow", () => {
-  assert.deepEqual(DEFAULT_FEATURE_MODULES, { gate: "active", "model-router": "active", steward: "active", "skill-selection": "active", board: "active", "verify-done": "shadow" });
-  for (const module of FEATURE_MODULES) assert.equal(module.defaultState, module.id === "verify-done" ? "shadow" : "active", module.id);
+test("defaults: every earlier module is active, so an upgrade with no file keeps 0.6.28 behaviour; verify-done, ci-watch and memory, new, start in shadow", () => {
+  assert.deepEqual(DEFAULT_FEATURE_MODULES, { gate: "active", "model-router": "active", steward: "active", "skill-selection": "active", board: "active", "verify-done": "shadow", "ci-watch": "shadow", memory: "shadow" });
+  for (const module of FEATURE_MODULES) assert.equal(module.defaultState, module.id === "verify-done" || module.id === "ci-watch" || module.id === "memory" ? "shadow" : "active", module.id);
   assert.deepEqual(parseFeatureModules(""), DEFAULT_FEATURE_MODULES);
 });
 
@@ -99,6 +99,55 @@ test("verify-done: off and shadow only, one Jev feature on turn.complete, no set
   assert.equal(modFeaturesOn(parseFeatureModules("")).includes("verify-done"), true);
   assert.equal(modFeaturesOn(withStates({ "verify-done": "off" })).includes("verify-done"), false);
   assert.equal(parseFeatureModules(fileWith({ "verify-done": "off" }))["verify-done"], "off");
+});
+
+test("ci-watch: off, shadow and active; its own state is the switch, no existing mode; hooks on the mod's events, no Jev, no settings hook, no worker job", () => {
+  const entry = FEATURE_MODULES.find((module) => module.id === "ci-watch");
+  assert.ok(entry !== undefined);
+  assert.deepEqual(entry.states, ["off", "shadow", "active"]);
+  assert.equal(entry.defaultState, "shadow");
+  assert.equal(entry.ownSwitch, true);
+  assert.deepEqual(entry.modFeatures, [{ id: "ci-watch", hooks: ["tool.call", "turn.start", "turn.complete", "ui.render", "session.start"], jev: false }]);
+  assert.deepEqual(entry.hooks, []);
+  assert.deepEqual(entry.workerJobs, []);
+  assert.deepEqual(entry.modes, []);
+  // An upgrade with no module file watches in shadow; Off runs nothing of it.
+  assert.equal(modFeaturesOn(parseFeatureModules("")).includes("ci-watch"), true);
+  assert.equal(modFeaturesOn(withStates({ "ci-watch": "off" })).includes("ci-watch"), false);
+  assert.equal(parseFeatureModules(fileWith({ "ci-watch": "active" }))["ci-watch"], "active");
+  assert.equal(parseFeatureModules(fileWith({ "ci-watch": "off" }))["ci-watch"], "off");
+  assert.equal(parseFeatureModules(fileWith({ "ci-watch": "paused" }))["ci-watch"], "shadow", "a state it does not offer reads as its default");
+  // Only ci-watch's own switch opts out of "shadow caps an existing mode".
+  assert.deepEqual(FEATURE_MODULES.filter((module) => module.ownSwitch === true).map((module) => module.id), ["ci-watch"]);
+});
+
+test("memory: off and shadow until Active is wired (odd/tasks/memory-shadow.md T2); three mod features and nothing else", () => {
+  const entry = FEATURE_MODULES.find((module) => module.id === "memory");
+  assert.ok(entry !== undefined);
+  assert.deepEqual(entry.states, ["off", "shadow"]);
+  assert.equal(entry.defaultState, "shadow");
+  // It uses Haiku, not Jev, so none of its features is a Jev feature.
+  assert.deepEqual(entry.modFeatures, [
+    { id: "memory-save", hooks: ["turn.complete", "tool.call", "session.start"], jev: false },
+    { id: "memory-tidy", hooks: ["turn.complete", "session.compact", "command.run"], jev: false },
+    { id: "memory-ui", hooks: ["ui.render"], jev: false },
+  ]);
+  assert.deepEqual(entry.hooks, []);
+  // Its card reads its weekly counts from the shared measurements summary (odd/tasks/memory-shadow.md, M14): no job of its own.
+  assert.deepEqual(entry.workerJobs.map((job) => job.id), ["measurements-summary"]);
+  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off" })).includes("measurements-summary"), true, "memory alone keeps the summary its card reads");
+  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off", memory: "off" })).includes("measurements-summary"), false);
+  assert.deepEqual(entry.modes, []);
+  // An upgrade with no module file measures; Off runs none of it.
+  const on = modFeaturesOn(parseFeatureModules(""));
+  for (const id of ["memory-save", "memory-tidy", "memory-ui"] as const) {
+    assert.equal(on.includes(id), true, id);
+    assert.equal(modFeaturesOn(withStates({ memory: "off" })).includes(id), false, id);
+  }
+  // No hidden state: a hand-edited "active" has no code behind it yet, so it reads as the default.
+  assert.equal(parseFeatureModules(fileWith({ memory: "active" })).memory, "shadow");
+  assert.equal(validateFeatureModulesInput({ modules: { ...VALID_INPUT.modules, memory: "active" } }).ok, false);
+  assert.equal(parseFeatureModules(fileWith({ memory: "paused" })).memory, "shadow");
 });
 
 test("defaults: each feature's own mode decides, exactly as today", () => {
@@ -123,8 +172,8 @@ test("defaults: every installed hook, every mod feature and every worker job sta
 });
 
 test("parse: a valid file sets each module's state", () => {
-  const modules = parseFeatureModules(fileWith({ gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off" }));
-  assert.deepEqual(modules, { gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off" });
+  const modules = parseFeatureModules(fileWith({ gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "off" }));
+  assert.deepEqual(modules, { gate: "off", "model-router": "shadow", steward: "off", "skill-selection": "shadow", board: "off", "verify-done": "off", "ci-watch": "active", memory: "off" });
 });
 
 test("parse: malformed or non-object content falls back to the defaults, never throws", () => {
@@ -192,11 +241,15 @@ test("modFeaturesOn and modCopyNeeded: the mod copy stays while any mod module i
   assert.equal(modFeaturesOn(skillsOff).includes("tool-selection"), false);
   assert.equal(modFeaturesOn(skillsOff).includes("router-tier"), true);
   assert.equal(modCopyNeeded(skillsOff), true);
-  const modModulesOff = withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off" });
+  const modModulesOff = withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", "ci-watch": "off", memory: "off" });
   assert.deepEqual(modFeaturesOn(modModulesOff), []);
   assert.equal(modCopyNeeded(modModulesOff), false);
-  // verify-done in shadow is a mod module on: it keeps the copy alone.
+  // verify-done, ci-watch or memory in shadow is a mod module on: any one keeps the copy alone.
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "ci-watch": "off", memory: "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", memory: "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", "ci-watch": "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off" })), true);
   assert.equal(modCopyNeeded(withStates({ gate: "off", board: "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "shadow" })), true);
 });
@@ -205,13 +258,13 @@ test("workerJobsOn: a shared job runs while any owner is on, and is listed once"
   const all = workerJobsOn(DEFAULT_FEATURE_MODULES);
   assert.equal(all.length, new Set(all).size);
   assert.equal(workerJobsOn(withStates({ gate: "off" })).includes("measurements-summary"), true);
-  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off" })).includes("measurements-summary"), false);
+  assert.equal(workerJobsOn(withStates({ gate: "off", "skill-selection": "off", memory: "off" })).includes("measurements-summary"), false);
   assert.equal(workerJobsOn(withStates({ "model-router": "off" })).includes("consumption-summary"), true);
   assert.equal(workerJobsOn(withStates({ "model-router": "off", steward: "off" })).includes("consumption-summary"), false);
   assert.equal(workerJobsOn(withStates({ gate: "off" })).includes("gate-authorizations"), false);
   const boardOff = workerJobsOn(withStates({ board: "off" }));
   for (const id of ["board-agent-status", "board-worktree-created", "board-worktree-removed"] as const) assert.equal(boardOff.includes(id), false, id);
-  assert.deepEqual(workerJobsOn(withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off" })), [], "verify-done owns no worker job");
+  assert.deepEqual(workerJobsOn(withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off", memory: "off" })), [], "verify-done owns no worker job");
 });
 
 test("workerJobsFor: the jobs behind each trigger, whichever module owns them (T0's shared timers)", () => {
@@ -228,9 +281,9 @@ test("workerJobsFor: the jobs behind each trigger, whichever module owns them (T
 test("workerTriggerOn: a timer is wanted until every module using it is off", () => {
   const fifteenSeconds: WorkerTrigger = "interval-15s";
   assert.equal(workerTriggerOn(DEFAULT_FEATURE_MODULES, fifteenSeconds), true);
-  // Gate, model-router and skill-selection use it: any one keeps it.
+  // Gate, model-router, skill-selection and memory use it: any one keeps it.
   assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off" }), fifteenSeconds), true);
-  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off" }), fifteenSeconds), false);
+  assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off", memory: "off" }), fifteenSeconds), false);
   // The steward's jobs are not on the 15 s timer, so only the shared 10 min ones keep it.
   assert.equal(workerTriggerOn(withStates({ gate: "off", "model-router": "off", "skill-selection": "off", board: "off" }), "interval-consumption-10min"), true);
   assert.equal(workerTriggerOn(withStates({ "model-router": "off", steward: "off" }), "interval-consumption-10min"), false);
@@ -269,7 +322,7 @@ test("workerTriggerWanted: a timer of panel-only jobs exists only while a panel 
   assert.equal(workerTriggerWanted(routerOff, "interval-15s", false), false);
   assert.equal(workerTriggerWanted(routerOff, "interval-15s", true), true);
   // Off still wins: nothing is wanted when every owner is off, panel open or not.
-  const allOff = withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off" });
+  const allOff = withStates({ gate: "off", "model-router": "off", steward: "off", "skill-selection": "off", board: "off", memory: "off" });
   assert.equal(workerTriggerWanted(allOff, "interval-15s", true), false);
   // Event handlers do not depend on a panel.
   assert.equal(workerTriggerWanted(DEFAULT_FEATURE_MODULES, "agent.status.changed", false), true);
@@ -297,13 +350,14 @@ test("every mod feature is owned by exactly one module, and job ids are unique p
   }
 });
 
-test("a module offers shadow exactly when one of its existing modes has a measure value, or when it only measures (no active)", () => {
+test("a module offers shadow exactly when one of its existing modes has a measure value, when it only measures (no active), or when its state is its own switch", () => {
   for (const module of FEATURE_MODULES) {
     const hasMeasure = module.modes.some((mode) => mode.shadowValue !== null);
     const measuresOnly = !module.states.includes("active");
-    assert.equal(module.states.includes("shadow"), hasMeasure || measuresOnly, module.id);
-    // A module that only measures has no existing mode: its shadow is its own, so there is still one switch.
-    if (measuresOnly) assert.deepEqual(module.modes, [], module.id);
+    const ownSwitch = module.ownSwitch === true;
+    assert.equal(module.states.includes("shadow"), hasMeasure || measuresOnly || ownSwitch, module.id);
+    // A module that only measures, or whose state is its own switch, has no existing mode: its shadow is its own, so there is still one switch.
+    if (measuresOnly || ownSwitch) assert.deepEqual(module.modes, [], module.id);
     assert.equal(module.states.includes("off"), true, module.id);
     assert.equal(module.states.includes(module.defaultState), true, module.id);
   }
@@ -312,7 +366,7 @@ test("a module offers shadow exactly when one of its existing modes has a measur
 // T5: the writer path (the worker's feature-modules-save sidecar) refuses what
 // parseFeatureModules would silently turn into defaults, so a corrupt request
 // is reported instead of written.
-const VALID_INPUT = { modules: { gate: "off", "model-router": "shadow", steward: "active", "skill-selection": "shadow", board: "off", "verify-done": "shadow" } };
+const VALID_INPUT = { modules: { gate: "off", "model-router": "shadow", steward: "active", "skill-selection": "shadow", board: "off", "verify-done": "shadow", "ci-watch": "active", memory: "shadow" } };
 
 test("validateFeatureModulesInput accepts every module with a state it offers", () => {
   const result = validateFeatureModulesInput(VALID_INPUT);
@@ -331,6 +385,8 @@ test("validateFeatureModulesInput refuses anything that is not the full, valid m
     { modules: { ...VALID_INPUT.modules, gate: "shadow" } },
     { modules: { ...VALID_INPUT.modules, board: "shadow" } },
     { modules: { ...VALID_INPUT.modules, "verify-done": "active" } },
+    { modules: { ...VALID_INPUT.modules, "ci-watch": "paused" } },
+    { modules: Object.fromEntries(Object.entries(VALID_INPUT.modules).filter(([id]) => id !== "ci-watch")) },
     { modules: { ...VALID_INPUT.modules, steward: "paused" } },
     { modules: { ...VALID_INPUT.modules, steward: true } },
     { modules: { ...VALID_INPUT.modules, unknown: "off" } },

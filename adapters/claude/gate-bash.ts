@@ -2070,14 +2070,9 @@ const SECRET_CONTENT_MAX_BYTES = 64 * 1024
  * by-content file's text. Every read fails to null ("unknown").
  */
 const SECRET_PUBLISH_READER: SecretPublishReader = {
-  forcedAddPaths: (dir, args) => {
-    const out = gitOutput(['add', '--dry-run', '--force', ...args], dir)
-    if (out === null) return null
-    return out.split('\n').flatMap((line) => {
-      const match = /^add '(.*)'$/.exec(line)
-      return match === null ? [] : [match[1] ?? '']
-    })
-  },
+  forcedAddPaths: (dir, args) => dryRunAddPaths(['--force', ...args], dir),
+  // An unforced add leaves ignored files out.
+  addPaths: (dir, args) => dryRunAddPaths(args, dir),
   workingContent: (dir, path) => readSecretCandidate(resolve(dir, path)),
   stagedPaths: (dir) => nulSeparated(gitOutput(['diff', '--cached', '--name-only', '--no-renames', '--diff-filter=d', '-z', '--', ...SECRET_PATHSPECS], dir)),
   modifiedTrackedPaths: (dir) => nulSeparated(gitOutput(['diff', '--name-only', '--no-renames', '--diff-filter=d', '-z', '--', ...SECRET_PATHSPECS], dir)),
@@ -2097,6 +2092,16 @@ const SECRET_PUBLISH_READER: SecretPublishReader = {
     gitOutput(['-c', 'core.quotePath=false', 'log', '--ignore-missing', '--format=commit %h', '--name-status', '--no-renames', ...sources, '--not', remote === null ? '--remotes' : `--remotes=${remote}`, '--', ...SECRET_PATHSPECS], dir) ??
     (gitOutput(['rev-parse', '--git-dir'], dir) === null ? '' : null),
   commitContent: (dir, commit, path) => gitOutput(['show', `${commit}:${path}`], dir),
+}
+
+/** The paths `git add --dry-run <args>` reports it would stage in `dir` (`add '<path>'` lines); null when git fails. */
+function dryRunAddPaths(args: readonly string[], dir: string): readonly string[] | null {
+  const out = gitOutput(['add', '--dry-run', ...args], dir)
+  if (out === null) return null
+  return out.split('\n').flatMap((line) => {
+    const match = /^add '(.*)'$/.exec(line)
+    return match === null ? [] : [match[1] ?? '']
+  })
 }
 
 /** A small file's text, or null when it is missing, unreadable or too large to be a credential file. */

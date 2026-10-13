@@ -13,7 +13,7 @@ import { test } from 'node:test'
 import { DEFAULT_FEATURE_MODULES, FEATURE_MODULES, workerJobIsPanelOnly, workerJobsFor } from '../../src/core/feature_modules.ts'
 import { createModuleScheduler, followStatus, modulesFromRead, modulesFromStatus } from './module-scheduler.mjs'
 
-const ALL_OFF = { gate: 'off', 'model-router': 'off', steward: 'off', 'skill-selection': 'off', board: 'off' }
+const ALL_OFF = { gate: 'off', 'model-router': 'off', steward: 'off', 'skill-selection': 'off', board: 'off', memory: 'off' }
 
 const INTERVAL_TRIGGERS = ['interval-15s', 'interval-account-quota-10min', 'interval-consumption-10min', 'interval-activity-10min']
 const EVENT_TRIGGERS = ['agent.status.changed', 'worktree.created', 'worktree.removed']
@@ -117,9 +117,9 @@ test('an off module runs none of its own jobs; a shared job still runs while ano
   assert.equal(h.calls.includes('activity-summary'), true, 'model-router still uses it')
   assert.equal(h.calls.includes('model-measurements'), true)
 
-  const both = harness(states({ gate: 'off', 'skill-selection': 'off' }))
+  const both = harness(states({ gate: 'off', 'skill-selection': 'off', memory: 'off' }))
   await both.scheduler.start()
-  assert.equal(both.calls.includes('measurements-summary'), false, 'both owners are off')
+  assert.equal(both.calls.includes('measurements-summary'), false, 'every owner is off')
 })
 
 test('a timer tick runs only the jobs that are on', async () => {
@@ -143,7 +143,7 @@ test('a timer is cleared only when every module using it is off', async () => {
   await h.scheduler.apply(states({ gate: 'off', 'model-router': 'off' }))
   assert.equal(h.liveTimerMs().includes(PERIODS['interval-15s']), true, 'skill-selection still uses it')
 
-  await h.scheduler.apply(states({ gate: 'off', 'model-router': 'off', 'skill-selection': 'off' }))
+  await h.scheduler.apply(states({ gate: 'off', 'model-router': 'off', 'skill-selection': 'off', memory: 'off' }))
   assert.equal(h.liveTimerMs().includes(PERIODS['interval-15s']), false, 'every owner is off: cleared')
   assert.equal(h.liveTimerMs().includes(PERIODS['interval-consumption-10min']), true, 'the steward still reads the consumption summary')
 })
@@ -372,8 +372,8 @@ test('every interval trigger of the registry has a period and every event trigge
 })
 
 test('modulesFromStatus: the installer status carries the state it followed; anything else is no news', () => {
-  const status = { ok: true, modules: { gate: { state: 'off' }, 'model-router': { state: 'shadow' }, steward: { state: 'active' }, 'skill-selection': { state: 'active' }, board: { state: 'off' }, 'verify-done': { state: 'off' } } }
-  assert.deepEqual(modulesFromStatus(status), { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'active', board: 'off', 'verify-done': 'off' })
+  const status = { ok: true, modules: { gate: { state: 'off' }, 'model-router': { state: 'shadow' }, steward: { state: 'active' }, 'skill-selection': { state: 'active' }, board: { state: 'off' }, 'verify-done': { state: 'off' }, 'ci-watch': { state: 'active' }, memory: { state: 'off' } } }
+  assert.deepEqual(modulesFromStatus(status), { gate: 'off', 'model-router': 'shadow', steward: 'active', 'skill-selection': 'active', board: 'off', 'verify-done': 'off', 'ci-watch': 'active', memory: 'off' })
   for (const bad of [null, undefined, 'x', { ok: false }, { ok: true }, { ok: true, modules: 3 }]) assert.equal(modulesFromStatus(bad), null, JSON.stringify(bad))
 })
 

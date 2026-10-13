@@ -40,6 +40,9 @@ import { foldAbResults } from '../src/core/ab_report.ts'
 import { EMPTY_AUTHORIZATIONS, authorizationRows, recordAuthorization } from '../src/core/gate_authorizations.ts'
 import { parseTrustedPrograms } from '../src/core/trusted_programs.ts'
 import { DEFAULT_FEATURE_MODULES } from '../src/core/feature_modules.ts'
+import { summarizeTypingLeadTime, TYPING_WINDOW_MS } from '../src/core/typing_lead_time.ts'
+import { summarizeCiWatchRows } from '../src/core/ci_watch.ts'
+import { summarizeMemoryDecisions } from '../src/core/memory_shadow.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PANELS_DIR = join(ROOT, 'adapters/orca/panels')
@@ -235,7 +238,7 @@ function emptyWindow (key) {
  * install was left alone). scripts/fixture_shape.test.mjs holds this to the
  * real installer's output.
  */
-const MODULE_HOOK_COUNTS = { gate: 5, 'model-router': 3, steward: 0, 'skill-selection': 0, board: 0, 'verify-done': 0 }
+const MODULE_HOOK_COUNTS = { gate: 5, 'model-router': 3, steward: 0, 'skill-selection': 0, board: 0, 'verify-done': 0, 'ci-watch': 0, memory: 0 }
 function moduleStatus (states, unmatched = []) {
   return Object.fromEntries(Object.entries(MODULE_HOOK_COUNTS).map(([id, hookCount]) => {
     const state = states[id] ?? DEFAULT_FEATURE_MODULES[id]
@@ -464,6 +467,33 @@ const READY = {
       },
       corruptLines: 0,
     },
+    // 0.9.0 C6: the CI watcher's week, as read-measurements.mjs's aggregateCiWatch
+    // publishes it. Unlike the figures above these are illustrative literals, not
+    // the author's logs: the module is new and has measured nothing yet.
+    ciWatch: { watches: 14, finished: 12, failed: 2, ghCalls: 310, pollsReplaced: 38, sleepsReplaced: 27, injected: 0 },
+    // The memory module in Shadow (odd/tasks/memory-shadow.md, M14): no week of
+    // real rows exists yet, so these are illustrative figures in the shape
+    // summarizeMemoryDecisions publishes, an Engram-live machine.
+    memory: {
+      decisions: 212,
+      gates: 212,
+      updates: 41,
+      skips: 168,
+      gateFailures: 3,
+      updateRate: 41 / 209,
+      forks: 8,
+      drafts: 7,
+      wouldSave: { user: 1, feedback: 5, project: 4, reference: 1 },
+      judgeBuilds: 6,
+      mainEngramSaves: 63,
+      mainJudges: 131,
+      mainAutoMemoryWrites: 2,
+      agreement: { both: 30, moduleOnly: 11, mainOnly: 19, neither: 149, unknown: 3 },
+      agreementRate: 179 / 209,
+      haikuTokens: { input: 190800, output: 1900 },
+      forkTokens: { input: 96, output: 1610, cacheRead: 1496000 },
+      latest: { at: '2026-09-24T17:40:00.000Z', backend: 'live', decidedBy: 'tools+health', permission: 'ok' },
+    },
     approvals: {
       asked: 43,
       approved: 27,
@@ -551,6 +581,8 @@ const EMPTY = {
     modSkills: READY.measurementsSummary.modSkills,
     approvals: { ...emptyWindow('all').approvals, corruptLines: 0 },
     abBenchmark: { ...foldAbResults([]), corruptLines: 0 },
+    ciWatch: summarizeCiWatchRows([], 0, 0),
+    memory: summarizeMemoryDecisions([], 0, 1),
   },
 }
 
@@ -762,7 +794,7 @@ const ROUTER_READY = {
     targets: [
       // The context steward's per-target settings (odd/tasks/jev-context-steward.md).
       { target: 'home', mode: 'measure', effort: ROUTER_EFFORT_DEFAULTS, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'measure', threshold: 120000 }, workKind: 'measure' },
-      { target: 'cccccccc-0000-4000-8000-000000000003', mode: 'active', email: 'owner@example.com', effort: { ...ROUTER_EFFORT_DEFAULTS, complex: 'xhigh' }, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'active', threshold: 150000, softMode: 'active' }, workKind: 'active' },
+      { target: 'cccccccc-0000-4000-8000-000000000003', mode: 'active', email: 'owner@example.com', effort: { ...ROUTER_EFFORT_DEFAULTS, complex: 'xhigh' }, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'active', threshold: 150000, softMode: 'active', coldMode: 'active' }, workKind: 'active' },
       { target: 'bbbbbbbb-0000-4000-8000-000000000002', mode: 'measure', effort: ROUTER_EFFORT_DEFAULTS, tiers: ROUTER_TIERS_ANTHROPIC, steward: { mode: 'off', threshold: 120000 }, workKind: 'measure' },
     ],
     checkedAt: iso,
@@ -790,6 +822,8 @@ const ROUTER_READY = {
       wouldCompact: 2,
       freedPerStep: 114000,
       verified: { compactions: 59, verified: 32, steps: 4891, tokensNotReread: 1380000000, mainContextTokens: 3500000000, share: 0.283 },
+      // Track S: summarizePreCold's shape; synthetic figures.
+      preCold: { fired: 3, wouldFire: 5, skipped: 2, returned: 3, returnedEarly: 1, notReturned: 2, pending: 2, coldRewriteOnReturn: 410000, realizedSaving: 250000, waste: 44000, engineIdleCompactions: 0 },
     },
   },
 }
@@ -884,9 +918,29 @@ function realModSkillsSummary (rows) {
   }
 }
 
+/**
+ * K0c (odd/tasks/typing-lead-time.md) -- the Skills card's "Typing before
+ * send" line. Rows shaped like the mod's typing-*.jsonl (src/core/
+ * typing_lead_time.ts's TypingRecord), summarized by the real
+ * summarizeTypingLeadTime: 40 prompts typed at the composer, pauses spread
+ * from 0.3 s to 4.5 s, and 12 a notification or a plugin injected. Synthetic.
+ */
+function typingLogRows () {
+  const now = Date.parse(iso)
+  const rows = []
+  for (let i = 0; i < 40; i += 1) {
+    rows.push({ type: 'typing', at: new Date(now - (i + 1) * 3 * 60 * 60 * 1000).toISOString(), sessionId: `s-${i % 6}`, origin: 'composer', kind: 'composer', gapMs: 300 + ((i * 397) % 4200), edits: 20 + ((i * 31) % 180) })
+  }
+  for (let i = 0; i < 12; i += 1) {
+    rows.push({ type: 'typing', at: new Date(now - (i + 1) * 7 * 60 * 60 * 1000).toISOString(), sessionId: `s-${i % 6}`, origin: i % 2 === 0 ? 'task-notification' : 'plugin', kind: 'injected', gapMs: null, edits: 0 })
+  }
+  return rows
+}
+
 const SKILLS_READY = {
   ...READY,
   measurementsSummary: { ...READY.measurementsSummary, modSkills: realModSkillsSummary(skillsLogRows()) },
+  consumptionSummary: { ...CONSUMPTION_READY.consumptionSummary, typing: summarizeTypingLeadTime(typingLogRows(), Date.parse(iso), TYPING_WINDOW_MS) },
 }
 
 const SCENARIOS = { fresh: FRESH, empty: EMPTY, ready: READY, degraded: DEGRADED, seeds: SEEDS, baseline: BASELINE, 'models-empty': MODELS_EMPTY, 'models-emptied': MODELS_EMPTIED, 'catalog-proposals': CATALOG_PROPOSALS, 'consumption-ready': CONSUMPTION_READY, 'router-ready': ROUTER_READY }

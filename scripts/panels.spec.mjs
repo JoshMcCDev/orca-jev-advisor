@@ -2906,7 +2906,7 @@ test('steward: saving sends that target\'s mode and threshold in tokens', { skip
     assert.equal(request.mode, undefined)
     assert.equal(request.effort, undefined)
     // 0.6.15 T4: the 400k soft tier's switch goes with them, measure unless changed.
-    assert.deepEqual(request.steward, { mode: 'active', threshold: 100000, softMode: 'measure' })
+    assert.deepEqual(request.steward, { mode: 'active', threshold: 100000, softMode: 'measure', coldMode: 'measure' })
   } finally {
     await browser.close()
   }
@@ -2933,7 +2933,7 @@ test('steward: the 400k soft tier shows its own switch, measure by default, and 
     await page.click('[data-steward-target="home"] .model-router-steward-save')
     await page.waitForFunction(() => !!window.__written.modelRouterConfigRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.modelRouterConfigRequest)
-    assert.deepEqual(request.steward, { mode: 'measure', threshold: 120000, softMode: 'active' })
+    assert.deepEqual(request.steward, { mode: 'measure', threshold: 120000, softMode: 'active', coldMode: 'measure' })
   } finally {
     await browser.close()
   }
@@ -3193,6 +3193,73 @@ test('skills-ready: the Skills tab shows what the mod recorded, not its empty se
     assert.match(text, /Skills suggested/)
     assert.match(text, /Listing characters not sent/)
     assert.match(text, new RegExp(`${Math.round(mod.matchRate * 1000) / 10}%`))
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// K0c (odd/tasks/typing-lead-time.md) -- the Skills card's "Typing before
+// send" line, from consumptionSummary.typing (read-consumption.mjs's 7-day
+// summary of the mod's typing-*.jsonl). `skills-ready` carries it, summarized
+// by the real summarizeTypingLeadTime. No summary, no line: never a zero.
+// ---------------------------------------------------------------------------
+
+async function skillsCardText (page) {
+  await page.click('#tab-skills')
+  return page.evaluate(() => document.getElementById('card-skills').innerText)
+}
+
+test('K0c skills-ready: the Skills card shows the typing lead time line (en)', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  const scenario = SCENARIOS['skills-ready']
+  const typing = scenario.consumptionSummary?.typing
+  assert.ok(typing && typing.typed > 0 && typing.injected > 0, 'skills-ready must carry typed and injected prompts')
+  const { browser, page, errors } = await openBoardPanel(scenario)
+  try {
+    const text = await skillsCardText(page)
+    const seconds = (value) => (Math.round(value / 100) / 10).toLocaleString('en')
+    assert.match(text, new RegExp(`Typing before send \\(7 days\\): p50 ${seconds(typing.p50Ms)} s · p90 ${seconds(typing.p90Ms)} s · ${typing.typed} typed prompts · ${typing.injected} injected`))
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('K0c skills-ready: the typing lead time line in Spanish', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  const scenario = SCENARIOS['skills-ready']
+  const typing = scenario.consumptionSummary.typing
+  const { browser, page, errors } = await openBoardPanel(scenario, 'es')
+  try {
+    const text = await skillsCardText(page)
+    assert.match(text, new RegExp(`Escritura antes de enviar \\(7 días\\): p50 .+ s · p90 .+ s · ${typing.typed} prompts escritos · ${typing.injected} inyectados`))
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('K0c with no typing summary the Skills card has no typing line, not a zero', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  for (const consumptionSummary of [{ ...POPULATED_CONSUMPTION, typing: null }, POPULATED_CONSUMPTION, undefined]) {
+    const scenario = { ...SCENARIOS['skills-ready'], consumptionSummary }
+    const { browser, page, errors } = await openBoardPanel(scenario)
+    try {
+      const text = await skillsCardText(page)
+      assert.doesNotMatch(text, /Typing before send/)
+      assert.match(text, /Skills suggested/, 'the rest of the card is unchanged')
+      assert.deepEqual(errors, [])
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('K0c only injected prompts: the line says no prompt was typed, never p50 0 s', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openBoardPanel({ consumptionSummary: { ...POPULATED_CONSUMPTION, typing: { typed: 0, injected: 4, p50Ms: null, p90Ms: null } } })
+  try {
+    const text = await skillsCardText(page)
+    assert.match(text, /Typing before send \(7 days\): no typed prompts yet · 4 injected/)
+    assert.doesNotMatch(text, /p50/)
     assert.deepEqual(errors, [])
   } finally {
     await browser.close()
@@ -4379,7 +4446,7 @@ test('every trusted.* key in one language catalog exists in the other', { skip: 
 // status().modules shape (fixture_shape.test.mjs).
 // ---------------------------------------------------------------------------
 
-const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board', 'verify-done']
+const MODULE_IDS = ['gate', 'model-router', 'steward', 'skill-selection', 'board', 'verify-done', 'ci-watch', 'memory']
 const SECRET_MIRROR_SCRIPT = join(ROOT, 'adapters', 'orca', 'write-secret-mirror.mjs')
 
 /**
@@ -4422,17 +4489,17 @@ async function moduleCards (page) {
   }))
 }
 
-test('Modules: the first section of General lists the six modules with what they do and cost; the five earlier ones active by default, verify-done in shadow', MODULES_SKIP, async () => {
+test('Modules: the first section of General lists the eight modules with what they do and cost; the five earlier ones active by default, verify-done, ci-watch and memory in shadow', MODULES_SKIP, async () => {
   const { browser, page, errors } = await openPanel(SCENARIOS.ready)
   try {
     const first = await page.evaluate(() => document.querySelector('#panel-general section').id)
     assert.equal(first, 'modules-section')
     const cards = await moduleCards(page)
     assert.deepEqual(cards.map((c) => c.id), MODULE_IDS)
-    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board', 'Verify done'])
-    // The registry decides the states: no shadow where the module has no measure mode of its own, no active where it only measures.
-    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active'], ['off', 'shadow']])
-    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['shadow']])
+    assert.deepEqual(cards.map((c) => c.name), ['Gate', 'Model router', 'Context steward', 'Skill and tool selection', 'Board', 'Verify done', 'CI watcher', 'Memory'])
+    // The registry decides the states: no shadow where the module has no measure mode of its own, no active where it only measures or is not wired yet.
+    assert.deepEqual(cards.map((c) => c.states), [['off', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'shadow', 'active'], ['off', 'active'], ['off', 'shadow'], ['off', 'shadow', 'active'], ['off', 'shadow']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['shadow'], ['shadow'], ['shadow']])
     assert.deepEqual(cards[5].labels, ['Off', 'Shadow'])
     const verify = cards[5].text
     assert.match(verify, /turns that edited files with no test passing/)
@@ -4442,6 +4509,14 @@ test('Modules: the first section of General lists the six modules with what they
     assert.match(verify, /about 0\.1 Jev calls per prompt/)
     assert.match(verify, /Background: nothing of its own\./)
     assert.match(verify, /follows the switch directly/)
+    assert.deepEqual(cards[6].labels, ['Off', 'Shadow', 'Active'])
+    const ci = cards[6].text
+    assert.match(ci, /watches the CI run with gh and tells you here when it ends/)
+    assert.match(ci, /In Shadow it sends nothing to the agent/)
+    assert.match(ci, /In Active it also tells the agent once, when it is idle/)
+    assert.match(ci, /at most 45 gh calls per watch \(the ceiling of its polling schedule, not a measurement\), no Jev or model calls/)
+    assert.match(ci, /Background: nothing of its own\./)
+    assert.match(ci, /follows the switch directly/)
     assert.deepEqual(cards[1].labels, ['Off', 'Shadow', 'Active'])
     const gate = cards[0].text
     assert.match(gate, /Checks every Bash command and file edit/)
@@ -4465,7 +4540,7 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
     assert.equal(typeof request.id, 'string')
-    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow' })
+    assert.deepEqual(request.modules, { gate: 'off', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }, 'every card sends its state, the pressed one changed')
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, 'the real writer takes the map the panel sent')
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="gate"]').textContent), undefined, { timeout: 25000 })
     assert.equal(await page.evaluate(() => document.querySelector('[data-module-said="steward"]').textContent), '', 'only the pressed card answers')
@@ -4474,13 +4549,13 @@ test('Modules: pressing a state sends the whole map to the worker, and the answe
   }
 })
 
-test('Modules: verify-done offers Off and Shadow only, and switching it off sends a six-module map the real writer accepts', MODULES_SKIP, async () => {
+test('Modules: verify-done offers Off and Shadow only, and switching it off sends the whole eight-module map the real writer accepts', MODULES_SKIP, async () => {
   const { browser, page, errors } = await openPanel(SCENARIOS.ready)
   try {
     await page.click('[data-module-states="verify-done"] button[data-value="off"]')
     await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
     const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
-    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off' })
+    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off', 'ci-watch': 'shadow', memory: 'shadow' })
     assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
     await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="verify-done"]').textContent), undefined, { timeout: 25000 })
     assert.deepEqual(errors, [])
@@ -4504,6 +4579,187 @@ test('Modules: the verify-done card in Spanish says what it measures, that it bl
   }
 })
 
+test('Modules: ci-watch offers Off, Shadow and Active, and every state it offers goes through the real writer', MODULES_SKIP, async () => {
+  for (const state of ['off', 'active']) {
+    const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+    try {
+      await page.click(`[data-module-states="ci-watch"] button[data-value="${state}"]`)
+      await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+      const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+      assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': state, memory: 'shadow' })
+      assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules }, `the real writer takes ci-watch ${state}`)
+      await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="ci-watch"]').textContent), undefined, { timeout: 25000 })
+      assert.deepEqual(errors, [])
+    } finally {
+      await browser.close()
+    }
+  }
+  // Shadow, the state it starts in, is pressed already: pressing it again sends nothing, and pressing it from Active sends it.
+  const active = withModuleStates({ 'ci-watch': 'active' })
+  const { browser, page } = await openPanel(active)
+  try {
+    assert.deepEqual((await moduleCards(page))[6].pressed, ['active'])
+    await page.click('[data-module-states="ci-watch"] button[data-value="shadow"]')
+    await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+    assert.equal(request.modules['ci-watch'], 'shadow')
+    assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the ci-watch card in Spanish says what it watches, that Shadow tells the agent nothing and what it costs', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS.ready, 'es')
+  try {
+    const card = (await moduleCards(page))[6]
+    assert.equal(card.name, 'Vigía de CI')
+    assert.deepEqual(card.labels, ['Apagado', 'Sombra', 'Activo'])
+    assert.match(card.text, /vigila con gh la ejecución de CI y te avisa aquí cuando termina/)
+    assert.match(card.text, /En Sombra no le envía nada al agente/)
+    assert.match(card.text, /En Activo, además, le avisa al agente una vez, cuando está libre/)
+    assert.match(card.text, /como máximo 45 llamadas a gh por cada vigilancia \(el tope de su calendario de consultas, no una medición\), sin llamadas a Jev ni a ningún modelo/)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the ci-watch card shows a week of figures from the log, and says "not measured yet" - never zeros - when it has none', MODULES_SKIP, async () => {
+  // The week's figures, as the measurements summary carries them.
+  const measured = await openPanel(SCENARIOS.ready)
+  try {
+    const text = (await moduleCards(measured.page))[6].text
+    assert.match(text, /Last 7 days: watches 14, CI checks by the agent meanwhile 38, long sleeps 27 \(what a note would replace\)\./)
+    assert.doesNotMatch(text, /notes sent/, 'Shadow sends none, so the card does not mention them')
+  } finally {
+    await measured.browser.close()
+  }
+  // Active, with notes sent.
+  const notes = await openPanel({ ...SCENARIOS.ready, measurementsSummary: { ...SCENARIOS.ready.measurementsSummary, ciWatch: { ...SCENARIOS.ready.measurementsSummary.ciWatch, injected: 9 } } })
+  try {
+    assert.match((await moduleCards(notes.page))[6].text, /long sleeps 27, notes sent 9 \(what a note would replace\)\./)
+  } finally {
+    await notes.browser.close()
+  }
+  // A worker older than the card sends no figure: unknown, not zero.
+  const { ciWatch: _ignored, ...older } = SCENARIOS.ready.measurementsSummary
+  const unknown = await openPanel({ ...SCENARIOS.ready, measurementsSummary: older })
+  try {
+    const text = (await moduleCards(unknown.page))[6].text
+    assert.match(text, /Last 7 days: not measured yet\./)
+    assert.doesNotMatch(text, /watches 0|CI checks by the agent meanwhile 0/)
+  } finally {
+    await unknown.browser.close()
+  }
+  // The log exists but holds no watch: say so, in words.
+  const none = await openPanel({ ...SCENARIOS.ready, measurementsSummary: { ...SCENARIOS.ready.measurementsSummary, ciWatch: { watches: 0, finished: 0, failed: 0, ghCalls: 0, pollsReplaced: 0, sleepsReplaced: 0, injected: 0 } } })
+  try {
+    const text = (await moduleCards(none.page))[6].text
+    assert.match(text, /Last 7 days: no watches yet\./)
+    assert.doesNotMatch(text, /long sleeps 0/)
+  } finally {
+    await none.browser.close()
+  }
+  // Spanish.
+  const es = await openPanel(SCENARIOS.ready, 'es')
+  try {
+    assert.match((await moduleCards(es.page))[6].text, /Últimos 7 días: vigilancias 14, consultas de CI del agente mientras tanto 38, esperas largas 27 \(lo que un aviso habría reemplazado\)\./)
+  } finally {
+    await es.browser.close()
+  }
+  const esUnknown = await openPanel({ ...SCENARIOS.ready, measurementsSummary: older }, 'es')
+  try {
+    assert.match((await moduleCards(esUnknown.page))[6].text, /Últimos 7 días: aún sin medir\./)
+  } finally {
+    await esUnknown.browser.close()
+  }
+})
+
+// Memory in Shadow (odd/tasks/memory-shadow.md, M14): Off and Shadow only;
+// the backend and the signal that decided it, the fixed fork sample, what
+// Haiku and the fork see, the quota note and the week's counts from the
+// shared measurements summary.
+test('Modules: the memory card offers Off and Shadow, states the fork sample, what Haiku and the fork see, the quota and the week', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+  try {
+    const card = (await moduleCards(page))[7]
+    assert.equal(card.id, 'memory')
+    assert.deepEqual(card.labels, ['Off', 'Shadow'])
+    assert.deepEqual(card.pressed, ['shadow'])
+    assert.match(card.text, /In Shadow it only measures: it saves nothing to Engram, judges no conflict and writes no memory file/)
+    assert.match(card.text, /Active, which writes, is not offered yet\./)
+    assert.match(card.text, /one Haiku call per answered turn and, on 1 in 5 turns Haiku marks for an update, one fork of the session/)
+    assert.match(card.text, /Haiku calls and forks count against your Max plan quota\./)
+    assert.match(card.text, /Haiku sees your MEMORY\.md \(up to 8,000 characters\) and the last exchange \(up to 12,000 characters, secrets redacted/)
+    assert.match(card.text, /The fork sees this session's own transcript/)
+    assert.match(card.text, /Where it would save: Engram, which is live \(its tools are connected and it answered the check\)\./)
+    assert.match(card.text, /This week: 212 Haiku decisions, 20% marked for an update, 8 forks\. It would save 5 feedback, 1 user, 4 project and 1 reference\. Your main thread saved 65 times on its own, and Haiku agreed with it on 86% of turns\./)
+    assert.match(card.text, /Background: nothing of its own\./)
+    assert.match(card.text, /follows the switch directly/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: switching memory off sends the whole map, and the real writer accepts it', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel(SCENARIOS.ready)
+  try {
+    await page.click('[data-module-states="memory"] button[data-value="off"]')
+    await page.waitForFunction(() => !!window.__written.featureModulesSaveRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.featureModulesSaveRequest)
+    assert.deepEqual(request.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'off' })
+    assert.deepEqual(realSave(request.modules), { ok: true, value: request.modules })
+    await page.waitForFunction(() => /Saved\./.test(document.querySelector('[data-module-said="memory"]').textContent), undefined, { timeout: 25000 })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: the memory card with nothing logged yet, and with Engram refused, down or absent, says so', MODULES_SKIP, async () => {
+  const empty = await openPanel(SCENARIOS.empty)
+  try {
+    const card = (await moduleCards(empty.page))[7]
+    assert.match(card.text, /Where it would save: not detected yet\. The first answered turn decides it\./)
+    assert.match(card.text, /This week: nothing logged yet\./)
+  } finally {
+    await empty.browser.close()
+  }
+  const cases = [
+    [{ backend: 'live', decidedBy: 'tools+health', permission: 'refused' }, /Engram is connected, but its check was refused for want of a permission rule/],
+    [{ backend: 'configured-down', decidedBy: 'user-config', permission: 'unknown' }, /Engram is configured but not answering \(found in your user MCP config\)\. It would save to auto-memory and pass it to Engram later\./],
+    [{ backend: 'absent', decidedBy: 'none', permission: 'unknown' }, /Where it would save: auto-memory, since there is no Engram \(no sign of Engram\)\./]
+  ]
+  for (const [latest, expected] of cases) {
+    const ready = SCENARIOS.ready
+    const scenario = { ...ready, measurementsSummary: { ...ready.measurementsSummary, memory: { ...ready.measurementsSummary.memory, latest: { at: '2026-09-24T17:40:00.000Z', ...latest } } } }
+    const { browser, page } = await openPanel(scenario)
+    try {
+      assert.match((await moduleCards(page))[7].text, expected)
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('Modules: the memory card in Spanish speaks with tú and says the same', MODULES_SKIP, async () => {
+  const { browser, page } = await openPanel(SCENARIOS.ready, 'es')
+  try {
+    const card = (await moduleCards(page))[7]
+    assert.equal(card.name, 'Memoria')
+    assert.deepEqual(card.labels, ['Apagado', 'Sombra'])
+    assert.match(card.text, /En sombra solo mide: no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria/)
+    assert.match(card.text, /en 1 de cada 5 turnos que Haiku marca para actualizar, un fork de la sesión/)
+    assert.match(card.text, /cuentan contra la cuota de tu plan Max/)
+    assert.match(card.text, /Esta semana: 212 decisiones de Haiku, 20% para actualizar y 8 forks\./)
+    assert.doesNotMatch(card.text, /\b(tenés|podés|revisá|decime|querés)\b/, 'no voseo')
+  } finally {
+    await browser.close()
+  }
+})
+
+
 test('Modules: a state the card already shows sends nothing', MODULES_SKIP, async () => {
   const { browser, page } = await openPanel(SCENARIOS.ready)
   try {
@@ -4524,6 +4780,8 @@ test('Modules: an install left alone by a newer one is named on the card and in 
     // verify-done has no hooks, so a newer install in the way changes nothing on its card.
     assert.deepEqual(cards[5].pressed, ['shadow'])
     assert.match(cards[5].text, /follows the switch directly/)
+    assert.deepEqual(cards[6].pressed, ['shadow'])
+    assert.match(cards[6].text, /follows the switch directly/)
     assert.match(gate.text, /Skipped: a newer install \(version 0\.7\.1\) keeps its own hooks\. Press "Set up" to replace it\./)
     assert.deepEqual(gate.pressed, ['off'])
     await page.click('[data-module-states="skill-selection"] button[data-value="shadow"]')
@@ -4562,7 +4820,7 @@ test('Modules: with the gate off its settings are hidden, a note says why, and i
   const { browser, page, errors } = await openPanel(SCENARIOS['modules-mixed'])
   try {
     const cards = await moduleCards(page)
-    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active'], ['off']])
+    assert.deepEqual(cards.map((c) => c.pressed), [['off'], ['shadow'], ['active'], ['active'], ['active'], ['off'], ['shadow'], ['shadow']])
     assert.match(cards[0].text, /Hooks removed from Claude Code, as you chose\./)
     assert.match(cards[0].text, /With the gate off, nothing checks Bash commands or file edits/)
     const lines = await page.evaluate(() => document.getElementById('claude-integration-status').innerText)
@@ -4694,4 +4952,98 @@ test('every modules.* key and the module hook lines exist in both languages, acc
     assert.match(es.get(key), /[áéíóúñ«]/, `${key} reads as Spanish with its accents`)
   }
   assert.doesNotMatch([...es.values()].join(' '), /\b(tenés|podés|elegí|pulsá|revisá)\b/i, 'tú, never voseo')
+})
+
+// Track S (odd/tasks/steward-pre-cold.md): the pre-cold tier has its own
+// switch (off, measure, active; measure by default) in the same steward row,
+// saved through the same writer, and its weekly numbers on the board.
+test('steward: the pre-cold switch shows off, measure and active, measure by default, and saving sends it', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const status = { ...MODEL_ROUTER_STATUS_EFFORT, targets: MODEL_ROUTER_STATUS_EFFORT.targets.map((target, at) => (at === 1 ? { ...target, steward: { ...target.steward, coldMode: 'active' } } : target)) }
+  const { browser, page, errors } = await openPanel({ modelRouterStatus: status })
+  try {
+    await page.click('#tab-models')
+    const cold = await page.evaluate(() => Array.from(document.querySelectorAll('[data-steward-target]')).map((row) => {
+      const group = row.querySelector('[data-steward-cold]')
+      const buttons = group === null ? [] : Array.from(group.querySelectorAll('button'))
+      const pressed = buttons.find((b) => b.className === 'active')
+      return { text: group === null ? '' : group.innerText, values: buttons.map((b) => b.getAttribute('data-value')), pressed: pressed === undefined ? null : pressed.getAttribute('data-value') }
+    }))
+    assert.deepEqual(cold.map((c) => c.pressed), ['measure', 'active'])
+    assert.deepEqual(cold[0].values, ['off', 'measure', 'active'])
+    assert.match(cold[0].text, /cache/i)
+    const hint = await page.evaluate(() => document.querySelector('#model-router-section').innerText)
+    assert.match(hint, /idle/i)
+    await page.evaluate(() => document.querySelector('[data-steward-target="home"] [data-steward-cold] button[data-value="off"]').click())
+    await page.click('[data-steward-target="home"] .model-router-steward-save')
+    await page.waitForFunction(() => !!window.__written.modelRouterConfigRequest, undefined, { timeout: 25000 })
+    const request = await page.evaluate(() => window.__written.modelRouterConfigRequest)
+    assert.deepEqual(request.steward, { mode: 'measure', threshold: 120000, softMode: 'measure', coldMode: 'off' })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('steward: the pre-cold switch reads in Spanish too', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page } = await openPanel({ modelRouterStatus: MODEL_ROUTER_STATUS_EFFORT }, 'es')
+  try {
+    await page.click('#tab-models')
+    const text = await page.evaluate(() => document.querySelector('[data-steward-target="home"] [data-steward-cold]').innerText)
+    assert.match(text, /caché/)
+  } finally {
+    await browser.close()
+  }
+})
+
+// Track S: the pre-cold tier's weekly numbers under the steward's, both locales.
+test('steward: the pre-cold tier shows fired, would fire, returned within 24 h, realized saving and waste for 7 days', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const preCold = { fired: 3, wouldFire: 5, skipped: 2, returned: 3, returnedEarly: 1, notReturned: 2, pending: 2, coldRewriteOnReturn: 410000, realizedSaving: 250000, waste: 44000, engineIdleCompactions: 0 }
+  const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold } }
+  for (const locale of ['en', 'es']) {
+    const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward }, locale)
+    try {
+      const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
+      if (locale === 'en') {
+        assert.match(text, /Before the cache goes cold \(7 days\): compacted 3 · would have compacted 5 \(measuring only\) · back within 24 h, cache already cold: 3 · back while still warm: 1 · not back: 2 · still waiting: 2/)
+        assert.match(text, /Realized saving: 250,000 · waste \(nobody came back, or came back while warm\): 44,000 \(input-token equivalents\)/)
+        assert.match(text, /Cold rewrite when the measured sessions came back: 410,000 tokens/)
+      } else {
+        assert.match(text, /Antes de que se enfríe la caché \(7 días\): compactó 3 · habría compactado 5 \(solo mide\) · retomadas en 24 h, con la caché ya fría: 3 · retomadas aún tibia: 1 · no retomadas: 2 · aún en espera: 2/)
+        assert.match(text, /Ahorro realizado: 250,000|Ahorro realizado: 250.000/)
+        assert.match(text, /Reescritura en frío/)
+      }
+      assert.deepEqual(errors, [])
+    } finally {
+      await browser.close()
+    }
+  }
+})
+
+test('steward: with no pre-cold row the board says so, and no saving line is invented', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold: null } }
+  const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward })
+  try {
+    const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
+    assert.match(text, /Before the cache goes cold: no decision yet/)
+    assert.doesNotMatch(text, /Realized saving/)
+    assert.doesNotMatch(text, /Cold rewrite/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('steward: measured only, the pre-cold line shows no saving or waste line', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const preCold = { fired: 0, wouldFire: 2, skipped: 0, returned: 1, returnedEarly: 0, notReturned: 0, pending: 1, coldRewriteOnReturn: 150000, realizedSaving: null, waste: null, engineIdleCompactions: 0 }
+  const withSteward = { ...POPULATED_CONSUMPTION, steward: { decisions: 6, applied: 2, wouldCompact: 1, freedPerStep: 140000, preCold } }
+  const { browser, page, errors } = await openBoardPanel({ consumptionSummary: withSteward })
+  try {
+    const text = await page.evaluate(() => document.getElementById('consumption-body').innerText)
+    assert.match(text, /would have compacted 2/)
+    assert.doesNotMatch(text, /Realized saving/)
+    assert.match(text, /Cold rewrite when the measured sessions came back: 150,000 tokens/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
 })

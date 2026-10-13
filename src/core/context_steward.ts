@@ -20,6 +20,7 @@ import { CONTEXT_STEWARD_CATALOG } from "./i18n_context_steward.ts";
 import { summarizeSinceLastPrompt } from "./model_router_stage.ts";
 import type { ActivityMessage } from "./model_router_stage.ts";
 import { redactSecretsForJev } from "./secret_redaction.ts";
+import type { PreColdSkipReason } from "./steward_pre_cold.ts";
 
 export type StewardMode = "off" | "measure" | "active";
 export const STEWARD_MODES: readonly StewardMode[] = ["off", "measure", "active"];
@@ -217,7 +218,8 @@ export function interpretSteward(answers: Record<string, Answer>): StewardJudgme
 // The decision
 // ---------------------------------------------------------------------------
 
-export type StewardDecisionKind = "boundary" | "new-topic" | "hard-limit" | "soft-limit" | "mid-task" | "low-confidence" | "jev-failed";
+/** Track S: `pre-cold` is the idle tier firing (or, measured, would); `pre-cold-skip` a due wake it stood down on. */
+export type StewardDecisionKind = "boundary" | "new-topic" | "hard-limit" | "soft-limit" | "mid-task" | "low-confidence" | "jev-failed" | "pre-cold" | "pre-cold-skip";
 
 export interface StewardDecision {
   readonly decision: StewardDecisionKind;
@@ -318,8 +320,20 @@ function listed(values: readonly string[], none: string): string {
 
 /** The instructions the compaction runs with: what the summary must keep for the work to go on. */
 export function stewardInstructions(facts: StewardFacts): string {
+  return instructionsAfter("A unit of work just closed. Summarize so the work can continue without re-reading anything, and keep, verbatim where they are names:", facts);
+}
+
+/** Track S: the same keep-list for a compaction made while the session is idle, before its prompt cache expires. */
+export function preColdInstructions(facts: StewardFacts): string {
+  return instructionsAfter(
+    "The session went idle and its prompt cache is about to expire, so it is compacted now, while the cache is warm, for the person's return. Summarize so the work can continue without re-reading anything, and keep, verbatim where they are names:",
+    facts,
+  );
+}
+
+function instructionsAfter(lead: string, facts: StewardFacts): string {
   return [
-    "A unit of work just closed. Summarize so the work can continue without re-reading anything, and keep, verbatim where they are names:",
+    lead,
     `- The active feature documents (${listed(facts.featureDocs, "any odd/tasks/*.md path seen in the conversation")}): for each, its path, its open checklist items (the unchecked ones, with their ids) and its next step.`,
     `- The branch names (${listed(facts.branches, "every branch named in the conversation")}), the last commits (${listed(facts.commits, "the last commits made, hash and message")}) and the pull request numbers (${listed(facts.prs, "any pull request opened or discussed")}).`,
     "- The decisions made and why, and the person's standing constraints and rules (what they asked always or never to do).",
@@ -333,13 +347,14 @@ export function stewardInstructions(facts: StewardFacts): string {
 // ---------------------------------------------------------------------------
 
 /** The tier that fires a compaction, as the research names them (odd/research/steward-1m.md §6). */
-export type StewardTier = "boundary" | "new-topic" | "soft-400k" | "hard-600k";
+export type StewardTier = "boundary" | "new-topic" | "soft-400k" | "hard-600k" | "pre-cold";
 
 /** The tier behind a decision that compacts (or, measuring, would), or null. */
 export function stewardTier(decision: StewardDecisionKind): StewardTier | null {
   if (decision === "boundary" || decision === "new-topic") return decision;
   if (decision === "soft-limit") return "soft-400k";
   if (decision === "hard-limit") return "hard-600k";
+  if (decision === "pre-cold") return "pre-cold";
   return null;
 }
 
@@ -385,6 +400,24 @@ export interface StewardRecord {
   readonly wouldFire: StewardTier | null;
   /** 0.6.22 T1 (JEVADV-97): the verdict's top-two probability gap; absent when there is none. */
   readonly margin?: number;
+  /** Track S: present on the idle tier's rows only, which the turn-end summary leaves out. */
+  readonly trigger?: "pre-cold";
+  /** Why a due pre-cold wake stood down; null when it fired (or would). */
+  readonly coldSkip?: PreColdSkipReason | null;
+  /** Time since the last main turn ended, in ms. */
+  readonly idleMs?: number;
+  /** Whether the context was in the engine's own idle-compaction zone. */
+  readonly engineZone?: boolean;
+  /** The compaction's own cost in input-token equivalents (preColdCompactCost); null when unknown or not applied. */
+  readonly compactCost?: number | null;
+}
+
+/** Track S: what a pre-cold row adds. */
+export interface PreColdRecordFields {
+  readonly coldSkip: PreColdSkipReason | null;
+  readonly idleMs: number;
+  readonly engineZone: boolean;
+  readonly compactCost: number | null;
 }
 
 export interface StewardRecordInput {
@@ -404,6 +437,7 @@ export interface StewardRecordInput {
   readonly currentModel: string | null;
   readonly wouldFire: StewardTier | null;
   readonly margin?: number;
+  readonly preCold?: PreColdRecordFields;
 }
 
 /** One log line: numbers and names only, never prompt text. */
@@ -428,6 +462,7 @@ export function stewardDecisionRecord(input: StewardRecordInput): StewardRecord 
     tier: stewardTier(input.decision.decision),
     wouldFire: input.wouldFire,
     ...(input.margin === undefined ? {} : { margin: input.margin }),
+    ...(input.preCold === undefined ? {} : { trigger: "pre-cold", ...input.preCold }),
   };
 }
 
@@ -490,6 +525,8 @@ export function summarizeStewardDecisions(rows: readonly unknown[], nowMs: numbe
   let measured = 0;
   for (const row of rows) {
     if (!isRecord(row) || typeof row.at !== "string") continue;
+    // Track S: the idle tier and the logged events have their own summary (summarizePreCold).
+    if (row.trigger === "pre-cold" || row.event !== undefined) continue;
     const atMs = Date.parse(row.at);
     if (Number.isNaN(atMs) || atMs > nowMs || atMs < nowMs - windowMs) continue;
     decisions += 1;

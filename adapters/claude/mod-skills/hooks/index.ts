@@ -163,6 +163,7 @@ import type { AgentPlace, ListedAgent, RunningSubagent, SubagentEffortSource, Su
 import { PENDING_ISOLATION_PLACE, absolutePath, agentPlace, cachedGitPlace, callDirectory, newPlaceCache, samePlace } from '../../../../src/core/agent_place.ts'
 import type { GitPlace, PlaceCache } from '../../../../src/core/agent_place.ts'
 import { subagentBand } from '../../../../src/core/subagent_band.ts'
+import type { SubagentBand } from '../../../../src/core/subagent_band.ts'
 import type { KeptDecision } from '../../../../src/core/model_router_status.ts'
 import { decideEngineTurn, decideStage, isNewPrompt, lastPromptKey, medianOf, quotaPressureOf, summarizePreviousTurn, summarizeSinceLastPrompt, switchedByColdCache } from '../../../../src/core/model_router_stage.ts'
 import { cacheWarmth, parseCacheClock, readCacheTail } from '../../../../src/core/cache_warmth.ts'
@@ -175,12 +176,26 @@ import type { RouterDestination } from '../../../../src/core/model_router_destin
 import { decideSubagent, subagentStepEffort } from '../../../../src/core/model_router_subagent.ts'
 import type { SubagentDecision } from '../../../../src/core/model_router_subagent.ts'
 import { isPersonPromptOrigin } from '../../../../src/core/model_router_origin.ts'
-import type { RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardState } from '../types/index.d.ts'
-import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
-import type { StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
+import type { MemoryShadowState, RouterCacheState, RouterPromptOrigin, RouterSessionStats, RouterSticky, StewardColdState, StewardState } from '../types/index.d.ts'
+import { buildStewardQuestions, buildStewardState, collectStewardFacts, decideSteward, interpretSteward, preColdInstructions, softTierFires, stewardClearHint, stewardDecisionFileName, stewardDecisionRecord, stewardGate, stewardInstructions, stewardStatusPart, summarizeStewardActivity } from '../../../../src/core/context_steward.ts'
+import type { PreColdRecordFields, StewardActivity, StewardDecision, StewardJudgment, StewardMode, StewardNotApplied, StewardTier } from '../../../../src/core/context_steward.ts'
 import { stewardFromSettings } from '../../../../src/core/model_router_mode.ts'
+import { PRE_COLD_MAX_WAKES, PRE_COLD_TTL_MS, decidePreCold, engineIdleCompactMinTokens, inEngineZone, isEngineIdleCompaction, preColdCompactCost, preColdEarliestMs, preColdMode } from '../../../../src/core/steward_pre_cold.ts'
+import type { PreColdJudgment } from '../../../../src/core/steward_pre_cold.ts'
 import { buildVerifyDoneQuestions, buildVerifyDoneState, decideVerifyDone, interpretVerifyDone, isVerifyDoneCandidate, verifyDoneDecisionFileName, verifyDoneRecord } from '../../../../src/core/verify_done.ts'
 import type { VerifyDoneJudgment } from '../../../../src/core/verify_done.ts'
+import { noteTypingEdit, typingAtSubmit, typingFileName, typingRecord } from '../../../../src/core/typing_lead_time.ts'
+import type { TypingDraft } from '../../../../src/core/typing_lead_time.ts'
+import { CI_RUN_FIELDS, CI_ROW_KEEP_MS, ciBandRows, ciBashCallFrom, ciFinishedText, ciNoteText, ciWatchDecisionFileName, ciWatchRecord, ciWatchStep, classifyAgentCall, couldStartCiWatch, detectCiTriggers, extendCiWatch, isCiWatchNote, newCiWatchProgress, parseCiBandRows, parseCiRuns, parsePrMergeView } from '../../../../src/core/ci_watch.ts'
+import type { CiBandRow, CiRun, CiTriggerKind, CiVerdict, CiWatchOutcome, CiWatchProgress, CiWatchRecordInput } from '../../../../src/core/ci_watch.ts'
+import { autoMemoryDir, claudeConfigDir, classifyHealthOutcome, detectMemoryBackend, engramServerFromTools, engramUsable, parseEnabledEngramPlugin, parseUserMcpEngram } from '../../../../src/core/memory_detect.ts'
+import type { HealthCall, HealthOutcome, MemoryBackendDecision } from '../../../../src/core/memory_detect.ts'
+import { GATE_MAX_TOKENS, GATE_SYSTEM, GATE_TIMEOUT_MS, buildGatePrompt, freeChecks, lastExchange, parseGate, typedPrompt } from '../../../../src/core/memory_decide.ts'
+import { buildDraftPrompt, parseDraft } from '../../../../src/core/memory_draft.ts'
+import type { MemoryDraft } from '../../../../src/core/memory_draft.ts'
+import { EMPTY_SEEN, classifyMainCall, draftCounts, dryJudgeBuilds, isForkSampled, memoryDecisionFileName, memoryShadowRecord, memoryTopics, noteMainCall, readMemSaveCandidates, withinBudget } from '../../../../src/core/memory_shadow.ts'
+import type { ForkOutcome, GateOutcome, MainMemorySeen, ModelTokens } from '../../../../src/core/memory_shadow.ts'
+import { isRecord } from '../../../../src/guards.ts'
 
 const DEFAULT_BUDGET_MS = 800
 const DEFAULT_SHORTLIST = 3
@@ -1894,6 +1909,25 @@ interface StewardHost {
   readonly runningTurn: () => string | null
   /** Sets the steward's part of the status line; null clears it. */
   readonly show: (text: string | null) => void
+  /** Track S: the idle timer's bookkeeping, plain data held by `register`. */
+  readonly cold: PreColdIdle
+}
+
+/**
+ * Track S: what the pre-cold tier keeps in `register` between hooks, so a
+ * timer can tell whether it is still the one for this idle period and whether
+ * the engine compacted on its own meanwhile. No `$` in here (JEVADV-43).
+ */
+interface PreColdIdle {
+  /** When the idle period began (the steward's timer after the last main turn), or null while a turn runs. */
+  armedAt: number | null
+  timer: { readonly cancel: () => void } | null
+  /** When an `auto` compaction last began or ended. */
+  lastAutoCompactAt: number | null
+  /** An `auto` PreCompact with no PostCompact yet. */
+  autoCompactRunning: boolean
+  /** A pre-cold compaction of ours is running. */
+  ownCallPending: boolean
 }
 
 /** One decision on its way to being logged, and, in active mode, applied. */
@@ -2019,6 +2053,7 @@ async function stewardAfterTurn($: EngineInterface, options: PluginOptions, host
     if (!gate.ask || contextTokens === null) return
     const messages = await $.session.messages()
     const jev = await askStewardJudgment($, options, messages, contextTokens, turnsSinceCompaction)
+    await rememberStewardJudgment($, jev, state.personTurns)
     const softActive = effectiveMode(moduleStewardState, switchMode(settings.softMode === 'active')) === 'active'
     const decision = decideSteward({ jev, hardLimit: gate.hardLimit, softLimit: gate.softLimit, softActive })
     // The soft tier ships measured: while its switch is on measure, a turn it
@@ -2103,6 +2138,241 @@ async function finishSteward($: EngineInterface, plan: StewardPlan, applied: boo
 }
 
 // ---------------------------------------------------------------------------
+// The steward's pre-cold tier (track S, odd/tasks/steward-pre-cold.md). An
+// idle session's prompt cache expires after its TTL (1h, assumed: see
+// PRE_COLD_TTL_MS), and the next prompt re-writes it all cold at 2x. The
+// steward's turn-end timer arms an idle timer; while no turn starts, its wake
+// decides with `decidePreCold` (which keeps clear of the engine's own idle
+// compaction) and, in active mode, compacts while the cache is still warm.
+// Measure mode (the default) logs what it would do and moves no steward
+// state. Main thread only, interactive only (a headless session refuses the
+// compaction, and the tier then stops arming), never inside a turn. Every
+// due decision at or above the threshold is a row in the steward's log.
+// Fails open.
+// ---------------------------------------------------------------------------
+
+/** The plugin store key (per account) that says the engine's own idle compaction was seen here. */
+const ENGINE_SEEN_STORE_KEY = 'engineIdleCompactSeenAt'
+const EMPTY_STEWARD_COLD: StewardColdState = { judgment: null, headless: false }
+
+async function readStewardColdState($: EngineInterface): Promise<StewardColdState> {
+  const read = await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'stewardCold' })
+  return read.value ?? EMPTY_STEWARD_COLD
+}
+
+/** Keeps the turn-end verdict for the idle tier, with the turn it judged. Best-effort. */
+async function rememberStewardJudgment($: EngineInterface, jev: StewardJudgment | null, personTurns: number): Promise<void> {
+  try {
+    const cold = await readStewardColdState($)
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'stewardCold' }, { ...cold, judgment: jev === null ? null : { verdict: jev.verdict, confidence: jev.confidence, personTurns } })
+  } catch {
+    // Without it the idle tier reads "no verdict", never "mid-task".
+  }
+}
+
+async function readEngineSeen($: EngineInterface): Promise<boolean> {
+  try {
+    return typeof (await $.store.get(ENGINE_SEEN_STORE_KEY)) === 'string'
+  } catch {
+    // Unknown: the slot after the engine's still keeps the tier from racing it.
+    return false
+  }
+}
+
+/** The timer `turn.complete` schedules for the steward: the turn-end decision, then the idle timer. Never throws. */
+async function stewardTimer($: EngineInterface, options: PluginOptions, host: StewardHost, modulesFile: FeatureModulesFile): Promise<void> {
+  let endedAt: number | null = null
+  try {
+    endedAt = await $.clock.now()
+  } catch {
+    endedAt = null
+  }
+  await stewardAfterTurn($, options, host, modulesFile)
+  if (endedAt !== null) await armPreCold($, host, modulesFile, endedAt)
+}
+
+/** Arms the idle timer for the idle period that began at `endedAt`, replacing any older one. */
+async function armPreCold($: EngineInterface, host: StewardHost, modulesFile: FeatureModulesFile, endedAt: number): Promise<void> {
+  try {
+    if (host.runningTurn() !== null) return
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'steward') === 'off') return
+    const settings = stewardFromSettings(await readVaultSettings($))
+    if (preColdMode(settings.mode, settings.coldMode) === 'off') return
+    if ((await readStewardColdState($)).headless) return
+    host.cold.timer?.cancel()
+    host.cold.autoCompactRunning = false
+    host.cold.armedAt = endedAt
+    host.cold.timer = $.clock.after(preColdEarliestMs(await preColdTtlMs($)), () => preColdWake($, host, modulesFile, endedAt, 1))
+  } catch {
+    // No timer: the session goes cold as it would have.
+  }
+}
+
+/**
+ * The main loop's cache TTL as track R reads it from the transcript tail
+ * (`routerCache`, kept while the router is on); 1h when unknown, which is
+ * 99.99% of measured responses.
+ */
+async function preColdTtlMs($: EngineInterface): Promise<number> {
+  try {
+    return (await readCacheClock($)).ttlMs ?? PRE_COLD_TTL_MS
+  } catch {
+    return PRE_COLD_TTL_MS
+  }
+}
+
+/** What a pre-cold row needs besides the outcome. */
+interface PreColdPlan {
+  readonly mode: 'measure' | 'active'
+  readonly contextBefore: number
+  readonly contextWindow: number | null
+  readonly judgment: PreColdJudgment | null
+  readonly personTurns: number
+  readonly idleMs: number
+}
+
+interface PreColdOutcome {
+  readonly decision: StewardDecision
+  readonly applied: boolean
+  readonly contextAfter: number | null
+  readonly notApplied: StewardNotApplied | null
+  readonly wouldFire: StewardTier | null
+  readonly preCold: PreColdRecordFields
+}
+
+/** A wake of the idle timer: stale or early does nothing (an early one re-arms for the rest); a due one decides, logs and, in active mode, compacts. */
+async function preColdWake($: EngineInterface, host: StewardHost, modulesFile: FeatureModulesFile, armedAt: number, wake: number): Promise<void> {
+  try {
+    if (host.cold.armedAt !== armedAt || host.runningTurn() !== null) return
+    const idleMs = (await $.clock.now()) - armedAt
+    const ttlMs = await preColdTtlMs($)
+    const earliest = preColdEarliestMs(ttlMs)
+    if (idleMs < earliest) {
+      if (wake < PRE_COLD_MAX_WAKES) host.cold.timer = $.clock.after(earliest - idleMs, () => preColdWake($, host, modulesFile, armedAt, wake + 1))
+      return
+    }
+    const moduleStewardState = moduleState(await resolveFeatureModules($, modulesFile), 'steward')
+    const settings = stewardFromSettings(await readVaultSettings($))
+    // Shadow caps it at measure, as it does the rest of the steward.
+    const mode = effectiveMode(moduleStewardState, preColdMode(settings.mode, settings.coldMode))
+    if (mode === 'off') return
+    const cold = await readStewardColdState($)
+    if (cold.headless) return
+    const usage = await $.session.usage()
+    const contextTokens = usage.context.tokens ?? null
+    const steward = await readStewardState($)
+    const judgment = cold.judgment !== null && cold.judgment.personTurns === steward.personTurns ? { verdict: cold.judgment.verdict, confidence: cold.judgment.confidence } : null
+    const lastAuto = host.cold.lastAutoCompactAt
+    const engineMinTokens = engineIdleCompactMinTokens(await $.env.get('CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS'))
+    const decision = decidePreCold({
+      contextTokens,
+      threshold: settings.threshold,
+      ttlMs,
+      idleMs,
+      engineMinTokens,
+      engineSeen: await readEngineSeen($),
+      engineCompactedSinceIdle: host.cold.autoCompactRunning || (lastAuto !== null && lastAuto >= armedAt),
+      turnsSinceCompaction: steward.lastCompactionTurn === null ? null : steward.personTurns - steward.lastCompactionTurn,
+      judgment,
+    })
+    if (decision.kind === 'wait') {
+      if (wake < PRE_COLD_MAX_WAKES) host.cold.timer = $.clock.after(decision.ms, () => preColdWake($, host, modulesFile, armedAt, wake + 1))
+      return
+    }
+    if (contextTokens === null) return
+    const plan: PreColdPlan = { mode, contextBefore: contextTokens, contextWindow: usage.context.window ?? null, judgment, personTurns: steward.personTurns, idleMs }
+    const confidence = judgment?.confidence ?? null
+    const engineZone = inEngineZone(contextTokens, engineMinTokens)
+    if (decision.kind === 'skip') {
+      if (!decision.log) return
+      await logPreCold($, plan, { decision: { decision: 'pre-cold-skip', compact: false, suggestClear: false, confidence }, applied: false, contextAfter: null, notApplied: null, wouldFire: null, preCold: { coldSkip: decision.reason, idleMs, engineZone, compactCost: null } })
+      return
+    }
+    const fire: StewardDecision = { decision: 'pre-cold', compact: true, suggestClear: false, confidence }
+    const fields = { coldSkip: null, idleMs, engineZone }
+    if (mode === 'measure') {
+      await logPreCold($, plan, { decision: fire, applied: false, contextAfter: null, notApplied: 'measure', wouldFire: 'pre-cold', preCold: { ...fields, compactCost: null } })
+      return
+    }
+    await applyPreCold($, host, plan, fire, fields)
+  } catch {
+    // The idle tier never affects the session on a failure.
+  }
+}
+
+/** Active mode: one compaction while idle, never under a turn; its result (and the headless refusal) is the row. */
+async function applyPreCold($: EngineInterface, host: StewardHost, plan: PreColdPlan, fire: StewardDecision, fields: Omit<PreColdRecordFields, 'compactCost'>): Promise<void> {
+  const notApplied = (reason: StewardNotApplied): PreColdOutcome => ({ decision: fire, applied: false, contextAfter: null, notApplied: reason, wouldFire: null, preCold: { ...fields, compactCost: null } })
+  if (host.runningTurn() !== null) {
+    await logPreCold($, plan, notApplied('turn-running'))
+    return
+  }
+  const instructions = preColdInstructions(collectStewardFacts(await $.session.messages()))
+  let result: SessionCompactResult | null = null
+  let headless = false
+  host.cold.ownCallPending = true
+  try {
+    result = await $.session.compact({ instructions })
+  } catch (error) {
+    // A -p / SDK session refuses compaction between turns (seen live): stop arming there.
+    headless = error instanceof Error && error.message.includes('headless')
+    result = null
+  } finally {
+    host.cold.ownCallPending = false
+  }
+  if (result === null) {
+    if (headless) await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'stewardCold' }, { ...(await readStewardColdState($)), headless: true })
+    await logPreCold($, plan, notApplied(headless ? 'headless' : host.runningTurn() !== null ? 'turn-running' : 'rejected'))
+    return
+  }
+  if (result.skip !== undefined) {
+    await logPreCold($, plan, notApplied('skipped'))
+    return
+  }
+  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'steward' }, { ...(await readStewardState($)), lastCompactionTurn: plan.personTurns })
+  await logPreCold($, plan, { decision: fire, applied: true, contextAfter: result.tokensAfter ?? null, notApplied: null, wouldFire: null, preCold: { ...fields, compactCost: preColdCompactCost(result.usage) } })
+}
+
+/** One pre-cold row in the steward's hourly log. */
+async function logPreCold($: EngineInterface, plan: PreColdPlan, outcome: PreColdOutcome): Promise<void> {
+  const models = await stewardModels($)
+  const mainWindow = (models.mainModel === null ? null : contextWindowOfModel(models.mainModel)) ?? plan.contextWindow
+  const at = new Date(await $.clock.now()).toISOString()
+  const record = stewardDecisionRecord({
+    at, account: await resolveAccountId($), project: baseName(await $.session.root()), mode: plan.mode, contextBefore: plan.contextBefore, decision: outcome.decision, applied: outcome.applied,
+    contextAfter: outcome.contextAfter, notApplied: outcome.notApplied, verdict: plan.judgment?.verdict ?? null, sessionId: await readSessionId($), turnIndex: plan.personTurns, mainWindow,
+    currentModel: models.currentModel, wouldFire: outcome.wouldFire, preCold: outcome.preCold,
+  })
+  await appendStewardDecision($, at, `${JSON.stringify(record)}\n`)
+}
+
+/**
+ * classic.PreCompact / classic.PostCompact: an `auto` compaction makes the
+ * armed wake stand down; one that ends while idle (no turn, no call of ours,
+ * half the TTL idle) is the engine's own idle compaction, remembered for this
+ * account in the plugin store and logged. Never throws.
+ */
+async function observeCompaction($: EngineInterface, host: Pick<StewardHost, 'runningTurn' | 'cold'>, modulesFile: FeatureModulesFile, phase: 'pre' | 'post', trigger: string): Promise<void> {
+  try {
+    if (trigger !== 'auto') return
+    const now = await $.clock.now()
+    host.cold.lastAutoCompactAt = now
+    host.cold.autoCompactRunning = phase === 'pre'
+    if (phase !== 'post') return
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'steward') === 'off') return
+    const armedAt = host.cold.armedAt
+    const idleMs = armedAt === null ? null : now - armedAt
+    if (!isEngineIdleCompaction({ trigger, turnRunning: host.runningTurn() !== null, ownCallPending: host.cold.ownCallPending, idleMs, ttlMs: PRE_COLD_TTL_MS })) return
+    const at = new Date(now).toISOString()
+    await $.store.set(ENGINE_SEEN_STORE_KEY, at)
+    const row = { at, event: 'engine-idle-compact', account: await resolveAccountId($), project: baseName(await $.session.root()), sessionId: await readSessionId($), idleMs, trigger }
+    await appendStewardDecision($, at, `${JSON.stringify(row)}\n`)
+  } catch {
+    // Observing is best-effort: unseen, the tier keeps to the slot after the engine's.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Verify the "done" (odd/tasks/verify-done-module.md). When a MAIN turn ends
 // with an answer, `turn.complete` schedules `verifyDoneAfterTurn` on a timer,
 // as it does the steward's, so nothing runs inside the turn. The timer reads
@@ -2161,6 +2431,619 @@ async function verifyDoneAfterTurn($: EngineInterface, options: PluginOptions, m
       ...(jev?.margin === undefined ? {} : { margin: jev.margin }),
     })
     await appendVerifyDoneDecision($, at, `${JSON.stringify(record)}\n`)
+  } catch {
+    // The measure never affects the session on a failure.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Typing lead time (odd/tasks/typing-lead-time.md, K0). `prompt.edit` fires on
+// every keystroke at the composer, so its hook hands `next(e)`'s result back
+// at once and only queues two host reads (clock, session id) that update a
+// draft record in memory: no file, no `$.state`. `prompt.submit` reads and
+// clears the composer's draft and appends one row per scored prompt to the
+// hour's `typing-*.jsonl`, unless skill selection is off. Fails open.
+// ---------------------------------------------------------------------------
+
+/** Each session's draft, and the queued keystroke updates `prompt.submit` waits for. One per `register`. */
+interface TypingTracking {
+  readonly drafts: Map<string, TypingDraft>;
+  pending: Promise<void>;
+}
+
+/** How long `prompt.submit` waits for queued keystroke updates before it reads the draft anyway. */
+const TYPING_SETTLE_MS = 200
+
+async function noteTypingKeystroke($: EngineInterface, typing: TypingTracking): Promise<void> {
+  const [at, sessionId] = await Promise.all([$.clock.now(), $.session.id()])
+  keepBounded(typing.drafts, sessionId, noteTypingEdit(typing.drafts.get(sessionId), at))
+}
+
+/** Called by `prompt.edit` after `next(e)`: queues the update and returns at once. Never throws. */
+function trackTypingEdit($: EngineInterface, typing: TypingTracking): void {
+  try {
+    typing.pending = typing.pending.then(() => noteTypingKeystroke($, typing)).catch(() => {})
+  } catch {
+    // A keystroke is never affected by the measure.
+  }
+}
+
+/** Appends one row to the current hour's `typing-*.jsonl`, best-effort. */
+async function appendTyping($: EngineInterface, atIso: string, line: string): Promise<void> {
+  try {
+    const paths = await resolveHomePaths($)
+    if (!paths) return
+    await appendToFile($, `${paths.cacheDir}/${typingFileName(atIso)}`, line)
+  } catch {
+    // Logging is best-effort and must never affect the prompt.
+  }
+}
+
+/**
+ * At `prompt.submit`: a composer submission takes its session's draft and
+ * clears it; another origin leaves the draft for the person's own Enter. A
+ * row is written only for a prompt the skill scorer sees (`scored`) and only
+ * when skill selection is not off (`write`). Never throws.
+ */
+async function recordTypingAtSubmit($: EngineInterface, typing: TypingTracking, originKind: string, scored: boolean, write: boolean): Promise<void> {
+  try {
+    // Settled first, so a keystroke update still queued reads its clock before the submission does.
+    await Promise.race([typing.pending, $.clock.sleep(TYPING_SETTLE_MS).catch(() => {})])
+    const submittedAt = await $.clock.now()
+    const sessionId = await readSessionId($)
+    const draft = sessionId === null ? undefined : typing.drafts.get(sessionId)
+    if (originKind === 'composer' && sessionId !== null) typing.drafts.delete(sessionId)
+    if (!scored || !write) return
+    const at = new Date(submittedAt).toISOString()
+    const record = typingRecord({ at, sessionId, origin: originKind, typing: typingAtSubmit(originKind, draft, submittedAt) })
+    await appendTyping($, at, `${JSON.stringify(record)}\n`)
+  } catch {
+    // The measure never affects the prompt.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The CI watcher (odd/tasks/ci-watcher.md). After a successful push, pull
+// request or merge in the MAIN thread, a watch is started for that repository
+// and head sha: C2 resolves them, on a timer and after `next`, so the call's
+// result is never held or changed. A watch is plain data (no `$`); every
+// function that takes `$` is declared here at the top level (JEVADV-43).
+// Fails open at every step: whatever goes wrong, the call has already
+// returned and the watch is dropped without a word.
+// ---------------------------------------------------------------------------
+
+const CI_START_DELAY_MS = 200
+/** After a main turn ends, a waiting note goes this much later: the session is idle by then. */
+const CI_NOTE_DELAY_MS = 250
+/** One `gh run list` may take this long before the poll counts as failed. */
+const CI_POLL_TIMEOUT_MS = 20_000
+const CI_TOAST_MS = 15_000
+
+/** One watch. Its identity (repository and sha) is known only once `ciWatchStart` has asked git. */
+interface CiWatch {
+  readonly id: string
+  readonly trigger: CiTriggerKind
+  /** Where the command ran, from the command; the session's own directory when it said nothing. */
+  readonly dir: string
+  readonly pr: number | null
+  /** The branch the command or the engine named; resolved from git when null. */
+  branch: string | null
+  repo: string | null
+  sha: string | null
+  startedAtMs: number
+  progress: CiWatchProgress
+  /** `gh` processes this watch ran. */
+  ghCalls: number
+  /** The agent's own CI polls and long sleeps made while this watch was open: what a note would have replaced. */
+  agentPolls: number
+  agentSleeps: number
+}
+
+/** A note for the agent waiting for the session to be idle, with the decision row its fate will complete. */
+interface CiNote {
+  readonly text: string
+  readonly record: Omit<CiWatchRecordInput, 'mode' | 'injected'>
+}
+
+interface CiWatchHost {
+  readonly watches: CiWatch[]
+  /** The band's rows, mirrored to `$.state` (key `ciWatches`) so a write redraws the band. */
+  readonly rows: CiBandRow[]
+  /** Notes waiting for the main turn to end. */
+  readonly notes: CiNote[]
+  /** The main turn running now (turn.start to turn.complete), null when the session is idle. */
+  readonly runningTurn: () => string | null
+  readonly modulesFile: FeatureModulesFile
+}
+
+/** One command's answer, trimmed; null when it fails, prints nothing or cannot start. Never throws. */
+async function ciAsk($: EngineInterface, argv: readonly string[], cwd: string | null): Promise<string | null> {
+  try {
+    const result = cwd === null ? await $.process.run(argv) : await $.process.run(argv, { cwd })
+    const out = result.stdout.trim()
+    return result.exitCode === 0 && out.length > 0 ? out : null
+  } catch {
+    return null
+  }
+}
+
+/** The tool.call hook's part, after `next`: which watches this finished Bash call starts. Each one is resolved on its own timer. Never throws. */
+async function ciWatchObserve($: EngineInterface, host: CiWatchHost, command: string, outcome: unknown, toolUseId: string): Promise<void> {
+  try {
+    const call = ciBashCallFrom(command, outcome)
+    if (call === null || call.isError || !couldStartCiWatch(command, call.gitOperation !== undefined)) return
+    const base = await $.session.root()
+    const triggers = detectCiTriggers(call, base, await resolveHomeDir($))
+    triggers.forEach((trigger, index) => {
+      const watch: CiWatch = { id: `${toolUseId}:${index}`, trigger: trigger.kind, dir: trigger.dir ?? base, pr: trigger.pr, branch: trigger.branch, repo: null, sha: null, startedAtMs: 0, progress: newCiWatchProgress(), ghCalls: 0, agentPolls: 0, agentSleeps: 0 }
+      host.watches.push(watch)
+      $.clock.after(CI_START_DELAY_MS, () => ciWatchStart($, host, watch))
+    })
+  } catch {
+    // The watcher never touches the call.
+  }
+}
+
+function ciWatchDrop(host: CiWatchHost, watch: CiWatch): void {
+  const at = host.watches.indexOf(watch)
+  if (at >= 0) host.watches.splice(at, 1)
+}
+
+/** Mirrors the band's rows to `$.state`; the band re-renders on the write. Best-effort. */
+async function ciPublishRows($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' }, { rows: host.rows.map((row) => ({ ...row, failed: [...row.failed] })) })
+  } catch {
+    // The band is never a reason to fail a watch.
+  }
+}
+
+function ciSetRow(host: CiWatchHost, row: CiBandRow): void {
+  const at = host.rows.findIndex((other) => other.id === row.id)
+  if (at >= 0) host.rows[at] = row
+  else host.rows.push(row)
+}
+
+function ciRemoveRow(host: CiWatchHost, id: string): void {
+  const at = host.rows.findIndex((row) => row.id === id)
+  if (at >= 0) host.rows.splice(at, 1)
+}
+
+function ciWatchingRow(watch: CiWatch, seen: number, running: number): CiBandRow {
+  return { id: watch.id, sha7: (watch.sha ?? '').slice(0, 7), branch: watch.branch, status: 'watching', startedAtMs: watch.startedAtMs, done: seen - running, total: seen, failed: [], finishedAtMs: null }
+}
+
+/** The timer a trigger arms: finds the repository and the head sha, then polls. A directory that is no repository, a merge with no merge commit yet and any failure drop the watch quietly. */
+async function ciWatchStart($: EngineInterface, host: CiWatchHost, watch: CiWatch): Promise<void> {
+  try {
+    if (moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch') === 'off') return ciWatchDrop(host, watch)
+    let sha: string | null = null
+    if (watch.trigger === 'pr-merge') {
+      const view = await ciAsk($, watch.pr === null ? ['gh', 'pr', 'view', '--json', 'mergeCommit,baseRefName'] : ['gh', 'pr', 'view', String(watch.pr), '--json', 'mergeCommit,baseRefName'], watch.dir)
+      watch.ghCalls += 1
+      const merged = view === null ? null : parsePrMergeView(view)
+      if (merged === null) return ciWatchDrop(host, watch)
+      sha = merged.sha
+      watch.branch = merged.branch
+    }
+    const repo = await ciAsk($, ['git', '-C', watch.dir, 'rev-parse', '--show-toplevel'], null)
+    if (repo === null) return ciWatchDrop(host, watch)
+    if (sha === null) {
+      sha = await ciAsk($, ['git', '-C', watch.dir, 'rev-parse', '--verify', `${watch.branch ?? 'HEAD'}^{commit}`], null)
+      if (watch.branch === null) watch.branch = await ciAsk($, ['git', '-C', watch.dir, 'branch', '--show-current'], null)
+    }
+    if (sha === null) return ciWatchDrop(host, watch)
+    const same = host.watches.find((other) => other !== watch && other.repo === repo && other.sha === sha)
+    if (same !== undefined) {
+      // A later trigger on a commit already watched (a pull request after the push) extends that watch.
+      same.progress = extendCiWatch(same.progress)
+      same.agentPolls += watch.agentPolls
+      same.agentSleeps += watch.agentSleeps
+      same.ghCalls += watch.ghCalls
+      return ciWatchDrop(host, watch)
+    }
+    watch.repo = repo
+    watch.sha = sha
+    watch.startedAtMs = await $.clock.now()
+    ciSetRow(host, ciWatchingRow(watch, 0, 0))
+    await ciPublishRows($, host)
+    await ciWatchTick($, host, watch)
+  } catch {
+    ciWatchDrop(host, watch)
+  }
+}
+
+/** One poll of `gh run list` and what follows: the next timer, or the end of the watch. */
+async function ciWatchTick($: EngineInterface, host: CiWatchHost, watch: CiWatch): Promise<void> {
+  try {
+    if (!host.watches.includes(watch) || watch.repo === null || watch.sha === null) return
+    // Read again here: the switch may have moved since the last poll armed this.
+    const state = moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch')
+    if (state === 'off') return await ciWatchFinish($, host, watch, 'gh-missing', null, state)
+    let runs: readonly CiRun[] | null
+    try {
+      const argv = ['gh', 'run', 'list', ...(watch.branch === null ? [] : ['--branch', watch.branch]), '--limit', '30', '--json', CI_RUN_FIELDS]
+      const answer = await $.process.run(argv, { cwd: watch.repo, timeoutMs: CI_POLL_TIMEOUT_MS })
+      watch.ghCalls += 1
+      runs = answer.exitCode === 0 ? parseCiRuns(answer.stdout) : null
+    } catch {
+      // gh is not installed (or would not start): nothing more to try.
+      return await ciWatchFinish($, host, watch, 'gh-missing', null, state)
+    }
+    const step = ciWatchStep(watch.progress, runs, { sha: watch.sha, sinceMs: watch.startedAtMs })
+    watch.progress = step.progress
+    if (step.kind === 'wait') {
+      ciSetRow(host, ciWatchingRow(watch, step.seen, step.running))
+      await ciPublishRows($, host)
+      $.clock.after(step.delayMs, () => ciWatchTick($, host, watch))
+      return
+    }
+    if (step.kind === 'done') return await ciWatchFinish($, host, watch, step.verdict.outcome, step.verdict, state)
+    await ciWatchFinish($, host, watch, step.reason, null, state)
+  } catch {
+    ciWatchDrop(host, watch)
+  }
+}
+
+/** Appends one decision line to the current hour's `ci-watch-decisions-*.jsonl`, best-effort. */
+async function appendCiWatchDecision($: EngineInterface, atIso: string, line: string): Promise<void> {
+  try {
+    const paths = await resolveHomePaths($)
+    if (!paths) return
+    await appendToFile($, `${paths.cacheDir}/${ciWatchDecisionFileName(atIso)}`, line)
+  } catch {
+    // Logging is best-effort and must never affect the session.
+  }
+}
+
+/**
+ * The end of a watch, whatever the way: it leaves the list; its row turns
+ * into the verdict (and the person sees a toast) or goes; one decision row is
+ * written. `state` is the module's state as the caller just read it: off means
+ * the switch moved meanwhile, and nothing is shown or kept.
+ */
+async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWatch, outcome: CiWatchOutcome, verdict: CiVerdict | null, state: ModuleState): Promise<void> {
+  ciWatchDrop(host, watch)
+  if (state === 'off') {
+    ciRemoveRow(host, watch.id)
+    await ciPublishRows($, host)
+    return
+  }
+  const finishedAtMs = await $.clock.now()
+  if (verdict === null) {
+    ciRemoveRow(host, watch.id)
+    await ciPublishRows($, host)
+  } else {
+    const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, finishedAtMs }
+    ciSetRow(host, row)
+    await ciPublishRows($, host)
+    $.ui.toast(ciFinishedText(await resolveLocale($), row), { timeoutMs: CI_TOAST_MS })
+    $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
+  }
+  const at = new Date(finishedAtMs).toISOString()
+  const record: CiNote['record'] = {
+    at,
+    account: await resolveAccountId($),
+    project: baseName(await $.session.root()),
+    sessionId: await readSessionId($),
+    trigger: watch.trigger,
+    outcome,
+    watchedMs: finishedAtMs - watch.startedAtMs,
+    ghCalls: watch.ghCalls,
+    agentPolls: watch.agentPolls,
+    agentSleeps: watch.agentSleeps,
+    notified: verdict !== null,
+  }
+  // Active tells the agent too, once the session is idle; the row is written when that is settled.
+  const note: CiNote | null = state === 'active' && verdict !== null ? { text: ciNoteText({ sha7: (watch.sha ?? '').slice(0, 7), branch: watch.branch }, verdict), record } : null
+  if (note === null) return await ciWriteRecord($, record, state, false)
+  if (host.runningTurn() !== null) {
+    host.notes.push(note)
+    return
+  }
+  await ciSubmitNote($, host, note)
+}
+
+/** Appends the watch's decision row. */
+async function ciWriteRecord($: EngineInterface, record: CiNote['record'], state: ModuleState, injected: boolean): Promise<void> {
+  await appendCiWatchDecision($, record.at, `${JSON.stringify(ciWatchRecord({ ...record, mode: state === 'active' ? 'active' : 'shadow', injected }))}\n`)
+}
+
+/**
+ * Hands one note to the agent as a plugin's prompt (never `asUser`: the model
+ * reads it framed as the plugin's). Read again here: if the module is no
+ * longer Active the note is dropped, and its row says it was not sent. Not
+ * awaited: the engine runs the prompt once idle, and a watch's row must not
+ * wait for a whole turn.
+ */
+async function ciSubmitNote($: EngineInterface, host: CiWatchHost, note: CiNote): Promise<void> {
+  const state = moduleState(await resolveFeatureModules($, host.modulesFile), 'ci-watch')
+  if (state === 'off') return
+  let sent = false
+  if (state === 'active') {
+    try {
+      void Promise.resolve($.prompt.submit({ text: note.text })).catch(() => undefined)
+      sent = true
+    } catch {
+      // The note is only a help: the turn goes on without it.
+    }
+  }
+  await ciWriteRecord($, note.record, state, sent)
+}
+
+/** The timer a main turn's end arms when a note is waiting: the session is idle now, unless the next turn has already started. */
+async function ciSubmitPending($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    if (host.runningTurn() !== null) return
+    const note = host.notes.shift()
+    if (note !== undefined) await ciSubmitNote($, host, note)
+  } catch {
+    // Fails open.
+  }
+}
+
+/** Counts the main thread's own CI poll or long sleep against the newest open watch. Plain data: no `$`. */
+function ciWatchCount(host: CiWatchHost, command: string): void {
+  const kind = classifyAgentCall('Bash', command)
+  const watch = host.watches[host.watches.length - 1]
+  if (kind === null || watch === undefined) return
+  if (kind === 'ci-poll') watch.agentPolls += 1
+  else watch.agentSleeps += 1
+}
+
+/** The timer after a watch ended: its row has been shown long enough. */
+async function ciRowsExpire($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const keep = host.rows.filter((row) => row.status === 'watching' || (row.finishedAtMs !== null && now - row.finishedAtMs <= CI_ROW_KEEP_MS))
+    host.rows.splice(0, host.rows.length, ...keep)
+    await ciPublishRows($, host)
+  } catch {
+    // The band is never a reason to fail.
+  }
+}
+
+/** A reload runs `register` again and forgets the watches (their timers are gone), but `$.state` kept the rows: clear them, so nothing stays on screen that nothing polls. */
+async function ciWatchOnSessionStart($: EngineInterface, host: CiWatchHost): Promise<void> {
+  try {
+    const stored = parseCiBandRows((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' })).value)
+    if (stored.length > 0 && host.rows.length === 0) await ciPublishRows($, host)
+  } catch {
+    // Best-effort.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memory in Shadow (odd/tasks/memory-shadow.md, M8). `session.start` decides
+// the backend (Engram live, configured but down, or absent) from the tool
+// list and one read-only `mem_current_project`, on a timer so the start never
+// waits on an MCP dial. After a MAIN turn that ended with an answer,
+// `turn.complete` schedules `memoryAfterTurn`, as it does verify-done's: free
+// checks, one Haiku SKIP/UPDATE, a fork on a sampled UPDATE (one in
+// FORK_SAMPLE_EVERY), the judge built dry, one row. `tool.call` only watches
+// the main thread's own mem_save, mem_judge and Write or Edit into the
+// memory folder, after `next`. Shadow writes nothing: no mem_save, no
+// mem_judge, no memory file, no spool. Fails open everywhere.
+// ---------------------------------------------------------------------------
+
+const MEMORY_DELAY_MS = 250
+const MEMORY_HEALTH_TIMEOUT_MS = 3000
+/** What the fork reads of the memory folder when it is the store: whole files, at most this many and this many characters. */
+const MEMORY_FORK_FILES = 40
+const MEMORY_FORK_CHARS = 40_000
+/** The files read for their topic keys when Engram is the store. */
+const MEMORY_TOPIC_FILES = 200
+
+/** What `register` keeps for memory between hooks: the main thread's memory calls this turn, and the memory folder once worked out. */
+interface MemoryHolder {
+  seen: MainMemorySeen
+  dir: string | null | undefined
+}
+
+/** What the turn-end timer reads from `register`: the main turn running now, or null between turns. */
+interface MemoryHost {
+  readonly runningTurn: () => string | null
+}
+
+async function readTextOrNull($: EngineInterface, path: string): Promise<string | null> {
+  try {
+    return (await $.fs.exists(path)) ? await $.fs.read(path) : null
+  } catch {
+    return null
+  }
+}
+
+/** Claude Code's config dir: `CLAUDE_CONFIG_DIR` (an Orca account folder) when set, else `~/.claude`; null without a home. */
+async function memoryConfigDir($: EngineInterface): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+  if ((configured === undefined || configured === '') && (home === undefined || home === '')) return null
+  return claudeConfigDir({ claudeConfigDir: configured ?? null, home: home ?? '' })
+}
+
+/** The auto-memory folder of this session: under the repository root, shared by its worktrees (engine probes, d). */
+async function resolveMemoryDir($: EngineInterface): Promise<string | null> {
+  const configDir = await memoryConfigDir($)
+  if (configDir === null) return null
+  let repoRoot: string | null = null
+  try {
+    repoRoot = (await $.session.repo())?.root ?? null
+  } catch {
+    repoRoot = null
+  }
+  return autoMemoryDir({ configDir, repoRoot, cwd: await $.session.cwd() })
+}
+
+/** `mem_current_project`, the one Engram call Shadow makes: read only, raced against a clock. */
+async function engramHealth($: EngineInterface, server: string): Promise<HealthOutcome> {
+  const call: Promise<HealthCall> = $.mcp.call(server, 'mem_current_project', {}).then(
+    (result): HealthCall => ({ ok: true, result }),
+    (error: unknown): HealthCall => ({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+  )
+  const late: Promise<HealthCall> = $.clock.sleep(MEMORY_HEALTH_TIMEOUT_MS).then((): HealthCall => ({ ok: false, error: 'timed out' }))
+  return classifyHealthOutcome(await Promise.race([call, late]))
+}
+
+/**
+ * Decides the backend. The health call is made only when the tools name a
+ * server and it was not made before this session (`previous`), or failed then
+ * (once: the turn's re-check is marked `rechecked`). The config
+ * files are read only when the tools show no Engram; the binary is never
+ * run (no process per session), so `binary` never decides here.
+ */
+async function detectMemory($: EngineInterface, at: 'start' | 'turn', previous: MemoryShadowState | undefined): Promise<MemoryShadowState> {
+  const liveServer = engramServerFromTools(await $.tool.list())
+  // A failed start (a cold dial) is asked once more; ok and permission are kept, so the call is not repeated.
+  let health: HealthOutcome | null = previous?.health === 'failed' ? null : (previous?.health ?? null)
+  if (liveServer !== null && health === null) health = await engramHealth($, liveServer)
+  let userConfigured = false
+  let pluginEnabled = false
+  if (liveServer === null) {
+    const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+    const home = await $.env.get('HOME')
+    const configDir = await memoryConfigDir($)
+    const claudeJson = configured !== undefined && configured !== '' ? `${configDir}/.claude.json` : `${home ?? ''}/.claude.json`
+    userConfigured = parseUserMcpEngram((await readTextOrNull($, claudeJson)) ?? '')
+    pluginEnabled = configDir !== null && parseEnabledEngramPlugin((await readTextOrNull($, `${configDir}/settings.json`)) ?? '')
+  }
+  const decision = detectMemoryBackend({ liveServer, health, userConfigured, pluginEnabled, binaryVersion: null })
+  return { ...decision, detectedAt: at, health, rechecked: at === 'turn' || (previous?.rechecked ?? false) }
+}
+
+/** session.start's timer: decide the backend and keep it in `$.state`. Never throws. */
+async function memoryDetectAtStart($: EngineInterface, modulesFile: FeatureModulesFile): Promise<void> {
+  try {
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'memory') === 'off') return
+    const state = await detectMemory($, 'start', undefined)
+    await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'memory' }, state)
+  } catch {
+    // No backend known yet: the first turn decides it.
+  }
+}
+
+/** The backend for this turn: the start's, looked at once more when the start found no live Engram (servers connect late). */
+async function ensureMemoryBackend($: EngineInterface): Promise<MemoryShadowState> {
+  const stored = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'memory' })).value
+  if (stored !== undefined && (stored.backend === 'live' || stored.rechecked)) return stored
+  const state = await detectMemory($, 'turn', stored)
+  await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'memory' }, state)
+  return state
+}
+
+/** tool.call, after `next`: counts a main-thread memory call into this turn's tally. Never throws, never touches the call. */
+async function observeMemoryCall($: EngineInterface, holder: MemoryHolder, tool: string, args: Readonly<Record<string, unknown>>, result: unknown): Promise<void> {
+  try {
+    if (isRecord(result) && typeof result.deny === 'string') return
+    if (holder.dir === undefined && !tool.startsWith('mcp__')) holder.dir = await resolveMemoryDir($)
+    const call = classifyMainCall(tool, args, holder.dir ?? null)
+    if (call === null) return
+    const candidates = call === 'engram-save' && isRecord(result) ? readMemSaveCandidates(result.result) : []
+    holder.seen = noteMainCall(holder.seen, call, { type: args.type, candidates })
+  } catch {
+    // Watching is never a reason to touch a call.
+  }
+}
+
+/** This turn's tally, handed to its timer; the next turn starts from zero. */
+function takeMemorySeen(holder: MemoryHolder): MainMemorySeen {
+  const seen = holder.seen
+  holder.seen = EMPTY_SEEN
+  return seen
+}
+
+/** The memory files by name, read in name order: up to `maxFiles` `.md` files (MEMORY.md left out). */
+async function readMemoryFiles($: EngineInterface, dir: string, maxFiles: number): Promise<Record<string, string>> {
+  const files: Record<string, string> = {}
+  let entries: readonly { readonly name: string; readonly kind: string }[] = []
+  try {
+    entries = await $.fs.list(dir)
+  } catch {
+    return files
+  }
+  const names = entries.filter((entry) => entry.kind === 'file' && entry.name.endsWith('.md') && entry.name.toLowerCase() !== 'memory.md').map((entry) => entry.name).sort().slice(0, maxFiles)
+  for (const name of names) {
+    const text = await readTextOrNull($, `${dir}/${name}`)
+    if (text !== null) files[name] = text
+  }
+  return files
+}
+
+/** Appends one decision line to the current hour's `memory-decisions-*.jsonl`, best-effort. */
+async function appendMemoryDecision($: EngineInterface, atIso: string, line: string): Promise<void> {
+  try {
+    const paths = await resolveHomePaths($)
+    if (!paths) return
+    await appendToFile($, `${paths.cacheDir}/${memoryDecisionFileName(atIso)}`, line)
+  } catch {
+    // Logging is best-effort and must never affect the session.
+  }
+}
+
+/** The fork on a sampled UPDATE: the writer prompt over the session's own transcript, read strictly; nothing it says is written. */
+async function draftInShadow($: EngineInterface, reason: string, backend: MemoryBackendDecision, dir: string | null, today: string): Promise<{ fork: ForkOutcome; forkMs: number; forkUsage: ModelTokens | null; draft: MemoryDraft | null }> {
+  const engramLive = engramUsable(backend)
+  const files = dir === null ? {} : await readMemoryFiles($, dir, engramLive ? MEMORY_TOPIC_FILES : MEMORY_FORK_FILES)
+  const prompt = buildDraftPrompt({
+    reason,
+    engramLive,
+    files: engramLive ? {} : withinBudget(files, MEMORY_FORK_FILES, MEMORY_FORK_CHARS),
+    topics: engramLive ? memoryTopics(files) : [],
+    today,
+  })
+  const asked = await $.clock.now()
+  const reply = await $.model.fork({ prompt })
+  const forkMs = (await $.clock.now()) - asked
+  const forkUsage = 'usage' in reply ? reply.usage : null
+  if (!reply.isAnswered) return { fork: 'no-answer', forkMs, forkUsage, draft: null }
+  const parsed = parseDraft(reply.text)
+  return parsed.ok ? { fork: 'drafted', forkMs, forkUsage, draft: parsed.draft } : { fork: 'unparsable', forkMs, forkUsage, draft: null }
+}
+
+/** The timer `turn.complete` schedules: free checks, Haiku, the sampled fork, the dry judge, one row. Writes nothing else. Never throws. */
+async function memoryAfterTurn($: EngineInterface, modulesFile: FeatureModulesFile, host: MemoryHost, seen: MainMemorySeen, turnId: string): Promise<void> {
+  try {
+    // Read again here: the switch may have moved in the delay since turn.complete scheduled this.
+    if (moduleState(await resolveFeatureModules($, modulesFile), 'memory') === 'off') return
+    const messages = await $.session.messages()
+    if (!freeChecks({ agentId: undefined, reason: 'answer', prompt: typedPrompt(messages) }).pass) return
+    const state = await ensureMemoryBackend($)
+    const backend: MemoryBackendDecision = { backend: state.backend, decidedBy: state.decidedBy, server: state.server, permission: state.permission }
+    const dir = await resolveMemoryDir($)
+    const index = dir === null ? '' : ((await readTextOrNull($, `${dir}/MEMORY.md`)) ?? '')
+    const sessionId = await readSessionId($)
+    const asked = await $.clock.now()
+    const reply = await $.model.complete({ model: 'haiku', system: GATE_SYSTEM, prompt: buildGatePrompt({ index, exchange: lastExchange(messages) }), maxTokens: GATE_MAX_TOKENS, effort: 'low', timeoutMs: GATE_TIMEOUT_MS })
+    const answered = await $.clock.now()
+    const verdict = reply.isAnswered ? parseGate(reply.text) : null
+    const gate: GateOutcome = verdict === null ? 'no-answer' : verdict.kind === 'failure' ? 'malformed' : verdict.kind
+    let fork: ForkOutcome | null = null
+    let forkMs: number | null = null
+    let forkUsage: ModelTokens | null = null
+    let draft: MemoryDraft | null = null
+    if (verdict !== null && verdict.kind === 'update') {
+      if (!isForkSampled(sessionId, turnId)) fork = 'not-sampled'
+      else if (host.runningTurn() !== null) fork = 'turn-moved-on'
+      else ({ fork, forkMs, forkUsage, draft } = await draftInShadow($, verdict.reason, backend, dir, new Date(answered).toISOString().slice(0, 10)))
+    }
+    const at = new Date(await $.clock.now()).toISOString()
+    const record = memoryShadowRecord({
+      at,
+      account: await resolveAccountId($),
+      project: baseName(await $.session.root()),
+      sessionId,
+      backend,
+      detectedAt: state.detectedAt,
+      gate,
+      gateMs: answered - asked,
+      gateUsage: reply.usage,
+      fork,
+      forkMs,
+      forkUsage,
+      draft: draft === null ? null : draftCounts(draft, backend),
+      judgeBuilds: draft !== null && engramUsable(backend) ? dryJudgeBuilds(draft.saves, seen.candidates) : 0,
+      seen,
+    })
+    await appendMemoryDecision($, at, `${JSON.stringify(record)}\n`)
   } catch {
     // The measure never affects the session on a failure.
   }
@@ -2312,6 +3195,24 @@ export function register(on: On, options: PluginOptions): void {
   // The main turn running now (turn.start → turn.complete), so the steward
   // never compacts under a turn that started after the one it judged.
   let activeTurnId: string | null = null
+  // Memory (memoryAfterTurn): the main thread's memory calls this turn, handed to the turn's timer at turn.complete.
+  const memoryHolder: MemoryHolder = { seen: EMPTY_SEEN, dir: undefined }
+  // K0: each session's draft at the composer (TypingTracking), in memory only.
+  const typing: TypingTracking = { drafts: new Map<string, TypingDraft>(), pending: Promise.resolve() }
+
+  // K0: the keystroke goes through first and untouched; the measure only
+  // queues an in-memory update (trackTypingEdit), so no keystroke waits on it.
+  on('prompt.edit', async ($, e, next) => {
+    const result = await next(e)
+    trackTypingEdit($, typing)
+    return result
+  })
+
+  // Track S: the steward's idle timer and what it must know about compactions (PreColdIdle).
+  const preColdIdle: PreColdIdle = { armedAt: null, timer: null, lastAutoCompactAt: null, autoCompactRunning: false, ownCallPending: false }
+  const compactionWatch: Pick<StewardHost, 'runningTurn' | 'cold'> = { runningTurn: () => activeTurnId, cold: preColdIdle }
+  // The CI watcher's watches and the notes waiting for the main turn to end (plain data; a reload starts with none).
+  const ciWatch: CiWatchHost = { watches: [], rows: [], notes: [], runningTurn: () => activeTurnId, modulesFile }
 
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
     // A subagent's own listing is left alone, since nothing here suggests
@@ -2343,6 +3244,12 @@ export function register(on: On, options: PluginOptions): void {
     // `off` module does none of its work below -- no state write, no Jev call.
     const modules = await resolveFeatureModules($, modulesFile)
     const skillState = moduleState(modules, 'skill-selection')
+    // K0: the typing lead time, measured first so its clock read is the
+    // submission's. Scored means what the skill scorer below would see, so
+    // the CI watcher's own note (skipped below) is not scored either.
+    const typedText = e.text.trim()
+    const ciWatchNote = e.origin.kind === 'plugin' && isCiWatchNote(typedText)
+    await recordTypingAtSubmit($, typing, e.origin.kind, typedText.length > 0 && !typedText.startsWith('/') && !ciWatchNote, skillState !== 'off')
     if (moduleState(modules, 'model-router') !== 'off') {
       try {
         const origin: RouterPromptOrigin = { kind: e.origin.kind }
@@ -2359,6 +3266,9 @@ export function register(on: On, options: PluginOptions): void {
     // unsampled measurement-mode prompt, a thrown error) must never leave a
     // stale `true` from an earlier turn for prompt.attachment to read.
     pendingListingWithheld = false
+
+    // The CI watcher's own note (origin: this plugin): nothing to route and no skill to pick, so no Jev call.
+    if (ciWatchNote) return next(e)
 
     // Nothing to route for an empty prompt or a typed slash command --
     // the latter already names its own skill (and, for tools, already
@@ -2804,17 +3714,26 @@ export function register(on: On, options: PluginOptions): void {
   // whenever a plugin beneath already drew one: never a second band over it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    if (moduleState(await resolveFeatureModules($, modulesFile), 'model-router') === 'off') return next(e)
+    const modules = await resolveFeatureModules($, modulesFile)
+    const routerOn = moduleState(modules, 'model-router') !== 'off'
+    const ciOn = moduleState(modules, 'ci-watch') !== 'off'
+    if (!routerOn && !ciOn) return next(e)
     const beneath = await next(e)
     if (beneath.type !== 'engine') return beneath
     try {
-      const stored = parseRunningSubagents((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'runningSubagents' })).value)
-      const { shown } = reconcileRunning(stored, await listAgents($), null, runningSubagents.beforeLoad ?? undefined)
-      const band = subagentBand(await resolveLocale($), shown, e.props.bodyColumns)
-      if (band === null) return beneath
+      const locale = await resolveLocale($)
+      let band: SubagentBand | null = null
+      if (routerOn) {
+        const stored = parseRunningSubagents((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'runningSubagents' })).value)
+        const { shown } = reconcileRunning(stored, await listAgents($), null, runningSubagents.beforeLoad ?? undefined)
+        band = subagentBand(locale, shown, e.props.bodyColumns)
+      }
+      // The CI watcher's rows sit under the subagents', drawn from the copy in `$.state` (reading it subscribes this band to its writes).
+      const watching = ciOn ? ciBandRows(locale, parseCiBandRows((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' })).value), await $.clock.now(), e.props.bodyColumns) : []
+      if (band === null && watching.length === 0) return beneath
       const { Box, Text } = $.ui.resolve(e)
-      const rows = band.rows.map((row) => Text({ wrap: 'truncate-end', children: row.why.length > 0 ? [row.text, Text({ dimColor: true, children: row.why })] : row.text }))
-      return Box({ flexDirection: 'column', children: [Text({ bold: true, wrap: 'truncate-end', children: band.heading }), ...rows] })
+      const agentLines = band === null ? [] : [Text({ bold: true, wrap: 'truncate-end', children: band.heading }), ...band.rows.map((row) => Text({ wrap: 'truncate-end', children: row.why.length > 0 ? [row.text, Text({ dimColor: true, children: row.why })] : row.text }))]
+      return Box({ flexDirection: 'column', children: [...agentLines, ...watching.map((line) => Text({ wrap: 'truncate-end', children: line }))] })
     } catch {
       return beneath
     }
@@ -2826,6 +3745,23 @@ export function register(on: On, options: PluginOptions): void {
   // this turn has ended, never inside it.
   on('turn.start', async ($, e, next) => {
     activeTurnId = e.turnId
+    // Track S: a turn ends the idle period; its armed timer, if it still runs, finds a stale stamp.
+    preColdIdle.timer?.cancel()
+    preColdIdle.timer = null
+    preColdIdle.armedAt = null
+    // A PreCompact whose PostCompact never came (blocked, failed) must not hold the tier off for good.
+    preColdIdle.autoCompactRunning = false
+    return next(e)
+  })
+
+  // Track S: compactions the steward did not make. An `auto` one makes the
+  // idle timer stand down; one while idle is the engine's own idle compaction.
+  on('classic.PreCompact', async ($, e, next) => {
+    await observeCompaction($, compactionWatch, modulesFile, 'pre', e.trigger)
+    return next(e)
+  })
+  on('classic.PostCompact', async ($, e, next) => {
+    await observeCompaction($, compactionWatch, modulesFile, 'post', e.trigger)
     return next(e)
   })
 
@@ -2833,14 +3769,26 @@ export function register(on: On, options: PluginOptions): void {
   // the running set kept in `$.state` (and any agent the host runs that
   // nothing recorded) is shown at once, not at the next spawn.
   on('session.start', async ($, e, next) => {
-    if (moduleState(await resolveFeatureModules($, modulesFile), 'model-router') === 'off') return next(e)
-    try {
-      await snapshotBeforeLoad($, runningSubagents)
-      agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
-      const line = statusLine()
-      if (line !== null) $.ui.status(line)
-    } catch {
-      // The status line is never a reason to fail a start.
+    const modules = await resolveFeatureModules($, modulesFile)
+    // The CI watcher: the watches of the old load are gone with their timers; so are their rows.
+    if (moduleState(modules, 'ci-watch') !== 'off') await ciWatchOnSessionStart($, ciWatch)
+    if (moduleState(modules, 'model-router') !== 'off') {
+      try {
+        await snapshotBeforeLoad($, runningSubagents)
+        agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
+        const line = statusLine()
+        if (line !== null) $.ui.status(line)
+      } catch {
+        // The status line is never a reason to fail a start.
+      }
+    }
+    // Memory (memoryDetectAtStart): the backend is decided on a timer, so the start never waits on an MCP dial.
+    if (moduleState(modules, 'memory') !== 'off') {
+      try {
+        $.clock.after(MEMORY_DELAY_MS, () => memoryDetectAtStart($, modulesFile))
+      } catch {
+        // No timer: the first turn decides the backend.
+      }
     }
     return next(e)
   })
@@ -2860,6 +3808,14 @@ export function register(on: On, options: PluginOptions): void {
     }
     if (e.agentId === undefined) {
       activeTurnId = null
+      // The CI watcher: a note waiting for the session to be idle goes now (its own timer; none is armed when no note waits).
+      if (ciWatch.notes.length > 0) {
+        try {
+          $.clock.after(CI_NOTE_DELAY_MS, () => ciSubmitPending($, ciWatch))
+        } catch {
+          // No timer, no note: the turn ends as it would have.
+        }
+      }
       if (e.reason === 'answer' && moduleState(modules, 'steward') !== 'off') {
         const host: StewardHost = {
           runningTurn: () => activeTurnId,
@@ -2867,9 +3823,10 @@ export function register(on: On, options: PluginOptions): void {
             stewardStatusText = text
             $.ui.status(statusLine() ?? undefined)
           },
+          cold: preColdIdle,
         }
         try {
-          $.clock.after(STEWARD_DELAY_MS, () => stewardAfterTurn($, options, host, modulesFile))
+          $.clock.after(STEWARD_DELAY_MS, () => stewardTimer($, options, host, modulesFile))
         } catch {
           // No timer, no steward: the turn ends as it would have.
         }
@@ -2879,6 +3836,17 @@ export function register(on: On, options: PluginOptions): void {
         const finalMessage = e.answer
         try {
           $.clock.after(VERIFY_DONE_DELAY_MS, () => verifyDoneAfterTurn($, options, modulesFile, finalMessage))
+        } catch {
+          // No timer, no measure: the turn ends as it would have.
+        }
+      }
+      // Memory (memoryAfterTurn): this turn's memory calls go to its own timer, whatever the reason; the next turn starts from zero.
+      const memorySeen = takeMemorySeen(memoryHolder)
+      if (e.reason === 'answer' && moduleState(modules, 'memory') !== 'off') {
+        const turnId = e.turnId
+        const memoryHost: MemoryHost = { runningTurn: () => activeTurnId }
+        try {
+          $.clock.after(MEMORY_DELAY_MS, () => memoryAfterTurn($, modulesFile, memoryHost, memorySeen, turnId))
         } catch {
           // No timer, no measure: the turn ends as it would have.
         }
@@ -2932,7 +3900,11 @@ export function register(on: On, options: PluginOptions): void {
         }
       }
     }
+    // The CI watcher: the agent's own wait for CI is counted as it starts (a `gh run watch` can run for minutes).
+    if (e.agentId === undefined && e.tool === 'Bash' && moduleState(modules, 'ci-watch') !== 'off') ciWatchCount(ciWatch, e.command)
     const result = await next(e)
+    // The CI watcher: a push, pull request or merge in the main thread starts a watch. After `next`; the result below is `next`'s, untouched.
+    if (e.agentId === undefined && e.tool === 'Bash' && moduleState(modules, 'ci-watch') !== 'off') await ciWatchObserve($, ciWatch, e.command, result, e.tool_use_id)
     // 0.6.16 T4: a failed main-loop call marks its step for the measure-only hold rule.
     if (routerOn && e.agentId === undefined && phaseHolder.turn !== null) {
       try {
@@ -2941,6 +3913,10 @@ export function register(on: On, options: PluginOptions): void {
       } catch {
         // Measure-only: never a reason to touch the call.
       }
+    }
+    // Memory (observeMemoryCall): what the main thread saved this turn, read off the call after it ran; the result is not touched.
+    if (e.agentId === undefined && moduleState(modules, 'memory') !== 'off') {
+      await observeMemoryCall($, memoryHolder, e.tool, e as unknown as Readonly<Record<string, unknown>>, result)
     }
     return result
   })

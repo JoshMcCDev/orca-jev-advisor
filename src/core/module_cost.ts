@@ -17,14 +17,17 @@
 // timings leave this module.
 
 import { isRecord } from "../guards.ts";
+import { classifyAgentCall, sleepSeconds, summarizeCiWatchRows } from "./ci_watch.ts";
+import type { CiWatchSummary } from "./ci_watch.ts";
 import { summarizeStewardActivity } from "./context_steward.ts";
 import type { ActivityMessage } from "./model_router_stage.ts";
 import { wideBatches } from "./tool_decisions.ts";
 import { isVerifyDoneCandidate, summarizeVerifyDoneDecisions } from "./verify_done.ts";
+import { summarizeMemoryDecisions } from "./memory_shadow.ts";
 
-export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done";
+export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done" | "ci-watch";
 
-export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done"];
+export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch"];
 
 export interface TimeWindow {
   readonly sinceMs: number;
@@ -200,7 +203,7 @@ function matches(matcher: string, tool: string): boolean {
 }
 
 function emptyByModule(): Record<ModuleId, number> {
-  return { gate: 0, "model-router": 0, steward: 0, "skill-selection": 0, board: 0, "verify-done": 0 };
+  return { gate: 0, "model-router": 0, steward: 0, "skill-selection": 0, board: 0, "verify-done": 0, "ci-watch": 0 };
 }
 
 /**
@@ -254,7 +257,24 @@ export interface TranscriptTally {
   verifyDoneCandidates: number;
   /** Each session's open turn: its prompt and its tool calls, a result's text and error folded into its call. */
   readonly openTurns: Map<string, OpenTurn>;
+  /** ci-watch (0.9.0): main-thread Bash calls that poll CI (gh run list|view|watch, gh pr checks), by the module's own predicate. */
+  ciPolls: number;
+  /** Main-thread sleeps of 10 s or more that are no CI poll: what the module counts as a sleep a note would replace. */
+  ciSleeps: number;
+  /** Every main-thread Bash call that sleeps, whatever its length or company: the baseline's reading of "sleep". */
+  anySleeps: number;
+  /** Memory (M15): the main thread's Engram calls, by tool (`mem_save`), either server spelling. */
+  readonly engramCalls: Map<string, number>;
+  /** Memory (M15): each main-thread response (message.id) that called Engram, its Engram tools and its other tool calls. */
+  readonly engramResponses: Map<string, EngramResponse>;
 }
+
+interface EngramResponse {
+  readonly engram: Set<string>;
+  other: number;
+}
+
+const ENGRAM_TOOL_NAME = /^mcp__(?:engram|plugin_engram_engram)__(\w+)$/;
 
 interface OpenToolUse {
   readonly tool_use_id: string;
@@ -284,7 +304,33 @@ export function newTranscriptTally(): TranscriptTally {
     verifyDoneTurns: 0,
     verifyDoneCandidates: 0,
     openTurns: new Map(),
+    ciPolls: 0,
+    ciSleeps: 0,
+    anySleeps: 0,
+    engramCalls: new Map(),
+    engramResponses: new Map(),
   };
+}
+
+/**
+ * Folds one new main-thread tool call into its response. A response is its
+ * message.id: Claude Code writes one line per content block, so lines would
+ * count one response several times. Only responses that call Engram are kept.
+ */
+function tallyEngramCall(tally: TranscriptTally, entry: Record<string, unknown>, messageId: string | null, tool: string): void {
+  if (entry["type"] !== "assistant" || entry["isSidechain"] === true || messageId === null) return;
+  const engram = ENGRAM_TOOL_NAME.exec(tool);
+  const response = tally.engramResponses.get(messageId);
+  if (engram !== null && engram[1] !== undefined) {
+    bump(tally.engramCalls, engram[1]);
+    const kept = response ?? { engram: new Set<string>(), other: 0 };
+    kept.engram.add(engram[1]);
+    tally.engramResponses.set(messageId, kept);
+  } else if (response !== undefined) {
+    response.other += 1;
+  } else {
+    tally.engramResponses.set(messageId, { engram: new Set<string>(), other: 1 });
+  }
 }
 
 function bump(map: Map<string, number>, key: string): void {
@@ -311,15 +357,30 @@ function isPersonPrompt(entry: Record<string, unknown>): boolean {
   return trimmed.length > 0 && !trimmed.startsWith("<");
 }
 
+/** ci-watch: a main-thread Bash call that polls CI or sleeps, by the predicates the module itself counts with. */
+function tallyCiWait(tally: TranscriptTally, entry: Record<string, unknown>, part: Record<string, unknown>): void {
+  if (part["name"] !== "Bash" || entry["isSidechain"] === true) return;
+  const input = part["input"];
+  const command = isRecord(input) && typeof input["command"] === "string" ? input["command"] : null;
+  if (command === null) return;
+  const kind = classifyAgentCall("Bash", command);
+  if (kind === "ci-poll") tally.ciPolls += 1;
+  else if (kind === "sleep") tally.ciSleeps += 1;
+  if (sleepSeconds(command) !== null) tally.anySleeps += 1;
+}
+
 function tallyContent(tally: TranscriptTally, entry: Record<string, unknown>): void {
   const message = entry["message"];
   if (!isRecord(message) || !Array.isArray(message["content"])) return;
+  const messageId = typeof message["id"] === "string" ? message["id"] : null;
   for (const part of message["content"]) {
     if (!isRecord(part)) continue;
     if (part["type"] === "tool_use" && typeof part["id"] === "string" && typeof part["name"] === "string") {
       if (tally.seenToolUse.has(part["id"])) continue;
       tally.seenToolUse.set(part["id"], part["name"]);
       bump(tally.toolCalls, part["name"]);
+      tallyCiWait(tally, entry, part);
+      tallyEngramCall(tally, entry, messageId, part["name"]);
     } else if (part["type"] === "tool_result" && part["is_error"] === true && typeof part["tool_use_id"] === "string") {
       if (tally.seenErrors.has(part["tool_use_id"])) continue;
       tally.seenErrors.add(part["tool_use_id"]);
@@ -525,6 +586,9 @@ export interface ModuleRows {
   readonly models: readonly unknown[];
   readonly steward: readonly unknown[];
   readonly verifyDone: readonly unknown[];
+  readonly ciWatch: readonly unknown[];
+  /** memory-decisions (odd/tasks/memory-shadow.md). */
+  readonly memory: readonly unknown[];
 }
 
 export interface ModuleCostInput {
@@ -590,6 +654,88 @@ export interface ModuleCostReport {
     readonly personTurns: number;
     readonly candidatesPerPrompt: number | null;
   };
+  /**
+   * ci-watch (0.9.0): from its own log, the watches that ended in the window and
+   * what the agent spent waiting during them; from the transcripts, the main
+   * thread's CI polls and sleeps in the whole window, counted with the same
+   * predicates, so the 580 and 800 a week it was built for can be compared.
+   */
+  readonly ciWatch: CiWatchSummary & {
+    readonly mainThreadPolls: number;
+    readonly mainThreadLongSleeps: number;
+    readonly mainThreadSleeps: number;
+  };
+  /**
+   * memory (odd/tasks/memory-shadow.md, M15). Not a row of the Jev table: it
+   * calls Haiku and forks, never Jev. From the transcripts, what the main
+   * thread spends on Engram today (the steps an Active module would remove);
+   * from its own log, what the module spends in the background.
+   */
+  readonly memory: MemoryCost;
+}
+
+export interface MemoryCost {
+  /** Main-thread Engram calls by tool (`mem_save`, `mem_judge`, ...). */
+  readonly engramCalls: Readonly<Record<string, number>>;
+  readonly engramCallTotal: number;
+  readonly engramCallsPerPrompt: number | null;
+  /** Main-thread responses (by message.id) with at least one Engram call. */
+  readonly responsesWithEngram: number;
+  /** ...whose tool calls were all Engram calls: the removable steps. */
+  readonly engramOnlyResponses: number;
+  readonly engramOnlySaveResponses: number;
+  /** Engram-only responses with a mem_judge and no mem_save. */
+  readonly engramOnlyJudgeOnlyResponses: number;
+  /** Haiku gate calls: one per row. */
+  readonly gates: number;
+  readonly gateFailures: number;
+  readonly updates: number;
+  readonly gatesPerPrompt: number | null;
+  readonly forks: number;
+  readonly forksPerPrompt: number | null;
+  /** Judge prompts built and never asked (Shadow). */
+  readonly judgeBuilds: number;
+  readonly judgeBuildsPerPrompt: number | null;
+  readonly haikuTokens: { readonly input: number; readonly output: number };
+  readonly forkTokens: { readonly input: number; readonly output: number; readonly cacheRead: number };
+}
+
+function memoryCost(tally: TranscriptTally, rows: readonly unknown[], window: TimeWindow): MemoryCost {
+  let engramCallTotal = 0;
+  for (const calls of tally.engramCalls.values()) engramCallTotal += calls;
+  let responsesWithEngram = 0;
+  let engramOnlyResponses = 0;
+  let engramOnlySaveResponses = 0;
+  let engramOnlyJudgeOnlyResponses = 0;
+  for (const response of tally.engramResponses.values()) {
+    if (response.engram.size === 0) continue;
+    responsesWithEngram += 1;
+    if (response.other > 0) continue;
+    engramOnlyResponses += 1;
+    if (response.engram.has("mem_save")) engramOnlySaveResponses += 1;
+    else if (response.engram.has("mem_judge")) engramOnlyJudgeOnlyResponses += 1;
+  }
+  // The rows are already the window's: the whole span is the summary's window.
+  const log = summarizeMemoryDecisions(rows, window.untilMs, window.untilMs - window.sinceMs);
+  return {
+    engramCalls: Object.fromEntries(tally.engramCalls),
+    engramCallTotal,
+    engramCallsPerPrompt: ratio(engramCallTotal, tally.prompts),
+    responsesWithEngram,
+    engramOnlyResponses,
+    engramOnlySaveResponses,
+    engramOnlyJudgeOnlyResponses,
+    gates: log.gates,
+    gateFailures: log.gateFailures,
+    updates: log.updates,
+    gatesPerPrompt: ratio(log.gates, tally.prompts),
+    forks: log.forks,
+    forksPerPrompt: ratio(log.forks, tally.prompts),
+    judgeBuilds: log.judgeBuilds,
+    judgeBuildsPerPrompt: ratio(log.judgeBuilds, tally.prompts),
+    haikuTokens: log.haikuTokens,
+    forkTokens: log.forkTokens,
+  };
 }
 
 function rowAt(row: unknown): number {
@@ -647,6 +793,8 @@ export function buildModuleCostReport(input: ModuleCostInput): ModuleCostReport 
     models: inWindowRows(input.rows.models, window),
     steward: inWindowRows(input.rows.steward, window),
     verifyDone: inWindowRows(input.rows.verifyDone, window),
+    ciWatch: inWindowRows(input.rows.ciWatch, window),
+    memory: inWindowRows(input.rows.memory, window),
   };
   const spawns = derivedHookSpawns(hooks, tally.toolCalls, tally.toolErrors);
   const jev: Record<ModuleId, { calls: number; failures: number; latencyMs: number[] }> = {
@@ -656,6 +804,8 @@ export function buildModuleCostReport(input: ModuleCostInput): ModuleCostReport 
     "skill-selection": sumCalls([{ rows: rows.skills, count: skillJevCalls }, { rows: rows.tools, count: toolJevCalls }]),
     board: { calls: 0, failures: 0, latencyMs: [] },
     "verify-done": sumCalls([{ rows: rows.verifyDone, count: verifyDoneJevCalls }]),
+    // It makes no Jev call: its cost is gh processes, counted in the watch rows.
+    "ci-watch": { calls: 0, failures: 0, latencyMs: [] },
   };
   const modules = MODULE_IDS.map((module): ModuleCostRow => {
     const hookMs = module === "gate" ? tally.gateBashHookMs : [];
@@ -724,6 +874,14 @@ export function buildModuleCostReport(input: ModuleCostInput): ModuleCostReport 
       personTurns: tally.verifyDoneTurns,
       candidatesPerPrompt: ratio(tally.verifyDoneCandidates, tally.prompts),
     },
+    ciWatch: {
+      // The rows are already the window's: the whole span is the summary's window.
+      ...summarizeCiWatchRows(rows.ciWatch, window.untilMs, window.untilMs - window.sinceMs),
+      mainThreadPolls: tally.ciPolls,
+      mainThreadLongSleeps: tally.ciSleeps,
+      mainThreadSleeps: tally.anySleeps,
+    },
+    memory: memoryCost(tally, rows.memory, window),
   };
 }
 
@@ -753,7 +911,14 @@ export function formatModuleCostReport(report: ModuleCostReport): string[] {
   const modes = (value: Record<string, number>): string => Object.entries(value).map(([mode, count]) => `${mode} ${count}`).join(", ") || "none";
   lines.push(`Mod modes in the window: skills ${modes(report.modes.skills)}; tools ${modes(report.modes.tools)}; steward ${modes(report.modes.steward)}.`);
   const done = report.verifyDone;
+  const ci = report.ciWatch;
+  lines.push(`ci-watch: ${ci.watches} watches (${ci.finished} ended with a verdict, ${ci.failed} failed), ${ci.ghCalls} gh calls; during them the agent made ${ci.pollsReplaced} CI polls and ${ci.sleepsReplaced} sleeps of 10 s or more that a note would replace, ${ci.injected} notes sent. Main thread in the window: ${ci.mainThreadPolls} CI polls, ${ci.mainThreadLongSleeps} sleeps of 10 s or more, ${ci.mainThreadSleeps} sleeps of any length.`);
   lines.push(`verify-done: ${done.wouldBlock} would-block turns (claimed done, unverified) of ${done.decisions} logged; ${done.claims} claims of done, ${done.jevFailed} Jev failures. Transcripts: ${done.candidateTurns} of ${done.personTurns} person turns are candidates (${fixed(done.candidatesPerPrompt)} per prompt).`);
+  const memory = report.memory;
+  lines.push(`memory (main thread, transcripts): ${memory.engramCallTotal} Engram calls (${fixed(memory.engramCallsPerPrompt)} per prompt); ${memory.responsesWithEngram} responses held an Engram call, ${memory.engramOnlyResponses} held only Engram calls (${memory.engramOnlySaveResponses} with a save, ${memory.engramOnlyJudgeOnlyResponses} with judges and no save).`);
+  const byTool = Object.entries(memory.engramCalls).sort((a, b) => b[1] - a[1]).map(([tool, calls]) => `${tool} ${calls}`).join(", ");
+  if (byTool !== "") lines.push(`memory Engram calls by tool: ${byTool}.`);
+  lines.push(`memory (module, its log): ${memory.gates} Haiku gates (${fixed(memory.gatesPerPrompt)} per prompt, ${memory.gateFailures} failed, ${memory.updates} UPDATE), ${memory.forks} forks (${fixed(memory.forksPerPrompt)} per prompt), ${memory.judgeBuilds} judge builds (${fixed(memory.judgeBuildsPerPrompt)} per prompt, none asked); Haiku tokens ${memory.haikuTokens.input} in / ${memory.haikuTokens.output} out; fork tokens ${memory.forkTokens.input} in / ${memory.forkTokens.output} out / ${memory.forkTokens.cacheRead} cache read.`);
   lines.push(`Agent spawns: ${report.agentSpawns.agentCalls} Agent calls; ${report.agentSpawns.reclassifications} agent-model decisions; ${report.agentSpawns.routerSubagentRows} router subagent rows.`);
   lines.push("");
   lines.push(`Worker (audit log ${iso(report.audit.firstMs)} to ${iso(report.audit.lastMs)}, ${fixed(report.audit.spanHours, 1)} h; board CLI cache refreshes ${fixed(report.audit.boardCliRefreshesPerHour, 1)}/h):`);

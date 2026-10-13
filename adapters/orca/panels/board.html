@@ -483,6 +483,7 @@
       <section class="card wide" id="card-skills">
         <h2 data-i18n="skills.heading"></h2>
         <div id="skills-body"></div>
+        <div id="skills-typing"></div>
       </section>
     </div>
     </div>
@@ -637,6 +638,9 @@
           'speed.tokensBig': '{{model}}: {{in}} de entrada · {{out}} de salida · {{cache}} de contexto cargado',
           'speed.tokensNote': 'Cada deliberación del modelo se midió en frío: «claude -p» carga su propio contexto cada vez. En una sesión viva ese contexto ya está cargado, así que esa cifra es el coste de decidir en frío, no el de cada decisión dentro de la sesión.',
           'skills.heading': 'Mod de skills',
+          // K0 (odd/tasks/typing-lead-time.md): from consumptionSummary.typing.
+          'skills.typing': 'Escritura antes de enviar (7 días): p50 {{p50}} s · p90 {{p90}} s · {{typed}} prompts escritos · {{injected}} inyectados',
+          'skills.typingNoneTyped': 'Escritura antes de enviar (7 días): todavía sin prompts escritos · {{injected}} inyectados',
           'unmeasured.heading': 'Lo que estos números no miden',
           'unmeasured.money': 'Dinero. Este panel no convierte nada a coste y no va a hacerlo.',
           'unmeasured.extrapolation': 'El tiempo total ahorrado. La diferencia de arriba está medida por decisión; multiplicarla por todas las decisiones sería una extrapolación, no una medida.',
@@ -700,6 +704,10 @@
           'consumption.stewardApplied': 'Compactaciones aplicadas (24 h): {{applied}} · habría compactado: {{would}} (solo mide)',
           'consumption.stewardFreed': 'Estimación: en promedio, unos {{tokens}} tokens menos que releer en cada paso siguiente de una sesión compactada.',
           'consumption.stewardNoFreed': 'Todavía no hay compactaciones aplicadas que estimar.',
+          'consumption.stewardColdEmpty': 'Antes de que se enfríe la caché: todavía no hay decisiones.',
+          'consumption.stewardCold': 'Antes de que se enfríe la caché (7 días): compactó {{fired}} · habría compactado {{would}} (solo mide) · retomadas en 24 h, con la caché ya fría: {{returned}} · retomadas aún tibia: {{early}} · no retomadas: {{gone}} · aún en espera: {{pending}}',
+          'consumption.stewardColdSaving': 'Ahorro realizado: {{saving}} · desperdicio (nadie volvió, o volvió con la caché aún tibia): {{waste}} (en tokens equivalentes a precio de entrada)',
+          'consumption.stewardColdRewrite': 'Reescritura en frío cuando se retomaron las sesiones medidas: {{tokens}} tokens; el modo activo habría evitado la mayor parte.',
           'consumption.stewardVerified': 'Ahorro verificado (7 días): {{tokens}} tokens que el agente principal no releyó, un {{share}} de su contexto. Medido sobre el uso real en {{verified}} de {{compactions}} compactaciones.',
         },
         en: {
@@ -842,6 +850,8 @@
           'speed.tokensBig': '{{model}}: {{in}} in · {{out}} out · {{cache}} of context loaded',
           'speed.tokensNote': 'Every model deliberation was measured cold: "claude -p" loads its own context each time. Inside a live session that context is already resident, so this figure is the cost of deciding cold, not the cost of each in-session decision.',
           'skills.heading': 'Skills mod',
+          'skills.typing': 'Typing before send (7 days): p50 {{p50}} s · p90 {{p90}} s · {{typed}} typed prompts · {{injected}} injected',
+          'skills.typingNoneTyped': 'Typing before send (7 days): no typed prompts yet · {{injected}} injected',
           'unmeasured.heading': 'What these numbers do not measure',
           'unmeasured.money': 'Money. This panel converts nothing into cost and will not start.',
           'unmeasured.extrapolation': 'Total time saved. The gap above is measured per decision; multiplying it by every decision would be an extrapolation, not a measurement.',
@@ -902,6 +912,10 @@
           'consumption.stewardApplied': 'Compactions applied (24 h): {{applied}} · would have compacted: {{would}} (measuring only)',
           'consumption.stewardFreed': 'Estimate: on average, about {{tokens}} tokens fewer to re-read on each later step of a compacted session.',
           'consumption.stewardNoFreed': 'No applied compaction to estimate yet.',
+          'consumption.stewardColdEmpty': 'Before the cache goes cold: no decision yet.',
+          'consumption.stewardCold': 'Before the cache goes cold (7 days): compacted {{fired}} · would have compacted {{would}} (measuring only) · back within 24 h, cache already cold: {{returned}} · back while still warm: {{early}} · not back: {{gone}} · still waiting: {{pending}}',
+          'consumption.stewardColdSaving': 'Realized saving: {{saving}} · waste (nobody came back, or came back while warm): {{waste}} (input-token equivalents)',
+          'consumption.stewardColdRewrite': 'Cold rewrite when the measured sessions came back: {{tokens}} tokens; active mode would have avoided most of it.',
           'consumption.stewardVerified': 'Verified saving (7 days): {{tokens}} tokens the main agent did not re-read, {{share}} of its context. Measured on real usage in {{verified}} of {{compactions}} compactions.',
         }
       }
@@ -1632,6 +1646,20 @@
         fill('skills-body', null, parts.join(''), '')
       }
 
+      /** K0 (odd/tasks/typing-lead-time.md): the pause between the last
+       *  keystroke and sending, over the last 7 days, from the worker's
+       *  consumptionSummary.typing (read-consumption.mjs). No summary (no
+       *  row yet, an {ok:false} read, or none published) is no line at all,
+       *  never a zero; with only injected prompts there is no pause to show. */
+      function renderSkillsTyping (summary) {
+        var typing = summary && summary.ok === true ? summary.typing : null
+        if (!typing || typeof typing.typed !== 'number' || typeof typing.injected !== 'number') { el('skills-typing').innerHTML = ''; return }
+        var seconds = function (value) { return num(Math.round(value / 100) / 10) }
+        el('skills-typing').innerHTML = typing.typed > 0 && typeof typing.p50Ms === 'number' && typeof typing.p90Ms === 'number'
+          ? line(t('skills.typing', { p50: seconds(typing.p50Ms), p90: seconds(typing.p90Ms), typed: num(typing.typed), injected: num(typing.injected) }))
+          : line(t('skills.typingNoneTyped', { injected: num(typing.injected) }))
+      }
+
       // ---------- render: consumption (JEV-060 slice 1, T5) -----------------
       // Three honest states, never two -- same convention config.html's own
       // modelsRenderMeasurements already uses for modelMeasurements: no
@@ -1884,11 +1912,29 @@
             verified: num(verified.verified),
             compactions: num(verified.compactions)
           })))
-          return parts.join('')
+        } else {
+          parts.push(steward.freedPerStep === null || steward.freedPerStep === undefined
+            ? line(t('consumption.stewardNoFreed'), 'empty-line')
+            : line(t('consumption.stewardFreed', { tokens: num(steward.freedPerStep) })))
         }
-        parts.push(steward.freedPerStep === null || steward.freedPerStep === undefined
-          ? line(t('consumption.stewardNoFreed'), 'empty-line')
-          : line(t('consumption.stewardFreed', { tokens: num(steward.freedPerStep) })))
+        return parts.join('') + consumptionPreColdBlock(steward.preCold)
+      }
+
+      /**
+       * Track S (odd/tasks/steward-pre-cold.md): the pre-cold tier over 7
+       * days (summarizePreCold). Saving and waste only when an applied
+       * compaction measured them; the cold rewrite only when a measured
+       * session came back. `undefined` (an older worker): nothing; null: one
+       * honest line.
+       */
+      function consumptionPreColdBlock (preCold) {
+        if (preCold === undefined) return ''
+        if (preCold === null) return line(t('consumption.stewardColdEmpty'), 'empty-line')
+        var parts = [line(t('consumption.stewardCold', { fired: num(preCold.fired), would: num(preCold.wouldFire), returned: num(preCold.returned), early: num(preCold.returnedEarly), gone: num(preCold.notReturned), pending: num(preCold.pending) }))]
+        var hasSaving = preCold.realizedSaving !== null && preCold.realizedSaving !== undefined
+        var hasWaste = preCold.waste !== null && preCold.waste !== undefined
+        if (hasSaving || hasWaste) parts.push(line(t('consumption.stewardColdSaving', { saving: num(preCold.realizedSaving), waste: num(preCold.waste) })))
+        if (preCold.coldRewriteOnReturn !== null && preCold.coldRewriteOnReturn !== undefined) parts.push(line(t('consumption.stewardColdRewrite', { tokens: num(preCold.coldRewriteOnReturn) })))
         return parts.join('')
       }
 
@@ -2446,6 +2492,7 @@
           renderStats(results[1], results[3])
           renderWorkerNote(results[2])
           renderConsumption(results[4])
+          renderSkillsTyping(results[4])
           renderActivityProjects(results[5])
         }).catch(function (error) {
           noteEl.className = 'meta nota stale'

@@ -168,9 +168,9 @@ import { parseStewardSettingsStrict, planStewardWrite, stewardFromSettings } fro
 
 test("stewardFromSettings: measure at 120k by default; the installed plugin's options win", () => {
   // 0.6.15 T4: plus the 400k soft tier's own switch, measure by default.
-  assert.deepEqual(stewardFromSettings(null), { mode: "measure", threshold: 120_000, softMode: "measure" });
-  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { routerMode: "active", stewardMode: "active", stewardThreshold: 30_000 } } } }), { mode: "active", threshold: 30_000, softMode: "measure" });
-  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardMode: "loud", stewardThreshold: 5 } } } }), { mode: "measure", threshold: 120_000, softMode: "measure" });
+  assert.deepEqual(stewardFromSettings(null), { mode: "measure", threshold: 120_000, softMode: "measure", coldMode: "measure" });
+  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { routerMode: "active", stewardMode: "active", stewardThreshold: 30_000 } } } }), { mode: "active", threshold: 30_000, softMode: "measure", coldMode: "measure" });
+  assert.deepEqual(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardMode: "loud", stewardThreshold: 5 } } } }), { mode: "measure", threshold: 120_000, softMode: "measure", coldMode: "measure" });
 });
 
 test("parseStewardSettingsStrict: both fields valid or null", () => {
@@ -195,7 +195,7 @@ test("planStewardWrite: next to the router mode, every other key kept; the same 
   assert.deepEqual(planStewardWrite("[]", { mode: "off", threshold: 120_000 }), { kind: "refuse", reason: "not-an-object" });
   const created = planStewardWrite(null, { mode: "off", threshold: 120_000 });
   assert.equal(created.kind, "write");
-  if (created.kind === "write") assert.deepEqual(stewardFromSettings(JSON.parse(created.text)), { mode: "off", threshold: 120_000, softMode: "measure" });
+  if (created.kind === "write") assert.deepEqual(stewardFromSettings(JSON.parse(created.text)), { mode: "off", threshold: 120_000, softMode: "measure", coldMode: "measure" });
 });
 
 // 0.6.15 T4: the 400k soft tier's switch, stored next to the steward's mode.
@@ -246,4 +246,22 @@ test("0.6.16 T2 planWorkKindWrite: next to the router mode, every other key kept
 test("0.6.16 T1/T2 routerEffortPersonTiers: the tiers whose effort the person stored", () => {
   assert.deepEqual([...routerEffortPersonTiers(null)], []);
   assert.deepEqual([...routerEffortPersonTiers({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { routerEffort: { simple: "high", complex: "ultra" } } } } })], ["simple"]);
+});
+
+// Track S (odd/tasks/steward-pre-cold.md): the pre-cold tier's switch, stored next to the steward's mode.
+test("steward cold tier: read from stewardColdMode, written when given, kept when not; an unknown value is rejected", () => {
+  assert.equal(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardColdMode: "active" } } } }).coldMode, "active");
+  assert.equal(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardColdMode: "off" } } } }).coldMode, "off");
+  assert.equal(stewardFromSettings({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardColdMode: "loud" } } } }).coldMode, "measure");
+  assert.deepEqual(parseStewardSettingsStrict({ mode: "active", threshold: 150_000, softMode: "measure", coldMode: "off" }), { mode: "active", threshold: 150_000, softMode: "measure", coldMode: "off" });
+  assert.deepEqual(parseStewardSettingsStrict({ mode: "active", threshold: 150_000, coldMode: "active" }), { mode: "active", threshold: 150_000, coldMode: "active" });
+  assert.equal(parseStewardSettingsStrict({ mode: "active", threshold: 150_000, coldMode: "loud" }), null);
+  const raw = JSON.stringify({ pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardMode: "active", stewardThreshold: 120_000, stewardSoftMode: "measure", stewardColdMode: "active" } } } });
+  const kept = planStewardWrite(raw, { mode: "active", threshold: 150_000 });
+  assert.equal(kept.kind, "write");
+  if (kept.kind === "write") assert.equal(stewardFromSettings(JSON.parse(kept.text)).coldMode, "active", "a write without coldMode keeps the stored one");
+  const set = planStewardWrite(raw, { mode: "active", threshold: 120_000, softMode: "measure", coldMode: "off" });
+  assert.equal(set.kind, "write");
+  if (set.kind === "write") assert.equal(stewardFromSettings(JSON.parse(set.text)).coldMode, "off");
+  assert.equal(planStewardWrite(raw, { mode: "active", threshold: 120_000, softMode: "measure", coldMode: "active" }).kind, "unchanged");
 });

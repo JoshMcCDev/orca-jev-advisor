@@ -161,7 +161,7 @@ test("derived hook spawns: Pre per call, Post per success, PostFailure per error
     { event: "PreToolUse", matcher: "Agent", script: "agent-model", module: "model-router" as const },
   ];
   const spawns = derivedHookSpawns(hooks, new Map([["Bash", 10], ["Edit", 3], ["Write", 1], ["Read", 50], ["Agent", 2]]), new Map([["Bash", 4]]));
-  assert.deepEqual(spawns, { gate: 24, "model-router": 2, steward: 0, "skill-selection": 0, board: 0, "verify-done": 0 });
+  assert.deepEqual(spawns, { gate: 24, "model-router": 2, steward: 0, "skill-selection": 0, board: 0, "verify-done": 0, "ci-watch": 0 });
 });
 
 test("audit sets count ok outcomes of our plugin only, in the window", () => {
@@ -232,6 +232,38 @@ test("transcript tally: person turns that edited files with no passing test are 
   assert.equal(tally.verifyDoneTurns, 5, "finishing twice counts nothing twice");
 });
 
+// ci-watch (0.9.0 C6): the 580 polls and 800 sleeps a week the module exists
+// for are counted with the module's own predicates (src/core/ci_watch.ts), on
+// the main thread only, so the baseline and the shadow figure are comparable.
+test("transcript tally: the main thread's CI polls and sleeps, by the module's own predicates", () => {
+  const tally = newTranscriptTally();
+  const ts = "2026-10-03T10:00:00.000Z";
+  const bash = (uuid: string, id: string, command: string, extra: Record<string, unknown> = {}): string =>
+    line({ type: "assistant", uuid, sessionId: "s1", timestamp: ts, message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] }, ...extra });
+  for (const text of [
+    bash("a1", "t1", "gh run list --branch main"),
+    bash("a2", "t2", "gh run watch 5 --exit-status"),
+    bash("a3", "t3", "gh pr checks 53"),
+    bash("a4", "t4", "sleep 60 && gh run view 5"),
+    bash("a5", "t5", "sleep 90"),
+    bash("a6", "t6", "sleep 2"),
+    bash("a7", "t7", "gh pr view 53"),
+    bash("a8", "t8", "ls"),
+    // A subagent's calls are its own business.
+    bash("a9", "t9", "gh run list", { isSidechain: true }),
+    bash("a10", "t10", "sleep 300", { isSidechain: true }),
+    // The same tool call twice in the transcript counts once.
+    bash("a11", "t1", "gh run list --branch main"),
+    // Outside the window.
+    line({ type: "assistant", uuid: "old", sessionId: "s1", timestamp: "2026-09-01T00:00:00.000Z", message: { content: [{ type: "tool_use", id: "t99", name: "Bash", input: { command: "gh run list" } }] } }),
+  ]) {
+    tallyTranscriptLine(tally, text, WINDOW);
+  }
+  assert.equal(tally.ciPolls, 4, "gh run list, gh run watch, gh pr checks, and the poll behind a sleep");
+  assert.equal(tally.ciSleeps, 1, "sleep 90: a sleep of 10 s or more that is no poll");
+  assert.equal(tally.anySleeps, 3, "the baseline's reading: every sleep, whatever its length or company");
+});
+
 test("report: per module totals, per prompt and per turn ratios, and a markdown table", () => {
   const tally = newTranscriptTally();
   tally.toolCalls.set("Bash", 100);
@@ -240,6 +272,9 @@ test("report: per module totals, per prompt and per turn ratios, and a markdown 
   tally.turns = 20;
   tally.verifyDoneTurns = 10;
   tally.verifyDoneCandidates = 4;
+  tally.ciPolls = 50;
+  tally.ciSleeps = 30;
+  tally.anySleeps = 80;
   tally.gateBashHookMs.push(100, 200, 300);
   const report = buildModuleCostReport({
     window: WINDOW,
@@ -262,6 +297,13 @@ test("report: per module totals, per prompt and per turn ratios, and a markdown 
         { at: AT, decision: "jev-failed", claim: null, latencyMs: 3000 },
         { at: "2026-09-01T00:00:00.000Z", decision: "would-block", claim: "claimed-done", latencyMs: 1 },
       ],
+      ciWatch: [
+        { at: AT, outcome: "success", ghCalls: 9, agentPolls: 4, agentSleeps: 3, injected: false },
+        { at: AT, outcome: "failure", ghCalls: 12, agentPolls: 2, agentSleeps: 1, injected: true },
+        { at: AT, outcome: "no-runs", ghCalls: 8, agentPolls: 0, agentSleeps: 0, injected: false },
+        { at: "2026-09-01T00:00:00.000Z", outcome: "success", ghCalls: 99, agentPolls: 99, agentSleeps: 99, injected: true },
+      ],
+      memory: [],
     },
     audit: { times: new Map([["board", [Date.parse(AT), Date.parse(AT) + 3_600_000]], ["measurementsSummary", [Date.parse(AT)]]]), firstMs: Date.parse(AT), lastMs: Date.parse(AT) + 3_600_000 },
   });
@@ -295,9 +337,95 @@ test("report: per module totals, per prompt and per turn ratios, and a markdown 
   assert.equal(verifyDone.jevMsP90, 3000);
   assert.equal(verifyDone.hookSpawns, 0);
   assert.deepEqual(report.verifyDone, { decisions: 4, claims: 3, wouldBlock: 2, jevFailed: 1, candidateTurns: 4, personTurns: 10, candidatesPerPrompt: 0.4 });
+  const ciWatch = report.modules.find((row) => row.module === "ci-watch");
+  assert.ok(ciWatch);
+  assert.equal(ciWatch.jevCalls, 0, "it makes no Jev call");
+  assert.equal(ciWatch.hookSpawns, 0);
+  assert.deepEqual(report.ciWatch, { watches: 3, finished: 2, failed: 1, ghCalls: 29, pollsReplaced: 6, sleepsReplaced: 4, injected: 1, mainThreadPolls: 50, mainThreadLongSleeps: 30, mainThreadSleeps: 80 });
   const text = formatModuleCostReport(report).join("\n");
   assert.match(text, /\| gate \|/);
   assert.match(text, /\| skill-selection \|/);
   assert.match(text, /\| verify-done \| 0 \| - \| - \| 4 \| 0\.4 \|/);
+  assert.match(text, /ci-watch: 3 watches \(2 ended with a verdict, 1 failed\), 29 gh calls; during them the agent made 6 CI polls and 4 sleeps of 10 s or more that a note would replace, 1 notes sent\. Main thread in the window: 50 CI polls, 30 sleeps of 10 s or more, 80 sleeps of any length\./);
   assert.match(text, /verify-done: 2 would-block turns \(claimed done, unverified\) of 4 logged; 3 claims of done, 1 Jev failures\. Transcripts: 4 of 10 person turns are candidates \(0\.4 per prompt\)\./);
+});
+
+// ---------------------------------------------------------------------------
+// Memory (odd/tasks/memory-shadow.md, M15): what the main thread spends on
+// Engram today, from the transcripts, and what the module spends in the
+// background, from its own log. Claude Code writes one transcript line per
+// content block, so a response is its message.id, never a line.
+// ---------------------------------------------------------------------------
+
+function engramLine(messageId: string, toolUseId: string, tool: string, extra: Record<string, unknown> = {}): string {
+  return line({ type: "assistant", uuid: `${messageId}-${toolUseId}`, timestamp: AT, ...extra, message: { id: messageId, content: [{ type: "tool_use", id: toolUseId, name: tool }] } });
+}
+
+test("transcript tally: main-thread Engram calls by tool, and the responses that held only Engram calls, by message id", () => {
+  const tally = newTranscriptTally();
+  for (const text of [
+    line({ type: "user", uuid: "p1", timestamp: AT, message: { content: "guarda esto" } }),
+    // One response written as two lines: a save and a judge.
+    engramLine("m1", "e1", "mcp__engram__mem_save"),
+    engramLine("m1", "e2", "mcp__engram__mem_judge"),
+    // A judge alone, its line written twice.
+    engramLine("m2", "j1", "mcp__engram__mem_judge"),
+    engramLine("m2", "j1", "mcp__engram__mem_judge"),
+    // A search next to real work: it holds an Engram call, but not only Engram calls.
+    engramLine("m3", "s1", "mcp__engram__mem_search"),
+    engramLine("m3", "b1", "Bash"),
+    // A subagent's save is not the main thread's.
+    engramLine("m4", "x1", "mcp__engram__mem_save", { isSidechain: true }),
+    // The plugin's server spelling.
+    engramLine("m6", "p1", "mcp__plugin_engram_engram__mem_save"),
+    // Outside the window.
+    line({ type: "assistant", uuid: "old", timestamp: "2026-09-01T00:00:00.000Z", message: { id: "m0", content: [{ type: "tool_use", id: "o1", name: "mcp__engram__mem_save" }] } }),
+  ]) {
+    tallyTranscriptLine(tally, text, WINDOW);
+  }
+  const report = buildModuleCostReport({ window: WINDOW, tally, hooks: [], rows: { gate: [], skills: [], tools: [], router: [], models: [], steward: [], verifyDone: [], ciWatch: [], memory: [] }, audit: { times: new Map(), firstMs: null, lastMs: null } });
+  assert.deepEqual(report.memory.engramCalls, { mem_save: 2, mem_judge: 2, mem_search: 1 });
+  assert.equal(report.memory.engramCallTotal, 5);
+  assert.equal(report.memory.engramCallsPerPrompt, 5);
+  assert.equal(report.memory.responsesWithEngram, 4);
+  assert.equal(report.memory.engramOnlyResponses, 3);
+  assert.equal(report.memory.engramOnlySaveResponses, 2, "m1 and m6 hold a save");
+  assert.equal(report.memory.engramOnlyJudgeOnlyResponses, 1, "m2: judges and no save");
+});
+
+test("report: the memory module's own background cost from its log, per prompt, in a line of its own", () => {
+  const tally = newTranscriptTally();
+  tally.prompts = 10;
+  const row = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+    at: AT, backend: "live", decidedBy: "tools+health", permission: "ok", gate: "skip", gateTokens: { input: 1000, output: 2, cacheRead: 0, cacheWrite: 0 },
+    fork: null, forkTokens: null, wouldSave: { user: 0, feedback: 0, project: 0, reference: 0 }, judgeBuilds: 0, mainEngramSaves: 0, mainJudges: 0, mainAutoMemoryWrites: 0, agreement: "neither", ...overrides,
+  });
+  const report = buildModuleCostReport({
+    window: WINDOW,
+    tally,
+    hooks: [],
+    rows: {
+      gate: [], skills: [], tools: [], router: [], models: [], steward: [], verifyDone: [], ciWatch: [],
+      memory: [
+        row({}),
+        row({ gate: "update", fork: "drafted", forkTokens: { input: 10, output: 300, cacheRead: 150_000, cacheWrite: 0 }, judgeBuilds: 2, agreement: "module-only" }),
+        row({ gate: "no-answer", gateTokens: null, agreement: "unknown" }),
+        row({ at: "2026-09-01T00:00:00.000Z" }),
+      ],
+    },
+    audit: { times: new Map(), firstMs: null, lastMs: null },
+  });
+  assert.equal(report.memory.gates, 3);
+  assert.equal(report.memory.gateFailures, 1);
+  assert.equal(report.memory.updates, 1);
+  assert.equal(report.memory.gatesPerPrompt, 0.3);
+  assert.equal(report.memory.forks, 1);
+  assert.equal(report.memory.forksPerPrompt, 0.1);
+  assert.equal(report.memory.judgeBuilds, 2);
+  assert.deepEqual(report.memory.haikuTokens, { input: 2000, output: 4 });
+  assert.deepEqual(report.memory.forkTokens, { input: 10, output: 300, cacheRead: 150_000 });
+  assert.equal(report.modules.some((module) => (module.module as string) === "memory"), false, "the Jev table keeps its own ids: memory uses Haiku");
+  const text = formatModuleCostReport(report).join("\n");
+  assert.match(text, /memory \(main thread, transcripts\): 0 Engram calls \(0 per prompt\); 0 responses held an Engram call, 0 held only Engram calls \(0 with a save, 0 with judges and no save\)\./);
+  assert.match(text, /memory \(module, its log\): 3 Haiku gates \(0\.3 per prompt, 1 failed, 1 UPDATE\), 1 forks \(0\.1 per prompt\), 2 judge builds \(0\.2 per prompt, none asked\); Haiku tokens 2000 in \/ 4 out; fork tokens 10 in \/ 300 out \/ 150000 cache read\./);
 });

@@ -90,6 +90,18 @@ export type StewardState = {
 }
 
 /**
+ * Track S (odd/tasks/steward-pre-cold.md): what the steward's pre-cold tier
+ * keeps for the session. `judgment` is the turn-end steward's verdict on the
+ * last turn, with the person-turn count it was given at (an older one is not
+ * used); `headless` stops the tier arming in a headless (-p / SDK) session,
+ * where the engine refuses compaction between turns.
+ */
+export type StewardColdState = {
+  judgment: { verdict: 'boundary' | 'mid-task' | 'new-topic'; confidence: number; personTurns: number } | null
+  headless: boolean
+}
+
+/**
  * 0.6.14 T1: the subagents running now, in the order they started, each as
  * `agent.spawn` recorded it (and `turn.step` updated its effort). Kept here
  * so a plugin reload in the same session does not forget them; pruned
@@ -112,8 +124,53 @@ export type RunningSubagentsState = {
   }[]
 }
 
+/**
+ * 0.9.0: the CI watcher's band rows (odd/tasks/ci-watcher.md): one per watch,
+ * running or lately ended, as `ciBandRows` (src/core/ci_watch.ts) draws them.
+ * Kept in `$.state` so a write redraws the band; a reload clears it at
+ * session.start, since the watches themselves do not survive one. Read back
+ * through `parseCiBandRows`, which drops anything malformed.
+ */
+export type CiWatchesState = {
+  rows: {
+    id: string
+    /** The first seven characters of the commit. */
+    sha7: string
+    branch: string | null
+    status: 'watching' | 'success' | 'failure'
+    startedAtMs: number
+    /** Runs finished and runs seen so far. */
+    done: number
+    total: number
+    /** The workflows that did not succeed. */
+    failed: string[]
+    finishedAtMs: number | null
+  }[]
+}
+
+/**
+ * The memory module's backend for this session (odd/tasks/memory-shadow.md,
+ * M8), as src/core/memory_detect.ts decided it: at session start, and once
+ * more at the first turn when the start found no live Engram (MCP servers can
+ * connect late). The health call (`mem_current_project`) is made at most once
+ * a session; its outcome is kept so a re-check does not repeat it.
+ */
+export type MemoryShadowState = {
+  backend: 'live' | 'configured-down' | 'absent'
+  decidedBy: 'tools+health' | 'tools' | 'health' | 'user-config' | 'plugin' | 'binary' | 'none'
+  /** The Engram MCP server to call, null when Engram cannot be called. */
+  server: string | null
+  permission: 'ok' | 'refused' | 'unknown'
+  /** Where the backend was last decided. */
+  detectedAt: 'start' | 'turn'
+  /** The health call's outcome; null when it was not made. */
+  health: 'ok' | 'permission' | 'failed' | null
+  /** A turn already looked again after the start found no live Engram. */
+  rechecked: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; runningSubagents: RunningSubagentsState }
+    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState; ciWatches: CiWatchesState; memory: MemoryShadowState }
   }
 }

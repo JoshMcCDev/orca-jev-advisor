@@ -438,3 +438,49 @@ test("verified saving: main context counts only steps inside the window", () => 
   const usage: unknown[] = [mainStep("s1", "2026-09-01T10:00:00.000Z", 999_000), mainStep("s1", "2026-10-06T10:00:00.000Z", 300_000), mainStep("s1", "2026-10-06T10:20:00.000Z", 100_000)];
   assert.equal(verifyStewardSaving([compaction("s1", "2026-10-06T10:15:00.000Z")], usage, VERIFY_NOW, VERIFY_WEEK)?.mainContextTokens, 400_000);
 });
+
+// ---------------------------------------------------------------------------
+// Track S (odd/tasks/steward-pre-cold.md): the pre-cold tier's rows, tier and instructions
+
+import { preColdInstructions } from "./context_steward.ts";
+
+test("pre-cold: its tier, and a status line that says nothing (the person is away)", () => {
+  assert.equal(stewardTier("pre-cold"), "pre-cold");
+  assert.equal(stewardTier("pre-cold-skip"), null);
+  assert.equal(stewardStatusPart("en", { mode: "active", decision: "pre-cold", applied: true, before: 150_000, after: 10_000 }), null);
+});
+
+test("pre-cold record: trigger, skip reason, idle time, engine zone and cost ride on the row; a turn-end row carries none of them", () => {
+  const input = { at: "2026-10-12T14:05:00.000Z", account: "acct-a", project: "project-c", mode: "active", contextBefore: 150_000, decision: { decision: "pre-cold", compact: true, suggestClear: false, confidence: null }, applied: true, contextAfter: 9_000, notApplied: null, verdict: null, sessionId: "s-1", turnIndex: 7, mainWindow: 1_000_000, currentModel: "m", wouldFire: null } as const;
+  const record = stewardDecisionRecord({ ...input, preCold: { coldSkip: null, idleMs: 3_060_000, engineZone: false, compactCost: 21_000 } });
+  assert.equal(record.trigger, "pre-cold");
+  assert.equal(record.tier, "pre-cold");
+  assert.equal(record.coldSkip, null);
+  assert.equal(record.idleMs, 3_060_000);
+  assert.equal(record.engineZone, false);
+  assert.equal(record.compactCost, 21_000);
+  const plain = JSON.stringify(stewardDecisionRecord(input));
+  for (const key of ["trigger", "coldSkip", "idleMs", "engineZone", "compactCost"]) assert.ok(!plain.includes(key), key);
+});
+
+test("pre-cold rows and event rows stay out of the turn-end summary", () => {
+  const now = Date.parse("2026-10-12T12:00:00.000Z");
+  const rows: unknown[] = [
+    { at: "2026-10-12T11:00:00.000Z", mode: "measure", decision: "pre-cold", compact: true, applied: false, trigger: "pre-cold", contextBefore: 150_000 },
+    { at: "2026-10-12T11:00:00.000Z", mode: "active", decision: "pre-cold", compact: true, applied: true, trigger: "pre-cold", contextBefore: 150_000, contextAfter: 10_000 },
+    { at: "2026-10-12T11:00:00.000Z", event: "engine-idle-compact" },
+    { at: "2026-10-12T11:00:00.000Z", mode: "measure", decision: "boundary", compact: true, applied: false },
+  ];
+  assert.deepEqual(summarizeStewardDecisions(rows, now, 24 * 3600_000), { decisions: 1, applied: 0, wouldCompact: 1, freedPerStep: null });
+});
+
+test("pre-cold instructions: say why it compacts now and keep what the turn-end ones keep", () => {
+  const facts = { featureDocs: ["odd/tasks/steward-pre-cold.md"], branches: ["feat/steward-pre-cold"], commits: [], prs: ["#54"] };
+  const text = preColdInstructions(facts);
+  assert.ok(text.startsWith("The session went idle"), text);
+  assert.ok(!text.includes("A unit of work just closed"));
+  assert.ok(text.includes("odd/tasks/steward-pre-cold.md"));
+  assert.ok(text.includes("feat/steward-pre-cold"));
+  assert.ok(text.includes("#54"));
+  assert.deepEqual(text.split("\n").slice(1), stewardInstructions(facts).split("\n").slice(1));
+});

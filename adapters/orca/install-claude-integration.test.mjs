@@ -1102,9 +1102,9 @@ test('router-mode-status: each target reports its context steward mode and thres
   writeSettings(home, { pluginConfigs: { [ROUTER_SETTINGS_KEY]: { options: { stewardMode: 'active', stewardThreshold: 150000 } } } })
   const result = runRouter(['router-mode-status'], home)
   // 0.6.15 T4: with the 400k soft tier's switch, measure by default.
-  assert.deepEqual(result.targets[0].steward, { mode: 'active', threshold: 150000, softMode: 'measure' })
+  assert.deepEqual(result.targets[0].steward, { mode: 'active', threshold: 150000, softMode: 'measure', coldMode: 'measure' })
   const fresh = runRouter(['router-mode-status'], makeHome())
-  assert.deepEqual(fresh.targets[0].steward, { mode: 'measure', threshold: 120000, softMode: 'measure' })
+  assert.deepEqual(fresh.targets[0].steward, { mode: 'measure', threshold: 120000, softMode: 'measure', coldMode: 'measure' })
 })
 
 test('steward-set: writes the steward mode and threshold next to the router mode, keeping every other key', () => {
@@ -1118,6 +1118,17 @@ test('steward-set: writes the steward mode and threshold next to the router mode
   assert.deepEqual(settings.pluginConfigs[ROUTER_SETTINGS_KEY].options, { routerMode: 'active', stewardMode: 'active', stewardThreshold: 100000 })
   const again = runRouter(['steward-set', 'home', JSON.stringify({ mode: 'active', threshold: 100000 })], home)
   assert.equal(again.unchanged, true, 'the same settings are no write')
+})
+
+// Track S: the pre-cold tier's switch is written by the same writer and read back by the status the panel shows.
+test('steward-set: the cold switch is written as stewardColdMode and read back; an unknown one is rejected', () => {
+  const home = makeHome()
+  const result = runRouter(['steward-set', 'home', JSON.stringify({ mode: 'active', threshold: 120000, softMode: 'measure', coldMode: 'active' })], home)
+  assert.equal(result.ok, true)
+  assert.equal(readSettings(home).pluginConfigs[ROUTER_SETTINGS_KEY].options.stewardColdMode, 'active')
+  assert.equal(runRouter(['router-mode-status'], home).targets[0].steward.coldMode, 'active')
+  const bad = runRouter(['steward-set', 'home', JSON.stringify({ mode: 'active', threshold: 120000, coldMode: 'loud' })], home)
+  assert.equal(bad.reason, 'unknown-steward')
 })
 
 test('steward-set: an unknown mode, a threshold out of range or a bad shape is rejected and never written', () => {
@@ -1897,8 +1908,8 @@ test('modules T3: with no module file every module is on, all eight hooks are in
   const result = run('install', home)
   assert.equal(result.ok, true)
   assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT)
-  // verify-done, new in 0.8.0, starts in shadow: it has no hooks, so its line reads as matching.
-  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow' })
+  // verify-done (0.8.0), ci-watch (0.9.0) and memory start in shadow: they have no hooks, so their lines read as matching.
+  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' })
   assert.equal(result.modCopyNeeded, true)
 
   const status = run('status', home)
@@ -1910,6 +1921,8 @@ test('modules T3: with no module file every module is on, all eight hooks are in
   assert.deepEqual(status.modules['model-router'], { state: 'active', hookCount: 3, installed: true, removed: false, matchesState: true })
   assert.deepEqual(status.modules.board, { state: 'active', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.modules['verify-done'], { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
+  assert.deepEqual(status.modules['ci-watch'], { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
+  assert.deepEqual(status.modules.memory, { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.targets[0].modules.gate, { state: 'active', present: 5, total: 5 })
   assert.equal(status.modCopy.needed, true)
 })
@@ -2022,7 +2035,7 @@ test('modules T3: the mod copy stays installed while any mod module is on', () =
 
 test('modules T3: with every mod module off the mod copy is kept anyway, so the never-go-back guard keeps its evidence, and status says it is not needed', () => {
   const home = makeHome()
-  writeModules(home, { modules: { 'model-router': 'off', steward: 'off', 'skill-selection': 'off', 'verify-done': 'off' } })
+  writeModules(home, { modules: { 'model-router': 'off', steward: 'off', 'skill-selection': 'off', 'verify-done': 'off', 'ci-watch': 'off', memory: 'off' } })
   const result = run('install', home)
   assert.equal(result.modCopyNeeded, false)
   assert.equal(existsSync(join(modCopyPathFor(home), '.claude-plugin', 'plugin.json')), true)

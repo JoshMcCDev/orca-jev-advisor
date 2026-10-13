@@ -26,9 +26,14 @@
 //   node --test adapters/claude/mod-skills/hooks.test.ts
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { register } from "./hooks/index.ts";
+import { walkModSkillsClosure } from "../../../src/core/mod_skills_copy.ts";
+import { isForkSampled } from "../../../src/core/memory_shadow.ts";
 
 // ---------------------------------------------------------------------------
 // A minimal fake of the Claude Code function-hooks host: only the `on`
@@ -80,10 +85,31 @@ interface FakeHost {
   engineVersion: { version: string; base?: string } | null;
   /** 0.8.0 V3: what `$.clock.after` scheduled, in order; a test runs them with runTimers. */
   timers: (() => unknown)[];
-  /** Track R: added to every `$.clock.now()`, so a test can leave a gap between two turns. */
+  /** Track R and 0.9.0 C3: added to every `$.clock.now()` (on top of the usual millisecond tick), so a test can leave a gap between two turns. */
   clockOffsetMs: number;
   /** Track R: what `tail -n 300 <transcript>` prints, by transcript path; any other path exits 1. */
   readonly transcripts: Map<string, string>;
+  /** 0.9.0 C2: the delay each `$.clock.after` was asked for, in order. */
+  readonly timerDelays: number[];
+  /** 0.9.0 C2: the `init` of every `$.process.run`, parallel to `processCalls`. */
+  readonly processInits: ({ cwd?: string } | undefined)[];
+  /** 0.9.0 C2: answers a `$.process.run` before the defaults; undefined leaves it to them. It may throw, like a binary that cannot start. */
+  processHandler: ((argv: readonly string[], init?: { cwd?: string }) => { exitCode: number; stdout: string; stderr: string } | undefined) | null;
+  /** 0.9.0 C3: every `$.ui.toast` text. */
+  readonly toasts: string[];
+  /** 0.9.0 C5: every `$.prompt.submit` input. */
+  readonly submits: { text: string; asUser?: true }[];
+  /** Memory (M8): every `$.model.complete` request, and the replies it answers in order; an empty queue rejects. */
+  readonly modelCalls: Record<string, unknown>[];
+  readonly modelQueue: unknown[];
+  /** Memory (M8): every `$.model.fork` prompt, and its replies in order; an empty queue rejects. */
+  readonly forkCalls: string[];
+  readonly forkQueue: unknown[];
+  /** Memory (M8): every `$.mcp.call`, and what it answers (a thrown Error rejects). */
+  readonly mcpCalls: { server: string; tool: string; args?: Record<string, unknown> }[];
+  mcpAnswer: (server: string, tool: string) => unknown;
+  /** Memory (M8): `$.session.repo()`; null when not in a repository. */
+  repo: { root: string } | null;
 }
 
 function makeFakeHost(): FakeHost {
@@ -109,6 +135,20 @@ function makeFakeHost(): FakeHost {
     timers: [],
     clockOffsetMs: 0,
     transcripts: new Map<string, string>(),
+    timerDelays: [],
+    processInits: [],
+    processHandler: null,
+    toasts: [],
+    submits: [],
+    modelCalls: [],
+    modelQueue: [],
+    forkCalls: [],
+    forkQueue: [],
+    mcpCalls: [],
+    mcpAnswer: (server: string, tool: string) => {
+      throw new Error(`fake host: $.mcp.call: no connected MCP tool "${tool}" on a server named "${server}"`);
+    },
+    repo: null,
   };
 }
 
@@ -152,6 +192,25 @@ function makeFakeEngine(host: FakeHost): unknown {
       version: async () => {
         if (host.engineVersion === null) throw new Error("fake host: session.version failed");
         return host.engineVersion;
+      },
+      repo: async () => (host.repo === null ? null : { root: host.repo.root, remote: null, internal: false, name: null }),
+    },
+    model: {
+      complete: async (request: Record<string, unknown>) => {
+        host.modelCalls.push(request);
+        if (host.modelQueue.length === 0) throw new Error("fake host: model.complete queue exhausted");
+        return host.modelQueue.shift();
+      },
+      fork: async (request: { prompt: string }) => {
+        host.forkCalls.push(request.prompt);
+        if (host.forkQueue.length === 0) throw new Error("fake host: model.fork queue exhausted");
+        return host.forkQueue.shift();
+      },
+    },
+    mcp: {
+      call: async (server: string, tool: string, args?: Record<string, unknown>) => {
+        host.mcpCalls.push({ server, tool, ...(args === undefined ? {} : { args }) });
+        return host.mcpAnswer(server, tool);
       },
     },
     env: { get: async (name: string) => (name === "HOME" ? HOME : host.env.get(name)) },
@@ -198,8 +257,9 @@ function makeFakeEngine(host: FakeHost): unknown {
       // sleep that never resolves never wins and never introduces flakiness.
       sleep: async () => new Promise<void>(() => {}),
       // Held, never run on its own: a test that wants a timer's work runs it (runTimers).
-      after: (_ms: number, fn: () => unknown) => {
+      after: (ms: number, fn: () => unknown) => {
         host.timers.push(fn);
+        host.timerDelays.push(ms);
         return { cancel: () => undefined };
       },
     },
@@ -215,9 +275,12 @@ function makeFakeEngine(host: FakeHost): unknown {
     process: {
       // No real `orca` binary: resolveOrcaContext falls back to its
       // cwd-only shape, deterministically, on any non-success exit.
-      run: async (argv: readonly string[]) => {
+      run: async (argv: readonly string[], init?: { cwd?: string }) => {
         host.processCalls.push(argv.join(" "));
+        host.processInits.push(init);
         if (host.failProcess) throw new Error("fake host: process.run failed");
+        const scripted = host.processHandler?.(argv, init);
+        if (scripted !== undefined) return scripted;
         // 0.6.23 T1: a seeded repository answers git's top level and branch.
         const repo = argv[0] === "git" && argv[1] === "-C" ? host.gitRepos.get(argv[2] ?? "") : undefined;
         if (repo !== undefined && argv[3] === "rev-parse") return { exitCode: 0, stdout: `${repo.toplevel}\n`, stderr: "" };
@@ -229,6 +292,12 @@ function makeFakeEngine(host: FakeHost): unknown {
       },
     },
     tool: { list: async () => host.toolList },
+    prompt: {
+      submit: async (input: { text: string; asUser?: true }) => {
+        host.submits.push(input);
+        return { turnId: "turn-ci" };
+      },
+    },
     agent: {
       list: async () => {
         if (host.agents === null) throw new Error("fake host: agent.list unavailable");
@@ -237,6 +306,7 @@ function makeFakeEngine(host: FakeHost): unknown {
     },
     ui: {
       status: (text: string | undefined) => { host.statusLines.push(text); },
+      toast: (text: string) => { host.toasts.push(text); },
       // The terminal's element table (0.6.14 T2): each constructor makes the plain-data element the engine would.
       resolve: () => ({
         Box: (props: Record<string, unknown>) => ({ type: "Box", props }),
@@ -553,16 +623,17 @@ test("the shared sampling roll's own failure fails open as not sampled: no throw
   host.toolList = [{ name: "Bash", description: "Runs a shell command", mcp: false }];
   const { handlers, engine } = loadHooks(host);
 
-  // The roll's own `$.clock.now()` call (building `today`) is the very
-  // first clock read of the whole prompt.submit run -- fail only that one
-  // call, so everything after the roll (timestamps inside the two
-  // closures, should either of them still run) keeps behaving normally.
+  // The roll's own `$.clock.now()` call (building `today`) is the second
+  // clock read of the whole prompt.submit run, after K0's typing lead time
+  // (whose own failure the K0b tests cover) -- fail only that one call, so
+  // everything after the roll (timestamps inside the two closures, should
+  // either of them still run) keeps behaving normally.
   const baseEngine = engine as { clock: { now: () => Promise<number> } };
   const originalNow = baseEngine.clock.now.bind(baseEngine.clock);
   let callCount = 0;
   baseEngine.clock.now = async () => {
     callCount += 1;
-    if (callCount === 1) throw new Error("clock unavailable");
+    if (callCount === 2) throw new Error("clock unavailable");
     return originalNow();
   };
 
@@ -3960,4 +4031,1143 @@ test("V3 verify-done: what Jev reads is the redacted final message and counts; a
   assert.ok(!body.includes(secret), "the secret is redacted");
   assert.ok(!body.includes("SECRET_CONTENTS"), "no file contents");
   assert.ok(!body.includes("secret-module"), "no paths");
+});
+
+// ---------------------------------------------------------------------------
+// K0b typing lead time (odd/tasks/typing-lead-time.md): `prompt.edit` keeps
+// each session's draft in memory only; `prompt.submit` writes one row per
+// scored prompt to `typing-<hour>.jsonl`, following skill-selection's state.
+// These tests load the real mod, so they also prove it loads with the new
+// src/core import (src/core/typing_lead_time.ts has no `node:` import).
+// ---------------------------------------------------------------------------
+
+const TYPING_PATH = `${CACHE_DIR}/typing-2026-09-25T10.jsonl`;
+const EDIT_RESULT = { text: "h", cursor: 1 };
+
+/** One keystroke at the composer; returns what the hook handed back. */
+async function typeKey(handlers: Map<string, Hook>, engine: unknown, text = ""): Promise<unknown> {
+  const hook = handlers.get("prompt.edit");
+  assert.ok(hook, "prompt.edit was never registered");
+  return hook(engine, { origin: { kind: "composer" }, text, cursor: text.length, start: text.length, end: text.length, inputText: "h" }, async () => EDIT_RESULT);
+}
+
+async function submitFrom(handlers: Map<string, Hook>, engine: unknown, text: string, kind: string): Promise<unknown> {
+  const submit = handlers.get("prompt.submit");
+  assert.ok(submit, "prompt.submit was never registered");
+  return submit(engine, { text, wait: false, origin: { kind } }, promptSubmitNext);
+}
+
+function typingRows(host: FakeHost): Record<string, unknown>[] {
+  return (host.files.get(TYPING_PATH) ?? "").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("K0b the installed mod carries the typing core, and nothing it loads imports node: (the hook sandbox has no Node)", async () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+  const closure = await walkModSkillsClosure("adapters/claude/mod-skills/hooks/index.ts", { read: (path) => readFile(join(repoRoot, path), "utf8") });
+  assert.ok(closure.includes("src/core/typing_lead_time.ts"), "the install copies the new core file");
+  for (const path of closure) {
+    const source = await readFile(join(repoRoot, path), "utf8");
+    assert.doesNotMatch(source, /from ["']node:/, path);
+  }
+});
+
+test("K0b prompt.edit: hands back next(e)'s own result and writes no file and no state, keystroke after keystroke", async () => {
+  const host = makeFakeHost();
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+  for (let i = 0; i < 5; i += 1) assert.equal(await typeKey(handlers, engine, "h".repeat(i)), EDIT_RESULT);
+  assert.deepEqual(leftBehind(host, seeded), []);
+  assert.equal(host.fetchCalls.length, 0);
+});
+
+test("K0b prompt.edit: a failing clock or session read never reaches the keystroke or the prompt", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  const base = engine as Record<string, Record<string, unknown>>;
+  const broken = { ...base, clock: { ...base.clock, now: async () => { throw new Error("fake host: clock failed"); } }, session: { ...base.session, id: async () => { throw new Error("fake host: id failed"); } } };
+  assert.equal(await typeKey(handlers, broken), EDIT_RESULT);
+  const submitted = await submitFrom(handlers, broken, "how does the auth module work", "composer");
+  assert.deepEqual(submitted, { text: "how does the auth module work", wait: false, origin: { kind: "composer" } });
+});
+
+test("K0b composer prompt: one row with the gap since the last edit and the number of edits", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  for (let i = 0; i < 4; i += 1) await typeKey(handlers, engine, "h".repeat(i));
+  // The person pauses: the queued keystroke updates run, then 750 ms pass.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  host.clockOffsetMs = 750;
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  const rows = typingRows(host);
+  assert.equal(rows.length, 1);
+  const [row] = rows;
+  assert.equal(row?.type, "typing");
+  assert.equal(row?.kind, "composer");
+  assert.equal(row?.origin, "composer");
+  assert.equal(row?.edits, 4);
+  assert.equal(row?.sessionId, "session-1");
+  assert.ok(typeof row?.gapMs === "number" && row.gapMs >= 750 && row.gapMs < 800, `gap ${String(row?.gapMs)}`);
+  assert.equal(JSON.stringify(row).includes("auth module"), false, "the prompt's text is never logged");
+});
+
+test("K0b the draft is cleared at submit: the next prompt counts only its own edits", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  for (let i = 0; i < 3; i += 1) await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "first prompt", "composer");
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "second prompt", "composer");
+  assert.deepEqual(typingRows(host).map((row) => row.edits), [3, 1]);
+});
+
+test("K0b injected prompt: a row of kind injected with no gap, and the draft being typed is left for its own submit", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "a background task finished", "task-notification");
+  await submitFrom(handlers, engine, "my own prompt", "composer");
+  const rows = typingRows(host);
+  assert.deepEqual(rows.map((row) => [row.kind, row.origin, row.gapMs === null, row.edits]), [["injected", "task-notification", true, 0], ["composer", "composer", false, 2]]);
+});
+
+test("K0b a composer prompt with no edit seen is injected, never a 0 ms gap", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  const [row] = typingRows(host);
+  assert.equal(row?.kind, "injected");
+  assert.equal(row?.gapMs, null);
+});
+
+test("K0b empty prompts and slash commands are not scored, so they write no row and still clear the draft", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "/clear", "composer");
+  await submitFrom(handlers, engine, "   ", "composer");
+  assert.equal(host.files.has(TYPING_PATH), false);
+  await submitFrom(handlers, engine, "a real prompt", "composer");
+  assert.equal(typingRows(host)[0]?.kind, "injected", "the /clear draft is not carried over");
+});
+
+test("K0b skill-selection off: typing and sending writes no row", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "skill-selection": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  await submitFrom(handlers, engine, "a background task finished", "task-notification");
+  assert.equal(host.files.has(TYPING_PATH), false);
+});
+
+test("K0b skill-selection shadow: rows are written as in active", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "skill-selection": "shadow" });
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await submitFrom(handlers, engine, "how does the auth module work", "composer");
+  assert.equal(typingRows(host).length, 1);
+});
+
+test("K0b a subagent's run writes no typing row and leaves the person's draft alone", async () => {
+  const host = makeFakeHost();
+  setModules(host, { "model-router": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await typeKey(handlers, engine);
+  await spawnThrough(handlers, engine, spawnEvent());
+  await completeTurn(handlers, engine, { agentId: "agent-1" });
+  assert.equal(host.files.has(TYPING_PATH), false);
+  await submitFrom(handlers, engine, "my own prompt", "composer");
+  assert.deepEqual(typingRows(host).map((row) => [row.kind, row.edits]), [["composer", 1]]);
+});
+
+// ---------------------------------------------------------------------------
+// The CI watcher (odd/tasks/ci-watcher.md). C2: a push, a pull request or a
+// merge in the MAIN thread starts a watch, after `next`, on a timer, and the
+// call's result is never touched. The pure rules are covered in
+// src/core/ci_watch.test.ts.
+// ---------------------------------------------------------------------------
+
+const CI_SHA = "0123456789abcdef0123456789abcdef01234567";
+const CI_MERGE_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+const CI_LOG_PATH = `${CACHE_DIR}/ci-watch-decisions-2026-09-25T10.jsonl`;
+const OK = (stdout: string): { exitCode: number; stdout: string; stderr: string } => ({ exitCode: 0, stdout, stderr: "" });
+const FAILED = { exitCode: 1, stdout: "", stderr: "fatal" };
+
+interface CiRepoScript {
+  /** git's top level for any directory; null answers "not a repository". */
+  toplevel: string | null;
+  sha: string;
+  /** What `git branch --show-current` answers (empty on a detached HEAD). */
+  branch: string;
+  /** `gh pr view` answers, in order; the last repeats. */
+  prView: string[];
+  /** `gh run list` answers, in order; the last repeats: the runs gh prints, "fail" for a non-zero exit, "missing" for a gh that cannot start. */
+  polls: (Record<string, unknown>[] | "fail" | "missing")[];
+}
+
+/** Answers git for a repository: its top level, the sha of any ref and the branch checked out; `gh pr view` from `script.prView` and `gh run list` from `script.polls`. */
+function seedCiRepo(host: FakeHost, script: Partial<CiRepoScript> = {}): CiRepoScript {
+  const repo: CiRepoScript = { toplevel: CWD, sha: CI_SHA, branch: "feat/x", prView: [], polls: [], ...script };
+  const prViews = [...repo.prView];
+  const polls = [...repo.polls];
+  const previous = host.processHandler;
+  host.processHandler = (argv, init) => {
+    if (argv[0] === "git" && argv[1] === "-C") {
+      const rest = argv.slice(3);
+      if (rest[0] === "rev-parse" && rest[1] === "--show-toplevel") return repo.toplevel === null ? FAILED : OK(`${repo.toplevel}\n`);
+      if (rest[0] === "rev-parse") return OK(`${repo.sha}\n`);
+      if (rest[0] === "branch") return OK(`${repo.branch}\n`);
+    }
+    if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "view") return OK(prViews.length > 1 ? (prViews.shift() ?? "") : (prViews[0] ?? ""));
+    if (argv[0] === "gh" && argv[1] === "run" && argv[2] === "list") {
+      const answer = polls.length > 1 ? polls.shift() : polls[0];
+      if (answer === "missing") throw new Error("fake host: gh cannot start");
+      if (answer === "fail") return FAILED;
+      return OK(JSON.stringify(answer ?? []));
+    }
+    return previous?.(argv, init);
+  };
+  return repo;
+}
+
+/** A Bash outcome as core resolves it: `{ result, text }`, with the engine's own gitOperation when given. */
+function bashOutcome(text: string, gitOperation?: Record<string, unknown>, isError = false): Record<string, unknown> {
+  return { ref: 1, result: { stdout: text, stderr: "", interrupted: false, ...(gitOperation === undefined ? {} : { gitOperation }) }, text, ...(isError ? { isError: true } : {}) };
+}
+
+/** One Bash `tool.call` through the hook; returns what the hook handed back and how often `next` ran. */
+async function bashThrough(handlers: Map<string, Hook>, engine: unknown, command: string, outcome: Record<string, unknown>, agentId?: string): Promise<{ returned: unknown; nexts: number }> {
+  const hook = handlers.get("tool.call");
+  assert.ok(hook, "tool.call was never registered");
+  let nexts = 0;
+  const returned = await hook(engine, { command, tool: "Bash", tool_use_id: `toolu_${command.length}`, ...(agentId === undefined ? {} : { agentId }) }, async () => {
+    nexts += 1;
+    return outcome;
+  });
+  return { returned, nexts };
+}
+
+function gitCalls(host: FakeHost): string[] {
+  return host.processCalls.filter((call) => call.startsWith("git "));
+}
+
+test("C2 ci-watch: a push in the main thread is resolved on a timer, after next; the call's result is the one next gave", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host);
+  const { handlers, engine } = loadHooks(host);
+  const outcome = bashOutcome("To github.com:a/b.git\n   abc..def  feat/x -> feat/x", { push: { branch: "feat/x" } });
+
+  const { returned, nexts } = await bashThrough(handlers, engine, "git push -u origin feat/x", outcome);
+  assert.equal(returned, outcome, "the very object next resolved to");
+  assert.equal(nexts, 1);
+  assert.deepEqual(host.processCalls, [], "nothing runs inside the call");
+  assert.equal(host.timers.length, 1, "one timer carries the start");
+
+  await runTimers(host);
+  // The branch is the engine's, so git is asked for its sha and the repository, not for the branch.
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`, `git -C ${CWD} rev-parse --verify feat/x^{commit}`]);
+});
+
+test("C2 ci-watch: a push that names no branch is resolved from HEAD and the branch checked out", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host);
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "git push", bashOutcome("pushed"));
+  await runTimers(host);
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`, `git -C ${CWD} rev-parse --verify HEAD^{commit}`, `git -C ${CWD} branch --show-current`]);
+});
+
+test("C2 ci-watch: the repository asked is the one the command ran in (cd and git -C)", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { toplevel: "/home/dev/Projects/other" });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "cd /home/dev/Projects/other && git push origin feat/x", bashOutcome("pushed"));
+  await runTimers(host);
+  assert.ok(gitCalls(host).length >= 2, "the repository was looked up");
+  assert.ok(gitCalls(host).every((call) => call.startsWith("git -C /home/dev/Projects/other ")), gitCalls(host).join("\n"));
+});
+
+test("C2 ci-watch: what starts nothing - a subagent's push, a failed or dry or empty push, any other command, a merge only queued", async () => {
+  const cases: { name: string; command: string; outcome: Record<string, unknown>; agentId?: string }[] = [
+    { name: "a subagent's push", command: "git push", outcome: bashOutcome("pushed", { push: { branch: "feat/x" } }), agentId: "agent-1" },
+    { name: "a failed push", command: "git push", outcome: bashOutcome("rejected", undefined, true) },
+    { name: "a dry run", command: "git push --dry-run", outcome: bashOutcome("would push") },
+    { name: "a push that changed nothing", command: "git push", outcome: bashOutcome("Everything up-to-date") },
+    { name: "another command", command: "ls -la", outcome: bashOutcome("files") },
+    { name: "a merge queued for later", command: "gh pr merge 9 --auto", outcome: bashOutcome("auto-merge enabled", { pr: { number: 9, action: "auto-merge-enabled" } }) },
+    { name: "a refused call", command: "git push", outcome: { deny: "blocked" } },
+  ];
+  for (const { name, command, outcome, agentId } of cases) {
+    const host = makeFakeHost();
+    seedCiRepo(host);
+    const { handlers, engine } = loadHooks(host);
+    const { returned } = await bashThrough(handlers, engine, command, outcome, agentId);
+    assert.equal(returned, outcome, name);
+    await runTimers(host);
+    assert.deepEqual(host.processCalls, [], name);
+    assert.equal(host.timers.length, 0, name);
+  }
+});
+
+test("C2 ci-watch off: a push starts nothing - no timer, no process; the result is unchanged", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host);
+  setModules(host, { "ci-watch": "off" });
+  const { handlers, engine } = loadHooks(host);
+  const outcome = bashOutcome("pushed", { push: { branch: "feat/x" } });
+  const { returned } = await bashThrough(handlers, engine, "git push", outcome);
+  assert.equal(returned, outcome);
+  await runTimers(host);
+  assert.deepEqual(host.processCalls, []);
+  assert.equal(host.timerDelays.length, 0);
+  assert.equal(host.state.size, 0, "no state written");
+});
+
+test("C2 ci-watch: a merged pull request asks gh for its merge commit; a merge with none yet starts nothing more", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { prView: [JSON.stringify({ mergeCommit: { oid: CI_MERGE_SHA }, baseRefName: "main" })] });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "gh pr merge 53 --squash", bashOutcome("merged", { pr: { number: 53, action: "merged" } }));
+  await runTimers(host);
+  const view = host.processCalls.findIndex((call) => call.startsWith("gh pr view"));
+  assert.equal(host.processCalls[view], "gh pr view 53 --json mergeCommit,baseRefName");
+  assert.equal(host.processInits[view]?.cwd, CWD);
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`]);
+
+  const queued = makeFakeHost();
+  seedCiRepo(queued, { prView: [JSON.stringify({ mergeCommit: null, baseRefName: "main" })] });
+  const second = loadHooks(queued);
+  await bashThrough(second.handlers, second.engine, "gh pr merge 53", bashOutcome("merged", { pr: { number: 53, action: "merged" } }));
+  await runTimers(queued);
+  assert.deepEqual(gitCalls(queued), [], "no merge commit: nothing to resolve");
+});
+
+test("C2 ci-watch: a directory that is no repository starts nothing", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { toplevel: null });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "git push", bashOutcome("pushed", { push: { branch: "feat/x" } }));
+  await runTimers(host);
+  assert.deepEqual(gitCalls(host), [`git -C ${CWD} rev-parse --show-toplevel`], "asked once, then stopped");
+  assert.equal(host.state.size, 0);
+  assert.equal(host.timers.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// C3: the adaptive poll, the band row and the toast. The fake clock never
+// moves with the schedule: the watch counts the delays it asked for.
+// ---------------------------------------------------------------------------
+
+/** One run as `gh run list --json` prints it. */
+function ghRun(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { databaseId: 101, status: "completed", conclusion: "success", headBranch: "feat/x", headSha: CI_SHA, workflowName: "CI", url: "https://github.com/a/b/actions/runs/101", createdAt: "2026-09-25T10:00:30Z", ...overrides };
+}
+const RUNNING = ghRun({ status: "in_progress", conclusion: "" });
+const PASSED = ghRun();
+const FAILED_RUN = ghRun({ conclusion: "failure" });
+
+const PUSH_OUTCOME = (): Record<string, unknown> => bashOutcome("pushed", { push: { branch: "feat/x" } });
+
+function ghPolls(host: FakeHost): string[] {
+  return host.processCalls.filter((call) => call.startsWith("gh run list"));
+}
+
+/** Runs the oldest timer alone, as the engine would when its delay is up. */
+async function runNextTimer(host: FakeHost): Promise<void> {
+  const fn = host.timers.shift();
+  assert.ok(fn, "a timer was due");
+  await fn();
+}
+
+async function pushAndWatch(host: FakeHost, options: { command?: string; outcome?: Record<string, unknown> } = {}): Promise<{ handlers: Map<string, Hook>; engine: unknown }> {
+  const loaded = loadHooks(host);
+  await bashThrough(loaded.handlers, loaded.engine, options.command ?? "git push -u origin feat/x", options.outcome ?? PUSH_OUTCOME());
+  return loaded;
+}
+
+test("C3 ci-watch: polls gh run list for the pushed branch on a slowing schedule, confirms, and says so once the run is done", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [RUNNING], [PASSED], [PASSED]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+
+  assert.equal(ghPolls(host).length, 4);
+  assert.equal(ghPolls(host)[0], "gh run list --branch feat/x --limit 30 --json databaseId,status,conclusion,headBranch,headSha,workflowName,url,createdAt");
+  const pollIndexes = host.processCalls.flatMap((call, index) => (call.startsWith("gh run list") ? [index] : []));
+  assert.ok(pollIndexes.every((index) => host.processInits[index]?.cwd === CWD), "gh runs in the repository");
+  // The start, then 10 s, 15 s, the confirming 10 s, and the row's keep time.
+  assert.deepEqual(host.timerDelays, [200, 10_000, 15_000, 10_000, 120_000]);
+  assert.deepEqual(host.toasts, ["CI 0123456 feat/x: passed"]);
+});
+
+test("C3 ci-watch: a failed run is told with its workflows", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED, ghRun({ databaseId: 102, workflowName: "Deploy", conclusion: "failure" })]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.toasts, ["CI 0123456 feat/x: failed (Deploy)"]);
+});
+
+test("C3 ci-watch: the band shows the watch while it runs and after it ends, then drops it", async () => {
+  const host = makeFakeHost();
+  const docs = ghRun({ databaseId: 102, workflowName: "Docs" });
+  seedCiRepo(host, { polls: [[RUNNING, docs], [PASSED, docs], [PASSED, docs], [PASSED, docs]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host); // the start, and the first poll with it
+  assert.deepEqual(bandLines(await renderBand(handlers, engine, 200)), ["CI 0123456 feat/x: running, 1 of 2 runs done, 0 min"]);
+  await runNextTimer(host); // 10 s: every run finished, once
+  await runNextTimer(host); // the confirming poll, inside the settle window
+  await runNextTimer(host); // and the one that agrees: done
+  assert.deepEqual(bandLines(await renderBand(handlers, engine, 200)), ["CI 0123456 feat/x: passed"]);
+  host.clockOffsetMs += 3 * 60_000;
+  await runNextTimer(host); // the row's keep time is up
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING, "nothing left to draw: the engine's own band");
+});
+
+test("C3 ci-watch: one watch per repository and sha - a second push of the same commit extends the first", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await bashThrough(handlers, engine, "git push origin feat/x", PUSH_OUTCOME());
+  assert.equal(host.timers.length, 2, "each push arms its own start");
+  await runNextTimer(host);
+  await runNextTimer(host); // the second start finds the sha already watched and goes away
+  assert.equal(ghPolls(host).length, 1, "one poll chain");
+  await runTimers(host);
+  assert.equal(host.toasts.length, 1, "told once");
+});
+
+test("C3 ci-watch: a merge is watched on the branch it landed on, by its merge commit", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { prView: [JSON.stringify({ mergeCommit: { oid: CI_MERGE_SHA }, baseRefName: "main" })], polls: [[ghRun({ headSha: CI_MERGE_SHA, headBranch: "main" })]] });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "gh pr merge 53 --squash", bashOutcome("merged", { pr: { number: 53, action: "merged" } }));
+  await runTimers(host);
+  assert.match(ghPolls(host)[0] ?? "", /^gh run list --branch main /);
+  assert.deepEqual(host.toasts, ["CI fedcba9 main: passed"]);
+});
+
+test("C3 ci-watch fails open: gh missing, not signed in, no run, or a run that never ends all end the watch without a word", async () => {
+  const scenarios: { name: string; polls: (Record<string, unknown>[] | "fail" | "missing")[]; expectPolls: number }[] = [
+    { name: "gh cannot start", polls: ["missing"], expectPolls: 1 },
+    { name: "gh fails three times in a row", polls: ["fail"], expectPolls: 3 },
+    { name: "no run appears for the sha", polls: [[ghRun({ headSha: CI_MERGE_SHA })]], expectPolls: 8 },
+    { name: "a run never ends", polls: [[RUNNING]], expectPolls: 45 },
+  ];
+  for (const { name, polls, expectPolls } of scenarios) {
+    const host = makeFakeHost();
+    seedCiRepo(host, { polls });
+    const { handlers, engine } = await pushAndWatch(host);
+    await runTimers(host);
+    assert.equal(ghPolls(host).length, expectPolls, name);
+    assert.deepEqual(host.toasts, [], name);
+    assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING, `${name}: no row left`);
+    assert.equal(host.timers.length, 0, name);
+  }
+});
+
+test("C3 ci-watch: switched off while it runs, the next poll ends it - no gh call, no row, no toast", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host);
+  assert.equal(ghPolls(host).length, 1);
+  setModules(host, { "ci-watch": "off" });
+  await runTimers(host);
+  assert.equal(ghPolls(host).length, 1, "no further gh call");
+  assert.deepEqual(host.toasts, []);
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
+});
+
+test("C3 ci-watch band: the engine's band and a survey are left alone; the router off does not hide the watch; a subagent band stacks above it", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host);
+  const watchLine = "CI 0123456 feat/x: running, 0 of 1 runs done, 0 min";
+  // Not the engine's own drawing beneath (another plugin's band): passed through as it is.
+  const other = { type: "Box", props: { children: [] } };
+  assert.equal(await renderBand(handlers, engine, 200, { beneath: other }), other);
+  // A survey holds the band.
+  assert.equal(await renderBand(handlers, engine, 200, { hasSurvey: true }), ENGINE_DRAWING);
+  // The router off: the watch is still drawn.
+  setModules(host, { "model-router": "off" });
+  assert.deepEqual(bandLines(await renderBand(handlers, engine, 200)), [watchLine]);
+  // The watcher off: nothing of it.
+  setModules(host, { "ci-watch": "off" });
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
+});
+
+test("C3 ci-watch band: a subagent's band keeps its place and the watch is drawn under it", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  host.fetchQueue.push(tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await spawnAs(handlers, engine, spawnEvent({ model: "opus" }), "agent-1", "claude-opus-5-5");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runNextTimer(host);
+  const lines = bandLines(await renderBand(handlers, engine, 200));
+  assert.equal(lines[0], "Running agents: 1");
+  assert.equal(lines.at(-1), "CI 0123456 feat/x: running, 0 of 1 runs done, 0 min");
+  assert.equal(lines.length, 3, "heading, the agent's row, the watch");
+});
+
+// ---------------------------------------------------------------------------
+// C4: the measure. What the agent itself spent waiting for the run - CI polls
+// and sleeps of 10 s or more, in the main thread, while a watch is open - is
+// what a note would have replaced. One row per watch, numbers and names only.
+// ---------------------------------------------------------------------------
+
+function ciRows(host: FakeHost): Record<string, unknown>[] {
+  return (host.files.get(CI_LOG_PATH) ?? "").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** A main-thread Bash call that is not a trigger, through the hook: `next` answers plain output. */
+async function plainBash(handlers: Map<string, Hook>, engine: unknown, command: string, agentId?: string): Promise<void> {
+  await bashThrough(handlers, engine, command, bashOutcome("output"), agentId);
+}
+
+test("C4 ci-watch shadow: counts the agent's own CI polls and long sleeps made during the watch, and writes one row when it ends; no prompt is submitted", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [RUNNING], [PASSED], [PASSED]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  // Made before the watch has even found its sha: still during it.
+  await plainBash(handlers, engine, "gh run list --branch feat/x");
+  await runNextTimer(host);
+  await plainBash(handlers, engine, "sleep 60");
+  await plainBash(handlers, engine, "sleep 60 && gh run view 5 --log-failed");
+  await plainBash(handlers, engine, "gh pr checks --watch");
+  await plainBash(handlers, engine, "sleep 2");
+  await plainBash(handlers, engine, "ls -la");
+  await plainBash(handlers, engine, "sleep 90", "agent-1");
+  await plainBash(handlers, engine, "gh run watch 5", "agent-1");
+  host.clockOffsetMs += 187_000;
+  await runTimers(host);
+  // After the end: not counted.
+  await plainBash(handlers, engine, "gh run view 5");
+
+  const rows = ciRows(host);
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0], at: "x", account: "x" }, {
+    at: "x",
+    account: "x",
+    project: "sandbox",
+    sessionId: "session-1",
+    mode: "shadow",
+    trigger: "push",
+    outcome: "success",
+    watchedSeconds: 187,
+    ghCalls: 4,
+    agentPolls: 3,
+    agentSleeps: 1,
+    notified: true,
+    injected: false,
+  });
+  assert.deepEqual(host.submits, [], "shadow never talks to the agent");
+});
+
+test("C4 ci-watch: the row holds no command, path, branch, sha or url", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await plainBash(handlers, engine, "gh run view 5 --repo secret-org/private-repo");
+  await runTimers(host);
+  const text = host.files.get(CI_LOG_PATH) ?? "";
+  assert.ok(text.length > 0, "a row was written");
+  for (const needle of ["private-repo", "secret-org", "feat/x", CI_SHA, "github.com", "gh run"]) assert.ok(!text.includes(needle), needle);
+});
+
+test("C4 ci-watch: a watch that ends without a verdict still writes its row, and the person is told nothing", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+  const [row] = ciRows(host);
+  assert.equal(row?.outcome, "no-runs");
+  assert.equal(row?.notified, false);
+  assert.equal(row?.ghCalls, 8);
+  assert.deepEqual(host.toasts, []);
+
+  const missing = makeFakeHost();
+  seedCiRepo(missing, { polls: ["missing"] });
+  await pushAndWatch(missing);
+  await runTimers(missing);
+  assert.equal(ciRows(missing)[0]?.outcome, "gh-missing");
+  assert.equal(ciRows(missing)[0]?.ghCalls, 0, "a gh that never started ran no process");
+});
+
+test("C4 ci-watch off: no count and no row; a watch switched off in the middle leaves none either", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING]] });
+  setModules(host, { "ci-watch": "off" });
+  const { handlers, engine } = loadHooks(host);
+  await bashThrough(handlers, engine, "git push", PUSH_OUTCOME());
+  await plainBash(handlers, engine, "gh run watch 5");
+  await runTimers(host);
+  assert.equal(host.files.has(CI_LOG_PATH), false);
+
+  const middle = makeFakeHost();
+  seedCiRepo(middle, { polls: [[RUNNING]] });
+  await pushAndWatch(middle);
+  await runNextTimer(middle);
+  setModules(middle, { "ci-watch": "off" });
+  await runTimers(middle);
+  assert.equal(middle.files.has(CI_LOG_PATH), false);
+});
+
+// ---------------------------------------------------------------------------
+// C5: Active tells the agent once, when the session is idle. The note is
+// short, goes through `$.prompt.submit` as the plugin's (never as the person's
+// words), and never for a subagent or a watch that ended without a verdict.
+// ---------------------------------------------------------------------------
+
+const CI_NOTE = "CI for 0123456 on feat/x: success, https://github.com/a/b/actions/runs/101";
+
+async function startTurn(handlers: Map<string, Hook>, engine: unknown, turnId: string): Promise<void> {
+  const start = handlers.get("turn.start");
+  assert.ok(start, "turn.start was never registered");
+  await start(engine, { text: "", turnId }, async (e: unknown) => ({ turnId: (e as { turnId: string }).turnId }));
+}
+
+test("C5 ci-watch active: once the run ends and no turn is running, exactly one note goes to the agent", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED], [PASSED], [PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.submits, [{ text: CI_NOTE }], "one note, the plugin's own words: no asUser");
+  assert.deepEqual(host.toasts, ["CI 0123456 feat/x: passed"], "the person is told as well");
+  const [row] = ciRows(host);
+  assert.equal(row?.mode, "active");
+  assert.equal(row?.injected, true);
+});
+
+test("C5 ci-watch active: a failed run names its workflows in the note", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED, ghRun({ databaseId: 102, workflowName: "Deploy", conclusion: "failure", url: "https://github.com/a/b/actions/runs/102" })]] });
+  setModules(host, { "ci-watch": "active" });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.submits, [{ text: "CI for 0123456 on feat/x: failure (Deploy), https://github.com/a/b/actions/runs/102" }]);
+});
+
+test("C5 ci-watch active: while a turn runs the note waits for the turn to end, and goes once", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  const { handlers, engine } = loadHooks(host);
+  await startTurn(handlers, engine, "turn-1");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(host);
+  assert.deepEqual(host.submits, [], "a turn is running: nothing is submitted over it");
+  assert.equal(host.files.has(CI_LOG_PATH), false, "the row is written when the note's fate is known");
+
+  await completeTurn(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(host.submits, [{ text: CI_NOTE }]);
+  assert.equal(ciRows(host)[0]?.injected, true);
+
+  await completeTurn(handlers, engine);
+  await runTimers(host);
+  assert.equal(host.submits.length, 1, "at most once per watch");
+  assert.equal(ciRows(host).length, 1);
+});
+
+test("C5 ci-watch active: a subagent's turn ending does not release the note", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  const { handlers, engine } = loadHooks(host);
+  await startTurn(handlers, engine, "turn-1");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(host);
+  await completeSubagent(handlers, engine, "agent-1");
+  await runTimers(host);
+  assert.deepEqual(host.submits, []);
+});
+
+test("C5 ci-watch: a note waiting for idle is dropped if the module is no longer Active when the turn ends", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[PASSED]] });
+  setModules(host, { "ci-watch": "active" });
+  const { handlers, engine } = loadHooks(host);
+  await startTurn(handlers, engine, "turn-1");
+  await bashThrough(handlers, engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(host);
+  setModules(host, { "ci-watch": "shadow" });
+  await completeTurn(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(host.submits, []);
+  assert.equal(ciRows(host)[0]?.injected, false);
+  assert.equal(ciRows(host)[0]?.mode, "shadow");
+
+  const off = makeFakeHost();
+  seedCiRepo(off, { polls: [[PASSED]] });
+  setModules(off, { "ci-watch": "active" });
+  const second = loadHooks(off);
+  await startTurn(second.handlers, second.engine, "turn-1");
+  await bashThrough(second.handlers, second.engine, "git push -u origin feat/x", PUSH_OUTCOME());
+  await runTimers(off);
+  setModules(off, { "ci-watch": "off" });
+  await completeTurn(second.handlers, second.engine);
+  await runTimers(off);
+  assert.deepEqual(off.submits, []);
+});
+
+test("C5 ci-watch active: a watch that ends without a verdict sends nothing", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[]] });
+  setModules(host, { "ci-watch": "active" });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.deepEqual(host.submits, []);
+  assert.equal(ciRows(host)[0]?.injected, false);
+});
+
+test("C5 ci-watch: the note costs no Jev call and is not a person turn", async () => {
+  const host = makeFakeHost();
+  seedProjectSkill(host, "graft-helper", "Look up code with graft", "Use graft to read the code.");
+  seedSamplingConfig(host, { enabled: true, sampleRate: 1, dailyPromptCap: 1000 });
+  const { handlers, engine } = loadHooks(host);
+  // The control: a person's prompt does ask Jev in this setup.
+  await submitPrompt(handlers, engine, "fix the parser please");
+  assert.ok(host.fetchCalls.length > 0, "the control prompt reached Jev");
+  host.fetchCalls.length = 0;
+  const submit = handlers.get("prompt.submit");
+  assert.ok(submit);
+  const note = { text: CI_NOTE, wait: false, origin: { kind: "plugin", name: "orca-jev-mod-skills" } };
+  const passed = await submit(engine, note, promptSubmitNext);
+  assert.equal(host.fetchCalls.length, 0, "no Jev call for the note");
+  assert.equal(passed, note, "the event goes on as it came");
+  // A text that only looks like the note, from a person, is still a prompt like any other.
+  host.fetchCalls.length = 0;
+  await submitPrompt(handlers, engine, CI_NOTE);
+  assert.ok(host.fetchCalls.length > 0, "only the plugin's own note is skipped");
+});
+
+test("C5 ci-watch with K0b: the note is not a scored prompt, so it writes no typing row", async () => {
+  const host = makeFakeHost();
+  const { handlers, engine } = loadHooks(host);
+  await submitFrom(handlers, engine, CI_NOTE, "plugin");
+  assert.equal(host.files.has(TYPING_PATH), false, "no typing row for the plugin's own note");
+  // The control: another plugin prompt is scored and writes its row.
+  await submitFrom(handlers, engine, "run the release checks", "plugin");
+  assert.deepEqual(typingRows(host).map((row) => row.kind), ["injected"]);
+});
+
+test("C3 ci-watch: a reload forgets the watches - a row left in state by the old load is cleared at session.start", async () => {
+  const host = makeFakeHost();
+  host.state.set("ciWatches", { rows: [{ id: "old", sha7: "abcdef0", branch: "main", status: "watching", startedAtMs: Date.parse("2026-09-25T10:00:00Z"), done: 0, total: 1, failed: [], finishedAtMs: null }] });
+  const { handlers, engine } = loadHooks(host);
+  assert.equal(bandLines(await renderBand(handlers, engine, 200)).length, 1, "before: the old row would be drawn");
+  await startSession(handlers, engine);
+  assert.equal(await renderBand(handlers, engine, 200), ENGINE_DRAWING);
+  assert.deepEqual(host.state.get("ciWatches"), { rows: [] });
+});
+
+// ---------------------------------------------------------------------------
+// Memory in Shadow (odd/tasks/memory-shadow.md, M8): session.start detects the
+// backend (the tool list and one read-only mem_current_project); after a main
+// turn that ended with an answer, a timer runs the free checks, asks Haiku
+// SKIP or UPDATE, drafts on a sampled UPDATE with a fork, builds the judge dry
+// and logs one row. tool.call only observes the main thread's own saves.
+// Nothing is ever written: no mem_save, no mem_judge, no memory file.
+// ---------------------------------------------------------------------------
+
+const MEMORY_ROWS_PATH = `${CACHE_DIR}/memory-decisions-2026-09-25T10.jsonl`;
+const MEMORY_ACCOUNT_DIR = "/orca/claude-accounts/acct-1/auth";
+const MEMORY_DIR = `${MEMORY_ACCOUNT_DIR}/projects/-home-dev-Projects-sandbox/memory`;
+const ENGRAM_TOOLS = [
+  { name: "mcp__engram__mem_save", description: "", mcp: true },
+  { name: "mcp__engram__mem_current_project", description: "", mcp: true },
+];
+const MEMORY_TURN: Row[] = [
+  { role: "user", text: "De ahora en adelante respóndeme en español con tú, nunca voseo.", toolUses: [] },
+  { role: "assistant", text: "Entendido, te hablo con tú.", toolUses: [] },
+];
+const USAGE = (input: number, output: number, cacheRead = 0) => ({ input_tokens: input, output_tokens: output, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: 0 });
+const GATE_UPDATE = { isAnswered: true, text: "UPDATE: the person wants Spanish with tú", usage: USAGE(900, 9) };
+const GATE_SKIP = { isAnswered: true, text: "SKIP", usage: USAGE(900, 1) };
+const DRAFT_REPLY = {
+  isAnswered: true,
+  text: JSON.stringify({ saves: [{ type: "feedback", title: "Spanish with tú", content: "Reply in Spanish with tú, never voseo.", topic_key: "spanish-tu" }], updates: [], deletes: [] }),
+  usage: USAGE(12, 140, 180_000),
+};
+const HEALTHY = (_server: string, tool: string): unknown => {
+  if (tool === "mem_current_project") return { content: [{ type: "text", text: JSON.stringify({ project: "sandbox" }) }], isError: false };
+  throw new Error(`fake host: unexpected Engram tool ${tool}`);
+};
+
+function turnIdWhere(sampled: boolean): string {
+  for (let i = 0; i < 1000; i += 1) if (isForkSampled("session-1", `turn-${i}`) === sampled) return `turn-${i}`;
+  throw new Error("no turn id found");
+}
+
+function memoryHost(options: { engram?: boolean } = {}): FakeHost {
+  const host = makeFakeHost();
+  host.env.set("CLAUDE_CONFIG_DIR", MEMORY_ACCOUNT_DIR);
+  host.repo = { root: CWD };
+  host.messages = MEMORY_TURN;
+  host.files.set(`${MEMORY_DIR}/MEMORY.md`, "- [Merge email](merge-email.md) — use the noreply address\n");
+  host.files.set(`${MEMORY_DIR}/merge-email.md`, "---\nname: merge-email\nmetadata:\n  type: feedback\n  topic_key: merge-email\n---\n\nUse the noreply address.\n");
+  if (options.engram !== false) {
+    host.toolList = [...ENGRAM_TOOLS];
+    host.mcpAnswer = HEALTHY;
+  }
+  return host;
+}
+
+async function startSessionWith(handlers: Map<string, Hook>, engine: unknown): Promise<unknown> {
+  const hook = handlers.get("session.start");
+  assert.ok(hook, "session.start was never registered");
+  return hook(engine, { source: "startup" }, async (e: unknown) => e);
+}
+
+/** Fires tool.call on the main thread; `next` answers `answer` and is counted. */
+async function mainToolCall(handlers: Map<string, Hook>, engine: unknown, tool: string, args: Record<string, unknown>, answer: unknown): Promise<{ result: unknown; nexts: number }> {
+  const hook = handlers.get("tool.call");
+  assert.ok(hook, "tool.call was never registered");
+  let nexts = 0;
+  const result = await hook(engine, { tool, tool_use_id: `toolu_${tool}`, ...args }, async () => {
+    nexts += 1;
+    return answer;
+  });
+  return { result, nexts };
+}
+
+function memoryRows(host: FakeHost): Record<string, unknown>[] {
+  return (host.files.get(MEMORY_ROWS_PATH) ?? "").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** Shadow writes nothing: no Engram write call, nothing under the account's memory or spool folders. */
+function assertNothingWritten(host: FakeHost, seeded: ReadonlySet<string>): void {
+  assert.deepEqual(host.mcpCalls.filter((call) => call.tool !== "mem_current_project"), [], "the only Engram call is the read-only health check");
+  const written = [...host.files.keys()].filter((path) => !seeded.has(path));
+  assert.deepEqual(written.filter((path) => path.startsWith(MEMORY_ACCOUNT_DIR) || path.includes("spool")), [], "no memory file, no spool");
+}
+
+test("M8 memory shadow (the default): a sampled UPDATE turn asks Haiku once, forks once, builds the judge dry and logs one row; nothing is written", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const seeded = new Set(host.files.keys());
+  const seededMemory = new Map([...host.files].filter(([path]) => path.startsWith(MEMORY_DIR)));
+  const { handlers, engine } = loadHooks(host);
+
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  assert.deepEqual(host.mcpCalls, [{ server: "engram", tool: "mem_current_project", args: {} }], "one health call at start");
+
+  // The main thread saves on its own; the hook only watches, after next.
+  const saveAnswer = { result: { content: [{ type: "text", text: JSON.stringify({ id: 5, judgment_required: true, candidates: [{ id: 3, title: "Spanish with vos", type: "policy", judgment_id: "rel-1" }] }) }], isError: false } };
+  const saved = await mainToolCall(handlers, engine, "mcp__engram__mem_save", { title: "Spanish with tú", type: "policy", content: "x" }, saveAnswer);
+  assert.equal(saved.result, saveAnswer, "next(e)'s result comes back as it was");
+  assert.equal(saved.nexts, 1);
+  const judged = await mainToolCall(handlers, engine, "mcp__engram__mem_judge", { judgment_id: "rel-1", relation: "supersedes" }, { result: "ok" });
+  assert.equal(judged.nexts, 1);
+
+  const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  assert.equal(result, TURN_RESULT, "next(e)'s result is handed back as it was");
+  await runTimers(host);
+
+  assert.equal(host.modelCalls.length, 1, "one Haiku gate");
+  assert.equal(host.modelCalls[0]?.model, "haiku");
+  assert.equal(host.forkCalls.length, 1, "one fork on a sampled UPDATE");
+  assert.match(host.forkCalls[0] ?? "", /^\[orca-memory\]/, "the fork's prompt carries the module's own marker");
+  assert.match(host.forkCalls[0] ?? "", /merge-email/, "Engram live: the fork reuses the auto-memory topic keys");
+  const rows = memoryRows(host);
+  assert.equal(rows.length, 1);
+  const row = rows[0] ?? {};
+  assert.deepEqual({ ...row, at: "x", account: "x", gateMs: "x", forkMs: "x" }, {
+    at: "x",
+    account: "x",
+    project: "sandbox",
+    mode: "shadow",
+    sessionId: "session-1",
+    backend: "live",
+    decidedBy: "tools+health",
+    permission: "ok",
+    detectedAt: "start",
+    gate: "update",
+    gateMs: "x",
+    gateTokens: { input: 900, output: 9, cacheRead: 0, cacheWrite: 0 },
+    forkSampled: true,
+    fork: "drafted",
+    forkMs: "x",
+    forkTokens: { input: 12, output: 140, cacheRead: 180_000, cacheWrite: 0 },
+    wouldSave: { user: 0, feedback: 1, project: 0, reference: 0 },
+    wouldUpdate: 0,
+    wouldDelete: 0,
+    toEngram: 1,
+    toAutoMemory: 1,
+    judgeBuilds: 1,
+    mainEngramSaves: 1,
+    mainEngramSaveTypes: { policy: 1 },
+    mainJudges: 1,
+    mainCandidates: 1,
+    mainAutoMemoryWrites: 0,
+    agreement: "both",
+  });
+  assert.doesNotMatch(JSON.stringify(row), /Spanish|vos|tú/, "no memory text or title in the row");
+  assertNothingWritten(host, seeded);
+  for (const [path, content] of seededMemory) assert.equal(host.files.get(path), content, `${path} byte for byte`);
+  assert.deepEqual([...host.state.keys()].filter((key) => key.startsWith("memory")), ["memory"], "one state key");
+});
+
+test("M8 memory shadow: an UPDATE outside the sample makes no fork; a SKIP neither; both log a row", async () => {
+  const cases: { gate: unknown; turnId: string; fork: string | null; agreement: string }[] = [
+    { gate: GATE_UPDATE, turnId: turnIdWhere(false), fork: "not-sampled", agreement: "module-only" },
+    { gate: GATE_SKIP, turnId: turnIdWhere(true), fork: null, agreement: "neither" },
+  ];
+  for (const { gate, turnId, fork, agreement } of cases) {
+    const host = memoryHost();
+    host.modelQueue.push(gate);
+    host.forkQueue.push(DRAFT_REPLY);
+    const seeded = new Set(host.files.keys());
+    const { handlers, engine } = loadHooks(host);
+    await startSessionWith(handlers, engine);
+    await completeTurn(handlers, engine, { turnId });
+    await runTimers(host);
+    assert.equal(host.modelCalls.length, 1, String(fork));
+    assert.equal(host.forkCalls.length, 0, String(fork));
+    const row = memoryRows(host)[0];
+    assert.equal(row?.fork, fork);
+    assert.equal(row?.forkSampled, false);
+    assert.deepEqual(row?.wouldSave, { user: 0, feedback: 0, project: 0, reference: 0 });
+    assert.equal(row?.agreement, agreement);
+    assertNothingWritten(host, seeded);
+  }
+});
+
+test("M8 memory off: no detection, no Haiku call, no fork, no row; nothing scheduled", async () => {
+  const host = memoryHost();
+  setModules(host, { memory: "off", "verify-done": "off", steward: "off" });
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  const answer = { result: "saved" };
+  const observed = await mainToolCall(handlers, engine, "mcp__engram__mem_save", { type: "policy" }, answer);
+  assert.equal(observed.result, answer);
+  assert.equal(observed.nexts, 1);
+  const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  assert.equal(result, TURN_RESULT);
+  assert.equal(host.timers.length, 0, "nothing scheduled");
+  await runTimers(host);
+  assert.equal(host.modelCalls.length, 0);
+  assert.equal(host.forkCalls.length, 0);
+  assert.equal(host.mcpCalls.length, 0);
+  assert.equal(host.files.has(MEMORY_ROWS_PATH), false);
+  assert.equal(host.state.has("memory"), false);
+});
+
+test("M8 memory: a timer already scheduled does nothing once the module went off", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_UPDATE);
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  setModules(host, { memory: "off" });
+  await runTimers(host);
+  assert.equal(host.modelCalls.length, 0);
+  assert.equal(host.files.has(MEMORY_ROWS_PATH), false);
+});
+
+test("M8 memory: a subagent's turn, a turn that did not end with an answer, a slash command and the module's own marker do nothing", async () => {
+  const cases: { extra: Record<string, unknown>; messages: Row[] }[] = [
+    { extra: { agentId: "a-1" }, messages: MEMORY_TURN },
+    { extra: { reason: "aborted", isAborted: true }, messages: MEMORY_TURN },
+    { extra: { reason: "error" }, messages: MEMORY_TURN },
+    { extra: {}, messages: [{ role: "user", text: "/compact", toolUses: [] }, { role: "assistant", text: "ok", toolUses: [] }] },
+    { extra: {}, messages: [{ role: "user", text: "[orca-memory] This message is from the memory module", toolUses: [] }, { role: "assistant", text: "{}", toolUses: [] }] },
+  ];
+  for (const { extra, messages } of cases) {
+    const host = memoryHost();
+    host.messages = messages;
+    host.modelQueue.push(GATE_UPDATE);
+    const { handlers, engine } = loadHooks(host);
+    const result = await completeTurn(handlers, engine, { turnId: turnIdWhere(true), ...extra });
+    await runTimers(host);
+    const label = JSON.stringify({ extra, prompt: messages[0]?.text });
+    assert.equal(result, TURN_RESULT, label);
+    assert.equal(host.modelCalls.length, 0, label);
+    assert.equal(host.files.has(MEMORY_ROWS_PATH), false, label);
+  }
+});
+
+test("M8 memory: no Engram anywhere is auto-memory alone; no MCP call; the fork reads the memory files", async () => {
+  const host = memoryHost({ engram: false });
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  assert.equal(host.mcpCalls.length, 0);
+  assert.match(host.forkCalls[0] ?? "", /<file name="merge-email.md">/);
+  assert.doesNotMatch(host.forkCalls[0] ?? "", /<file name="MEMORY.md">/, "the index is not a memory");
+  const row = memoryRows(host)[0];
+  assert.equal(row?.backend, "absent");
+  assert.equal(row?.decidedBy, "none");
+  assert.equal(row?.detectedAt, "turn", "start saw no Engram, so the turn checked again");
+  assert.equal(row?.toEngram, 0);
+  assert.equal(row?.toAutoMemory, 1);
+  assert.equal(row?.judgeBuilds, 0, "no Engram, no judge");
+  assertNothingWritten(host, seeded);
+});
+
+test("M8 memory: Engram configured but not connected is configured-down, decided by the user-scope config", async () => {
+  const host = memoryHost({ engram: false });
+  host.files.set(`${MEMORY_ACCOUNT_DIR}/.claude.json`, JSON.stringify({ mcpServers: { engram: { command: "/opt/homebrew/bin/engram", args: ["mcp"] } } }));
+  host.modelQueue.push(GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  const row = memoryRows(host)[0];
+  assert.equal(row?.backend, "configured-down");
+  assert.equal(row?.decidedBy, "user-config");
+});
+
+test("M8 memory: Engram tools that connect after the start are found at the first turn, with one health call a session", async () => {
+  const host = memoryHost({ engram: false });
+  host.modelQueue.push(GATE_SKIP, GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  host.toolList = [...ENGRAM_TOOLS];
+  host.mcpAnswer = HEALTHY;
+  await completeTurn(handlers, engine, { turnId: "turn-a" });
+  await runTimers(host);
+  await completeTurn(handlers, engine, { turnId: "turn-b" });
+  await runTimers(host);
+  assert.equal(host.mcpCalls.length, 1, "the health call is made once a session");
+  assert.deepEqual(memoryRows(host).map((row) => [row.backend, row.detectedAt]), [["live", "turn"], ["live", "turn"]]);
+});
+
+test("M8 memory: a refused health call is live with permission refused, never down; a failing one is configured-down", async () => {
+  const cases = [
+    { error: "$.mcp.call(engram, mem_current_project) refused: Claude requested permissions to use mcp__engram__mem_current_project, but you haven't granted it yet.", backend: "live", permission: "refused" },
+    { error: "connection closed", backend: "configured-down", permission: "unknown" },
+  ];
+  for (const { error, backend, permission } of cases) {
+    const host = memoryHost();
+    host.mcpAnswer = () => {
+      throw new Error(error);
+    };
+    host.modelQueue.push(GATE_SKIP);
+    const { handlers, engine } = loadHooks(host);
+    await startSessionWith(handlers, engine);
+    await runTimers(host);
+    await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+    await runTimers(host);
+    const row = memoryRows(host)[0];
+    assert.equal(row?.backend, backend, error);
+    assert.equal(row?.permission, permission, error);
+  }
+});
+
+test("M8 memory: a health check that failed at the start (a cold dial) is asked once more at the first turn, and no more", async () => {
+  const host = memoryHost();
+  host.mcpAnswer = () => {
+    throw new Error("timed out");
+  };
+  host.modelQueue.push(GATE_SKIP, GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await startSessionWith(handlers, engine);
+  await runTimers(host);
+  host.mcpAnswer = HEALTHY;
+  await completeTurn(handlers, engine, { turnId: "turn-a" });
+  await runTimers(host);
+  await completeTurn(handlers, engine, { turnId: "turn-b" });
+  await runTimers(host);
+  assert.equal(host.mcpCalls.length, 2, "the start's, and one at the first turn");
+  assert.deepEqual(memoryRows(host).map((row) => [row.backend, row.detectedAt]), [["live", "turn"], ["live", "turn"]]);
+});
+
+test("M8 memory: what Haiku reads is the index and the redacted last exchange; a malformed answer is no verdict and no fork", async () => {
+  const host = memoryHost();
+  const secret = "sk-ant-api03-" + "c".repeat(40);
+  host.messages = [
+    { role: "user", text: `Guarda que la clave del staging es ${secret}`, toolUses: [] },
+    { role: "assistant", text: "No guardo secretos.", toolUses: [{ tool_use_id: "r1", tool: "Read", input: { file_path: "/secret/path.ts" }, text: "SECRET_FILE_CONTENTS" }] },
+  ];
+  host.modelQueue.push({ isAnswered: true, text: "I think UPDATE because it matters", usage: USAGE(800, 12) });
+  host.forkQueue.push(DRAFT_REPLY);
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  const sent = JSON.stringify(host.modelCalls[0] ?? {});
+  assert.match(sent, /Merge email/, "the MEMORY.md index");
+  assert.match(sent, /la clave del staging/, "the exchange");
+  assert.ok(!sent.includes(secret), "the secret is redacted");
+  assert.ok(!sent.includes("SECRET_FILE_CONTENTS"), "no tool output");
+  assert.ok(!sent.includes("/secret/path.ts"), "no tool input");
+  assert.equal(host.forkCalls.length, 0);
+  const row = memoryRows(host)[0];
+  assert.equal(row?.gate, "malformed");
+  assert.equal(row?.fork, null);
+  assert.equal(row?.agreement, "unknown");
+});
+
+test("M8 memory: a gate with no answer logs no-answer; a model call that rejects logs nothing and the turn is untouched", async () => {
+  const host = memoryHost();
+  host.modelQueue.push({ isAnswered: false, reason: "api-error", status: 529, error: "overloaded", usage: USAGE(0, 0) });
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  assert.equal(memoryRows(host)[0]?.gate, "no-answer");
+
+  const rejecting = memoryHost();
+  const loaded = loadHooks(rejecting);
+  const result = await completeTurn(loaded.handlers, loaded.engine, { turnId: turnIdWhere(true) });
+  await runTimers(rejecting);
+  assert.equal(result, TURN_RESULT);
+  assert.equal(rejecting.files.has(MEMORY_ROWS_PATH), false);
+});
+
+test("M8 memory: a sampled fork is skipped when the next turn already started", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_UPDATE);
+  host.forkQueue.push(DRAFT_REPLY);
+  const { handlers, engine } = loadHooks(host);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  const start = handlers.get("turn.start");
+  assert.ok(start);
+  await start(engine, { turnId: "turn-next" }, async (e: unknown) => e);
+  await runTimers(host);
+  assert.equal(host.forkCalls.length, 0);
+  assert.equal(memoryRows(host)[0]?.fork, "turn-moved-on");
+});
+
+test("M8 memory: a main-thread Write into the memory folder is seen; one elsewhere, or a subagent's, is not", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  const answer = { result: "written" };
+  const inMemory = await mainToolCall(handlers, engine, "Write", { file_path: `${MEMORY_DIR}/feedback_tu.md`, content: "x" }, answer);
+  assert.equal(inMemory.result, answer);
+  await mainToolCall(handlers, engine, "Write", { file_path: `${CWD}/notes.md`, content: "x" }, answer);
+  const hook = handlers.get("tool.call");
+  assert.ok(hook);
+  await hook(engine, { tool: "Write", tool_use_id: "s1", agentId: "a-1", file_path: `${MEMORY_DIR}/sub.md`, content: "x" }, async () => answer);
+  await completeTurn(handlers, engine, { turnId: turnIdWhere(true) });
+  await runTimers(host);
+  const row = memoryRows(host)[0];
+  assert.equal(row?.mainAutoMemoryWrites, 1);
+  assert.equal(row?.agreement, "main-only");
+});
+
+test("M8 memory: what was seen belongs to its own turn; the next turn starts from zero", async () => {
+  const host = memoryHost();
+  host.modelQueue.push(GATE_SKIP, GATE_SKIP);
+  const { handlers, engine } = loadHooks(host);
+  await mainToolCall(handlers, engine, "mcp__engram__mem_save", { type: "discovery" }, { result: "{}" });
+  await completeTurn(handlers, engine, { turnId: "turn-a" });
+  await completeTurn(handlers, engine, { turnId: "turn-b" });
+  await runTimers(host);
+  assert.deepEqual(memoryRows(host).map((row) => row.mainEngramSaves), [1, 0]);
 });

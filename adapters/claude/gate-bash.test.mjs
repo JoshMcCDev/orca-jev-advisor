@@ -4269,6 +4269,42 @@ test('secret guard G1: templates and add -A with an ignored .env stay own-tree w
   }
 })
 
+test('secret guard G7: a broad add that would stage an untracked .env asks, before anything is staged', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  writeFileSync(join(repo, '.gitignore'), '')
+  git(['add', '.gitignore'], repo)
+  git(['commit', '-q', '-m', 'stop ignoring env'], repo)
+  mkdirSync(join(repo, 'config'))
+  writeFileSync(join(repo, 'config', 'server.pem'), '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n')
+  for (const command of ['git add -A && git commit -m wip', 'git add --all && git commit -m wip', 'git add . && git commit -m wip', 'git add -A']) {
+    assertSecretAsk(home, answerFor(home, command, repo), '.env')
+  }
+  assertSecretAsk(home, answerFor(home, 'git add config', repo), 'config/server.pem')
+  assert.equal(execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: repo, encoding: 'utf8' }).trim(), '', 'the ask came before anything was staged')
+})
+
+test('secret guard G7: git add -u asks for a modified tracked .env', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  commitSecret(repo)
+  writeFileSync(join(repo, '.env'), 'API_KEY=sk-test-1111\n')
+  assertSecretAsk(home, answerFor(home, 'git add -u && git commit -m rotate', repo), '.env')
+})
+
+test('secret guard G7: a broad add with .env gitignored, or only templates untracked, stays own-tree work', () => {
+  const home = makeHome()
+  const repo = secretRepo()
+  writeFileSync(join(repo, 'a.ts'), 'a\n')
+  const ignored = answerFor(home, 'git add -A && git commit -m wip', repo)
+  assert.equal(ignored.permissionDecision, 'allow', ignored.reason)
+  assert.equal(lastGateRecord(home).stopReason, 'own-tree')
+  writeFileSync(join(repo, '.env.example'), 'API_KEY=\n')
+  const template = answerFor(home, 'git add . && git commit -m templates', repo)
+  assert.equal(template.permissionDecision, 'allow', template.reason)
+  assert.equal(lastGateRecord(home).stopReason, 'own-tree')
+})
+
 test('secret guard G2: a commit with .env already staged asks, naming the file; a clean one stays own-tree work', () => {
   const home = makeHome()
   const repo = secretRepo()

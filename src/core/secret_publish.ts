@@ -33,6 +33,8 @@ export type SecretPublishResult = { readonly kind: "found"; readonly finding: Se
 export interface SecretPublishReader {
   /** The paths `git add --dry-run --force <args>` would stage in `dir`; null when git fails. */
   readonly forcedAddPaths: (dir: string, args: readonly string[]) => readonly string[] | null;
+  /** The paths `git add --dry-run <args>` would stage in `dir` (ignored files left out); null when git fails. */
+  readonly addPaths: (dir: string, args: readonly string[]) => readonly string[] | null;
   /** The working-tree text of `path`, relative to `dir`; null when it cannot be read. */
   readonly workingContent: (dir: string, path: string) => string | null;
   /** The staged paths of the repository at `dir` (deletions left out), relative to its root; null when git fails. */
@@ -124,10 +126,15 @@ function addResult(args: readonly string[], dir: string | null, reader: SecretPu
   if (shape.dryRun) return CLEAN;
   const named = secretIn(shape.pathspecs, dir, reader);
   if (named !== null) return { kind: "found", finding: { kind: "add", path: named } };
-  if (!shape.forced) return CLEAN;
-  if (dir === null) return UNKNOWN;
-  const staged = reader.forcedAddPaths(dir, [...shape.widening, ...(shape.pathspecs.length > 0 ? ["--", ...shape.pathspecs] : [])]);
-  if (staged === null) return UNKNOWN;
+  if (dir === null) return shape.forced ? UNKNOWN : CLEAN;
+  // An add stages more than it names: `-A`, `-u`, `.`, a directory or a glob.
+  // Ask git what this one would stage (an ignored file is left out, a forced
+  // add keeps it) and check those paths.
+  const addArgs = [...shape.widening, ...(shape.pathspecs.length > 0 ? ["--", ...shape.pathspecs] : [])];
+  const staged = shape.forced ? reader.forcedAddPaths(dir, addArgs) : reader.addPaths(dir, addArgs);
+  // An add git cannot list fails whole (a pathspec that matches nothing, no
+  // repository) and stages nothing: only a forced add keeps it off the local allows.
+  if (staged === null) return shape.forced ? UNKNOWN : CLEAN;
   const secret = secretIn(staged, dir, reader);
   return secret === null ? CLEAN : { kind: "found", finding: { kind: "add", path: secret } };
 }

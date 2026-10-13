@@ -110,6 +110,24 @@ Ships Active (no Shadow): it is a deterministic path check.
   before and after) and the two rendering tests went RED, then GREEN.
   Unverified: that Jev now answers "not covered" for this command; it needs a
   live Jev call, which was not made.
+- [x] G7 Broad add: found in the 0.8.1 live check, `git add -A && git commit`
+  took an untracked, not gitignored `.env`; only `-f` and a pathspec that
+  names a secret were checked. Fix: an unforced add now asks git what it
+  would stage (`git add --dry-run <widening flags> -- <pathspecs>`, a new
+  reader method `addPaths`; ignored files are left out by git, a directory
+  that is no repository fails, see below) and runs those paths through
+  `isSecretPath`, so `-A`, `--all`, `.`, a directory, a glob and `-u` ask
+  with the same `secret-publish` stop reason and the existing `secretPublish.add`
+  text, before anything is staged. A dry run git cannot list (a pathspec that
+  matches nothing, no repository) means the add fails whole and stages nothing,
+  so it is clean as today (a forced add keeps unknown); the full run found it,
+  where unknown cost `pre-release B` its own-tree allow.
+  Proof: four new unit tests RED (4 of 16 failed in `secret_publish.test.ts`)
+  and two new e2e tests on a real temp repository RED (2 of 3 `secret guard G7`
+  tests failed; the third, a gitignored `.env`, was already allowed), all GREEN
+  after (16 of 16, 23 of 23 `secret guard` tests). Cost: every non-dry-run
+  `git add` now costs one `git add --dry-run`, bounded by the existing
+  1500 ms git timeout.
 
 ## Acceptance criteria
 

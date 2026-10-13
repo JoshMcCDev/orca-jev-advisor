@@ -33,7 +33,13 @@ interface FakeHost {
   usage: { tokens: number | undefined; percent: number | undefined; window: number };
   /** What `$.session.model()` answers (0.6.15 T4). */
   model: string;
-  compactResult: { messages: unknown[]; tokensBefore?: number; tokensAfter?: number } | { skip: string } | "reject" | "headless";
+  compactResult: { messages: unknown[]; tokensBefore?: number; tokensAfter?: number; usage?: Record<string, number> } | { skip: string } | "reject" | "headless";
+  /** Track S: the fake clock, in ms; each read moves it 1 ms, and a test moves it to make a session idle. */
+  clockNow: number;
+  /** Track S: the plugin's own `$.store` (per account), the env the mod reads, and every timer's wait. */
+  readonly store: Map<string, unknown>;
+  readonly env: Map<string, string>;
+  readonly timerDelays: number[];
 }
 
 const HOME = "/home/dev";
@@ -56,11 +62,14 @@ function makeHost(): FakeHost {
     usage: { tokens: 150_000, percent: 15, window: 1_000_000 },
     model: "claude-opus-5-5",
     compactResult: { messages: [], tokensBefore: 150_000, tokensAfter: 30_000 },
+    clockNow: Date.parse("2026-09-28T10:00:00.000Z"),
+    store: new Map(),
+    env: new Map(),
+    timerDelays: [],
   };
 }
 
 function makeEngine(host: FakeHost): unknown {
-  let clockNow = Date.parse("2026-09-28T10:00:00.000Z");
   return {
     session: {
       cwd: async () => "/home/dev/Projects/project-c",
@@ -80,7 +89,7 @@ function makeEngine(host: FakeHost): unknown {
       get: async (name: string) => {
         if (name === "HOME") return HOME;
         if (name === "CLAUDE_CONFIG_DIR") return VAULT;
-        return undefined;
+        return host.env.get(name);
       },
     },
     state: {
@@ -103,10 +112,11 @@ function makeEngine(host: FakeHost): unknown {
       list: async () => [],
     },
     clock: {
-      now: async () => clockNow++,
+      now: async () => host.clockNow++,
       // callJev waits through this both for its budget (seconds: never fires here) and for a retry backoff (under a second: elapses at once).
       sleep: async (ms: number) => (ms <= 1_000 ? undefined : new Promise<void>(() => {})),
-      after: (_ms: number, fn: TimerFn) => {
+      after: (ms: number, fn: TimerFn) => {
+        host.timerDelays.push(ms);
         host.timers.push(fn);
         return { cancel: () => undefined };
       },
@@ -120,6 +130,12 @@ function makeEngine(host: FakeHost): unknown {
       },
     },
     process: { run: async () => ({ exitCode: 1, stdout: "", stderr: "" }) },
+    store: {
+      get: async (key: string) => host.store.get(key),
+      set: async (key: string, value: unknown) => {
+        host.store.set(key, value);
+      },
+    },
     tool: { list: async () => [] },
     ui: {
       status: (text: string | undefined) => {
@@ -140,10 +156,11 @@ function load(host: FakeHost): unknown {
   return makeEngine(host);
 }
 
-function setSteward(host: FakeHost, mode: string, threshold = 120_000, softMode?: string): void {
+function setSteward(host: FakeHost, mode: string, threshold = 120_000, softMode?: string, coldMode?: string): void {
   host.files.set(`${HOME}/.config/orca-supervisor/locale`, "es\n");
   const soft = softMode === undefined ? {} : { stewardSoftMode: softMode };
-  host.files.set(`${VAULT}/settings.json`, JSON.stringify({ pluginConfigs: { [ROUTER_KEY]: { options: { stewardMode: mode, stewardThreshold: threshold, ...soft } } } }));
+  const cold = coldMode === undefined ? {} : { stewardColdMode: coldMode };
+  host.files.set(`${VAULT}/settings.json`, JSON.stringify({ pluginConfigs: { [ROUTER_KEY]: { options: { stewardMode: mode, stewardThreshold: threshold, ...soft, ...cold } } } }));
 }
 
 function verdict(choice: string, confidence: number): unknown {
@@ -504,8 +521,8 @@ test("T4 steward off: a turn counts nothing, schedules no timer, asks Jev nothin
   const host = makeHost();
   const engine = load(host);
   setSteward(host, "active");
-  // verify-done (0.8.0) schedules its own timer; off here so the count is the steward's alone.
-  setModules(host, { steward: "off", "verify-done": "off" });
+  // verify-done (0.8.0) and memory (M8) schedule their own timers; off here so the count is the steward's alone.
+  setModules(host, { steward: "off", "verify-done": "off", memory: "off" });
   host.messages = WORK;
   host.fetchQueue.push(verdict("boundary", 0.95));
   const submit = host.handlers.get("prompt.submit");
@@ -526,8 +543,8 @@ test("T4 steward off: a timer already scheduled asks nothing once the module wen
   const host = makeHost();
   const engine = load(host);
   setSteward(host, "active");
-  // verify-done (0.8.0) schedules its own timer; off here so the count is the steward's alone.
-  setModules(host, { "verify-done": "off" });
+  // verify-done (0.8.0) and memory (M8) schedule their own timers; off here so the count is the steward's alone.
+  setModules(host, { "verify-done": "off", memory: "off" });
   host.messages = WORK;
   await personPrompt(host, engine, "commit it");
   await turnStart(host, engine, "turn-1");
@@ -535,7 +552,7 @@ test("T4 steward off: a timer already scheduled asks nothing once the module wen
   await turnComplete(host, engine);
   assert.equal(host.timers.length, 1, "scheduled while the module was on");
 
-  setModules(host, { steward: "off", "verify-done": "off" });
+  setModules(host, { steward: "off", "verify-done": "off", memory: "off" });
   await runTimers(host);
   assert.equal(host.fetchCalls.length, 0);
   assert.equal(host.compactCalls.length, 0);
@@ -567,4 +584,312 @@ test("T4 steward: a switch in the file is picked up by the loaded hooks, with no
   setModules(host, { steward: "active" });
   await personTurn(host, engine, "commit it", verdict("boundary", 0.85));
   assert.equal(host.compactCalls.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Track S (odd/tasks/steward-pre-cold.md): the pre-cold tier. After a main
+// turn's steward timer, an idle timer is armed; a wake that is due (the fake
+// clock moved) decides with the engine-coexistence rule, logs, and in active
+// mode compacts while the cache is still warm. The pure rules are covered in
+// src/core/steward_pre_cold.test.ts.
+// ---------------------------------------------------------------------------
+
+const MINUTE = 60_000;
+const ENGINE_SEEN_KEY = "engineIdleCompactSeenAt";
+
+function preColdRows(host: FakeHost): Record<string, unknown>[] {
+  return stewardLog(host).filter((row) => row.trigger === "pre-cold");
+}
+
+function eventRows(host: FakeHost): Record<string, unknown>[] {
+  return stewardLog(host).filter((row) => row.event !== undefined);
+}
+
+/** Runs the timers due now once (the steward's own, which arms the idle one), without the ones they schedule. */
+async function runDueOnce(host: FakeHost): Promise<void> {
+  const due = host.timers;
+  host.timers = [];
+  for (const fn of due) await fn();
+}
+
+/** A person turn whose steward timer runs at once, then `idleMinutes` of idle before the remaining timers (the pre-cold wake) run. */
+async function idleAfterTurn(host: FakeHost, engine: unknown, text: string, jevAnswer: unknown, idleMinutes: number): Promise<void> {
+  await personPrompt(host, engine, text);
+  await turnStart(host, engine, `turn-${text}`);
+  if (jevAnswer !== null) host.fetchQueue.push(jevAnswer);
+  await turnComplete(host, engine, { turnId: `turn-${text}` });
+  await runDueOnce(host);
+  host.clockNow += idleMinutes * MINUTE;
+  await runTimers(host);
+}
+
+async function classicCompact(host: FakeHost, engine: unknown, phase: "PreCompact" | "PostCompact", trigger: string): Promise<void> {
+  const hook = host.handlers.get(`classic.${phase}`);
+  assert.ok(hook, `classic.${phase} is registered`);
+  await hook(engine, { trigger, ...(phase === "PreCompact" ? { custom_instructions: null } : { compact_summary: "summary" }) }, async (e: unknown) => e);
+}
+
+test("S2 pre-cold, measure (the default): a due idle wake logs wouldFire, compacts nothing and leaves the turn-end steward's cooldown alone", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "measure");
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 0);
+  const rows = preColdRows(host);
+  assert.equal(rows.length, 1);
+  const row = rows[0] ?? {};
+  assert.equal(row.decision, "pre-cold");
+  assert.equal(row.mode, "measure");
+  assert.equal(row.compact, true);
+  assert.equal(row.applied, false);
+  assert.equal(row.notApplied, "measure");
+  assert.equal(row.wouldFire, "pre-cold");
+  assert.equal(row.tier, "pre-cold");
+  assert.equal(row.coldSkip, null);
+  assert.equal(row.engineZone, false);
+  assert.equal(row.contextBefore, 150_000);
+  assert.equal(row.sessionId, "session-1");
+  assert.ok(typeof row.idleMs === "number" && row.idleMs >= 52 * MINUTE, String(row.idleMs));
+  assert.equal((host.state.get("steward") as { lastCompactionTurn: number | null }).lastCompactionTurn, null, "measure moves no cooldown");
+  // The turn-end row is still there, and still alone in the turn-end numbers.
+  assert.equal(stewardLog(host).filter((r) => r.trigger === undefined).length, 1);
+});
+
+test("S2 pre-cold, active: compacts with the pre-cold instructions while warm, records the result and its cost, and marks the cooldown", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.messages = WORK;
+  host.compactResult = { messages: [], tokensBefore: 150_000, tokensAfter: 9_000, usage: { input_tokens: 8_000, output_tokens: 2_000, cache_read_input_tokens: 140_000, cache_creation_input_tokens: 10 } };
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 1);
+  const instructions = host.compactCalls[0]?.instructions ?? "";
+  assert.ok(instructions.startsWith("The session went idle"), instructions);
+  assert.ok(instructions.includes("odd/tasks/feature-a.md"));
+  const row = preColdRows(host)[0] ?? {};
+  assert.equal(row.applied, true);
+  assert.equal(row.mode, "active");
+  assert.equal(row.contextAfter, 9_000);
+  assert.equal(row.wouldFire, null);
+  assert.equal(row.compactCost, 8_000 + 14_000 + 20 + 10_000);
+  assert.equal((host.state.get("steward") as { lastCompactionTurn: number | null }).lastCompactionTurn, 1);
+});
+
+test("S2 pre-cold: the steward on active with the cold switch on measure only measures", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "measure");
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(preColdRows(host)[0]?.wouldFire, "pre-cold");
+});
+
+test("S2 pre-cold: a wake before its slot re-arms for the rest, at most three wakes, and writes nothing", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 40);
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(preColdRows(host).length, 0);
+  // The first arm waits for 51 minutes; the wake at 40 asks for about 11 more.
+  assert.ok(host.timerDelays.includes(51 * MINUTE), host.timerDelays.join(","));
+  assert.ok(host.timerDelays.some((ms) => ms > 10 * MINUTE && ms < 12 * MINUTE), host.timerDelays.join(","));
+  // The steward's and verify-done's own timers are under a second; the idle ones are minutes: three wakes at most.
+  assert.ok(host.timerDelays.filter((ms) => ms >= MINUTE).length <= 3, host.timerDelays.join(","));
+});
+
+test("S2 pre-cold: the TTL the router read from the transcript sets the slot; with none it is 1h", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.state.set("routerCache", { ttlMs: 5 * MINUTE, lastMainAt: null });
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 1);
+  assert.ok(host.timerDelays.includes(0.85 * 5 * MINUTE), host.timerDelays.join(","));
+  assert.ok(!host.timerDelays.includes(51 * MINUTE), host.timerDelays.join(","));
+});
+
+test("S2 pre-cold: a turn that starts makes the armed timer do nothing", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await personPrompt(host, engine, "sigue");
+  await turnStart(host, engine, "turn-1");
+  host.fetchQueue.push(verdict("mid-task", 0.5));
+  await turnComplete(host, engine, { turnId: "turn-1" });
+  await runDueOnce(host);
+  assert.equal(host.timers.length, 1, "armed");
+  await turnStart(host, engine, "turn-2");
+  host.clockNow += 52 * MINUTE;
+  await runTimers(host);
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(preColdRows(host).length, 0);
+});
+
+test("S2 pre-cold: a subagent's turn arms nothing", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await turnComplete(host, engine, { agentId: "agent-1" });
+  assert.equal(host.timers.length, 0);
+});
+
+test("S2 pre-cold: below the threshold a due wake writes nothing", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 200_000, undefined, "active");
+  await idleAfterTurn(host, engine, "sigue", null, 52);
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(stewardLog(host).length, 0);
+});
+
+test("S2 pre-cold: the cold switch off, or the module off, arms nothing", async () => {
+  for (const [cold, modules] of [["off", null], ["active", { steward: "off", "verify-done": "off" }]] as const) {
+    const host = makeHost();
+    const engine = load(host);
+    setSteward(host, "active", 120_000, undefined, cold);
+    if (modules !== null) setModules(host, modules);
+    await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 52);
+    assert.equal(host.compactCalls.length, 0, cold);
+    assert.equal(preColdRows(host).length, 0, cold);
+  }
+});
+
+test("S2 pre-cold: a confident mid-task on the last turn stands down, with a row", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.9), 52);
+  assert.equal(host.compactCalls.length, 0);
+  const row = preColdRows(host)[0] ?? {};
+  assert.equal(row.decision, "pre-cold-skip");
+  assert.equal(row.coldSkip, "mid-task");
+  assert.equal(row.compact, false);
+  assert.equal(row.verdict, "mid-task");
+});
+
+test("S2 pre-cold: a headless session logs the refusal once and stops arming", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.compactResult = "headless";
+  await idleAfterTurn(host, engine, "uno", verdict("mid-task", 0.5), 52);
+  assert.equal(preColdRows(host)[0]?.notApplied, "headless");
+  for (const text of ["dos", "tres", "cuatro"]) await idleAfterTurn(host, engine, text, verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 1);
+  assert.equal(preColdRows(host).length, 1);
+});
+
+test("S2 engine rule: in the engine's zone with the engine seen in this account, it stands down", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.usage = { tokens: 190_000, percent: 19, window: 1_000_000 };
+  host.store.set(ENGINE_SEEN_KEY, "2026-09-01T00:00:00.000Z");
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 56);
+  assert.equal(host.compactCalls.length, 0);
+  const row = preColdRows(host)[0] ?? {};
+  assert.equal(row.coldSkip, "engine-owns");
+  assert.equal(row.engineZone, true);
+});
+
+test("S2 engine rule: in the zone with the engine never seen, it fires only after the engine's slot", async () => {
+  for (const [minutes, compactions] of [[53, 0], [56, 1]] as const) {
+    const host = makeHost();
+    const engine = load(host);
+    setSteward(host, "active", 120_000, undefined, "active");
+    host.usage = { tokens: 190_000, percent: 19, window: 1_000_000 };
+    await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), minutes);
+    assert.equal(host.compactCalls.length, compactions, `at ${minutes} minutes`);
+    if (compactions === 1) assert.equal(preColdRows(host)[0]?.engineZone, true);
+    else assert.equal(preColdRows(host).length, 0);
+  }
+});
+
+test("S2 engine rule: the env override moves the engine's zone", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.usage = { tokens: 190_000, percent: 19, window: 1_000_000 };
+  host.store.set(ENGINE_SEEN_KEY, "2026-09-01T00:00:00.000Z");
+  host.env.set("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS", "300000");
+  await idleAfterTurn(host, engine, "sigue", verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 1, "190k is below 90% of 300k: the engine would not act");
+});
+
+test("S2 engine observed: an auto compaction while idle is remembered in this account, logged, and makes the wake stand down", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  host.usage = { tokens: 190_000, percent: 19, window: 1_000_000 };
+  await personPrompt(host, engine, "sigue");
+  await turnStart(host, engine, "turn-1");
+  host.fetchQueue.push(verdict("mid-task", 0.5));
+  await turnComplete(host, engine, { turnId: "turn-1" });
+  await runDueOnce(host);
+  host.clockNow += 54 * MINUTE;
+  await classicCompact(host, engine, "PreCompact", "auto");
+  await classicCompact(host, engine, "PostCompact", "auto");
+  assert.equal(typeof host.store.get(ENGINE_SEEN_KEY), "string", "remembered in the plugin's store");
+  assert.equal(eventRows(host)[0]?.event, "engine-idle-compact");
+  host.clockNow += 2 * MINUTE;
+  await runTimers(host);
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(preColdRows(host)[0]?.coldSkip, "engine-compacted");
+});
+
+test("S2 engine observed: a manual compaction, or one under a running turn, is not the engine's idle one", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await personPrompt(host, engine, "sigue");
+  await turnStart(host, engine, "turn-1");
+  host.fetchQueue.push(verdict("mid-task", 0.5));
+  await turnComplete(host, engine, { turnId: "turn-1" });
+  await runDueOnce(host);
+  host.clockNow += 54 * MINUTE;
+  await classicCompact(host, engine, "PostCompact", "manual");
+  await turnStart(host, engine, "turn-2");
+  await classicCompact(host, engine, "PostCompact", "auto");
+  assert.equal(host.store.has(ENGINE_SEEN_KEY), false);
+  assert.equal(eventRows(host).length, 0);
+});
+
+test("S2 pre-cold: every hook returns what it was given; a failing host never throws out of the timer", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await personPrompt(host, engine, "sigue");
+  await turnStart(host, engine, "turn-1");
+  host.fetchQueue.push(verdict("mid-task", 0.5));
+  await turnComplete(host, engine, { turnId: "turn-1" });
+  await runDueOnce(host);
+  (engine as { session: { usage: () => Promise<unknown> } }).session.usage = async () => {
+    throw new Error("usage unavailable");
+  };
+  host.clockNow += 52 * MINUTE;
+  await runTimers(host);
+  assert.equal(host.compactCalls.length, 0);
+  for (const phase of ["PreCompact", "PostCompact"]) {
+    const hook = host.handlers.get(`classic.${phase}`);
+    assert.ok(hook);
+    const given = { trigger: "auto", compact_summary: "s" };
+    assert.equal(await hook(engine, given, async (e: unknown) => e), given);
+  }
+});
+
+test("S2 engine observed: an auto PreCompact with no PostCompact (blocked or failed) does not hold the tier off after the next turn", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active", 120_000, undefined, "active");
+  await personPrompt(host, engine, "uno");
+  await turnStart(host, engine, "turn-uno");
+  await classicCompact(host, engine, "PreCompact", "auto");
+  host.fetchQueue.push(verdict("mid-task", 0.5));
+  await turnComplete(host, engine, { turnId: "turn-uno" });
+  await runDueOnce(host);
+  host.timers = [];
+  host.clockNow += 5 * MINUTE;
+  await idleAfterTurn(host, engine, "dos", verdict("mid-task", 0.5), 52);
+  assert.equal(host.compactCalls.length, 1);
+  assert.equal(preColdRows(host)[0]?.applied, true);
 });

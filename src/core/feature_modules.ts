@@ -20,7 +20,12 @@
 //              already has a measure mode; that mode IS its shadow, so no
 //              second shadow switch exists anywhere. A module that only
 //              measures (verify-done) offers off and shadow, no active, and
-//              has no existing mode: its shadow is its own one switch.
+//              has no existing mode: its shadow is its own one switch. So
+//              does ci-watch (`ownSwitch`), which offers all three: its
+//              state itself is what it does, and its shadow is the one
+//              exception to "only measures" -- it also shows the person a
+//              band row and a toast when a run ends -- but it never talks to
+//              the agent (odd/tasks/ci-watcher.md).
 //   active  -- the module's own existing modes decide, exactly as before
 //              this file existed.
 // `off` is a top state in front of the existing modes, never a parallel
@@ -30,16 +35,19 @@
 // unknown or wrong-typed field, read as each module's default, and every
 // module that existed before 0.8.0 defaults to `active`. verify-done, new in
 // 0.8.0, has no earlier behaviour to keep and defaults to `shadow`: its week
-// of measurement is the point (odd/tasks/verify-done-module.md).
+// of measurement is the point (odd/tasks/verify-done-module.md). ci-watch,
+// new in 0.9.0, is in the same case and also defaults to `shadow`.
+// memory (odd/tasks/memory-core.md) is new in the same way and also
+// defaults to `shadow`; it will offer `active` once its writes are wired.
 //
 // Pure: no I/O and no node: import, so the mod sandbox can load it too.
 
 /** The module state file, in the plugin config directory (src/core/paths.ts resolveConfigDir). */
 export const FEATURE_MODULES_FILE = "feature-modules.json";
 
-export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done";
+export type ModuleId = "gate" | "model-router" | "steward" | "skill-selection" | "board" | "verify-done" | "ci-watch" | "memory";
 
-export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done"];
+export const MODULE_IDS: readonly ModuleId[] = ["gate", "model-router", "steward", "skill-selection", "board", "verify-done", "ci-watch", "memory"];
 
 export type ModuleState = "off" | "shadow" | "active";
 
@@ -57,7 +65,7 @@ export interface HookEntry {
   readonly script: string;
 }
 
-export type ModFeatureId = "router-tier" | "router-subagent" | "subagent-status" | "turn-usage" | "steward" | "skill-selection" | "tool-selection" | "verify-done";
+export type ModFeatureId = "router-tier" | "router-subagent" | "subagent-status" | "turn-usage" | "steward" | "skill-selection" | "tool-selection" | "verify-done" | "ci-watch" | "memory-save" | "memory-tidy" | "memory-ui";
 
 /** A feature of the shared mod copy (adapters/claude/mod-skills/hooks/index.ts) and the engine hooks it runs from. */
 export interface ModFeature {
@@ -138,6 +146,12 @@ export interface FeatureModule {
   readonly modFeatures: readonly ModFeature[];
   readonly workerJobs: readonly WorkerJob[];
   readonly modes: readonly ModeSource[];
+  /**
+   * The module's state is itself the switch: it has no existing per-feature
+   * mode to cap, so `shadow` and `active` are its own (ci-watch). Only such a
+   * module offers `shadow` without a mode that has a measure value.
+   */
+  readonly ownSwitch?: true;
 }
 
 const FILE_TOOLS_MATCHER = "Edit|Write|MultiEdit|NotebookEdit";
@@ -231,11 +245,12 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     states: MODULE_STATES,
     defaultState: "active",
     hooks: [],
-    modFeatures: [{ id: "steward", hooks: ["prompt.submit", "turn.start", "turn.complete"], jev: true }],
+    modFeatures: [{ id: "steward", hooks: ["prompt.submit", "turn.start", "turn.complete", "classic.PreCompact", "classic.PostCompact"], jev: true }],
     workerJobs: [ROUTER_STATUS, CONSUMPTION_SUMMARY, ROUTER_CONFIG_REQUEST],
     modes: [
       { name: "stewardMode", values: ["off", "measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardMode`, shadowValue: "measure" },
       { name: "stewardSoftMode (400k tier)", values: ["measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardSoftMode`, shadowValue: "measure" },
+      { name: "stewardColdMode (pre-cold tier)", values: ["off", "measure", "active"], defaultValue: "measure", store: `${ROUTER_OPTIONS}.stewardColdMode`, shadowValue: "measure" },
     ],
   },
   {
@@ -244,7 +259,7 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     defaultState: "active",
     hooks: [],
     modFeatures: [
-      { id: "skill-selection", hooks: ["prompt.submit", "prompt.attachment", "skill.prompt"], jev: true },
+      { id: "skill-selection", hooks: ["prompt.edit", "prompt.submit", "prompt.attachment", "skill.prompt"], jev: true },
       { id: "tool-selection", hooks: ["prompt.submit", "tool.call"], jev: true },
     ],
     workerJobs: [
@@ -283,6 +298,44 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     workerJobs: [],
     modes: [],
   },
+  {
+    // odd/tasks/ci-watcher.md: after a push the mod watches the run with `gh`
+    // (no Jev call, no hook process of Claude Code's own, no worker job). The
+    // hooks are the mod engine's: tool.call (the wake and the count),
+    // turn.start and turn.complete (is a turn running), ui.render (the band
+    // row) and session.start (a reload forgets the watches).
+    id: "ci-watch",
+    states: MODULE_STATES,
+    defaultState: "shadow",
+    hooks: [],
+    modFeatures: [{ id: "ci-watch", hooks: ["tool.call", "turn.start", "turn.complete", "ui.render", "session.start"], jev: false }],
+    workerJobs: [],
+    modes: [],
+    ownSwitch: true,
+  },
+  {
+    // odd/tasks/memory-core.md: Engram, when present, is the store of record
+    // and auto-memory mirrors feedback and user; with no Engram, auto-memory
+    // is the store. Haiku decides and judges, a fork drafts, so no feature
+    // here is a Jev feature. It has no mode of its own, so its state is its
+    // one switch: shadow decides, judges (dry) and drafts (sampled) and
+    // writes nothing (odd/tasks/memory-shadow.md). Active, which writes,
+    // is offered once it is wired (M9 to M13): until then a stored "active"
+    // reads as the default, so no state exists that no code runs.
+    id: "memory",
+    states: ["off", "shadow"],
+    defaultState: "shadow",
+    hooks: [],
+    modFeatures: [
+      { id: "memory-save", hooks: ["turn.complete", "tool.call", "session.start"], jev: false },
+      { id: "memory-tidy", hooks: ["turn.complete", "session.compact", "command.run"], jev: false },
+      { id: "memory-ui", hooks: ["ui.render"], jev: false },
+    ],
+    // The card's weekly counts come from the shared measurements summary (read-measurements.mjs `memory`):
+    // memory keeps that panel-only job running while it is on, and starts nothing of its own.
+    workerJobs: [MEASUREMENTS_SUMMARY],
+    modes: [],
+  },
 ];
 
 export type FeatureModules = { readonly [K in ModuleId]: ModuleState };
@@ -294,6 +347,8 @@ export const DEFAULT_FEATURE_MODULES: FeatureModules = {
   "skill-selection": "active",
   board: "active",
   "verify-done": "shadow",
+  "ci-watch": "shadow",
+  memory: "shadow",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -335,6 +390,8 @@ export function parseFeatureModules(content: string): FeatureModules {
     "skill-selection": stateOf("skill-selection", read("skill-selection")),
     board: stateOf("board", read("board")),
     "verify-done": stateOf("verify-done", read("verify-done")),
+    "ci-watch": stateOf("ci-watch", read("ci-watch")),
+    memory: stateOf("memory", read("memory")),
   };
 }
 

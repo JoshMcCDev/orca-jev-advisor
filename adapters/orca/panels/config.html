@@ -224,6 +224,7 @@
       .steward-row input[type="number"] { width: 6em; }
       .steward-row .steward-soft { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
       .steward-row .steward-soft .steward-unit { white-space: nowrap; }
+      .steward-row .steward-cold { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; flex: 0 1 auto; }
       .steward-row .steward-unit { font-size: 12px; color: var(--muted-foreground, var(--fb-muted-foreground)); }
       .checkbox-row .checkbox-text { display: flex; flex-direction: column; gap: 2px; }
       .checkbox-row .checkbox-label { font-size: 12px; font-weight: 500;
@@ -708,18 +709,44 @@
           'modules.name.skill-selection': 'Selección de skill y herramienta',
           'modules.name.board': 'Tablero',
           'modules.name.verify-done': 'Verificar «hecho»',
+          'modules.name.ci-watch': 'Vigía de CI',
           'modules.desc.gate': 'Revisa cada comando de Bash y cada edición de archivos antes de que se ejecuten, te pregunta cuando una política lo pide y rechaza los comandos del nivel de bloqueo.',
           'modules.desc.model-router': 'Elige un modelo para cada prompt y cada subagente, muestra la banda de subagentes y registra el uso de cada turno.',
           'modules.desc.steward': 'Vigila cuánto ha crecido una sesión y la compacta, o sugiere /clear, cuando una tarea se cierra.',
           'modules.desc.skill-selection': 'Deja que Jev elija la skill y la herramienta de un turno, en vez de que el modelo vea la lista completa.',
           'modules.desc.board': 'Mantiene el tablero: el estado en vivo de tus agentes, por proyecto y rama.',
           'modules.desc.verify-done': 'En los turnos que editaron archivos sin un test que pasara, pregunta a Jev si el mensaje final dice que el trabajo está hecho, y lo registra. Solo mide: no bloquea nada ni cambia ninguna respuesta. A Jev le envía el mensaje final, redactado y recortado, y los conteos del turno; nunca contenidos de archivos ni los comandos o rutas que usó el turno.',
+          'modules.desc.ci-watch': 'Después de un push, de abrir un pull request o de fusionarlo, vigila con gh la ejecución de CI y te avisa aquí cuando termina, con una línea sobre el prompt y un mensaje. En Sombra no le envía nada al agente: solo cuenta las consultas de CI y las esperas largas que el agente hizo mientras tanto. En Activo, además, le avisa al agente una vez, cuando está libre, para que no tenga que consultar.',
           'modules.cost.gate': 'En uso: unas {{jev}} llamadas a Jev por prompt y {{hooks}} procesos de hook por cada comando de Bash o edición de archivos (unos {{seconds}} s cada uno).',
           'modules.cost.model-router': 'En uso: unas {{jev}} llamadas a Jev por prompt y, por cada subagente que arranca, {{agentJev}} llamadas a Jev y {{agentHooks}} procesos de hook.',
           'modules.cost.steward': 'En uso: unas {{jev}} llamadas a Jev por prompt.',
           'modules.cost.skill-selection': 'En uso: unas {{jev}} llamadas a Jev por prompt.',
           'modules.cost.board': 'En uso: ninguna llamada a Jev ni hooks.',
           'modules.cost.verify-done': 'En uso: una llamada a Jev por turno candidato, unas {{jev}} llamadas a Jev por prompt.',
+          'modules.cost.ci-watch': 'En uso: como máximo {{polls}} llamadas a gh por cada vigilancia (el tope de su calendario de consultas, no una medición), sin llamadas a Jev ni a ningún modelo.',
+          'modules.weekly.ci-watch.unknown': 'Últimos 7 días: aún sin medir.',
+          'modules.weekly.ci-watch.none': 'Últimos 7 días: ninguna vigilancia todavía.',
+          'modules.weekly.ci-watch': 'Últimos 7 días: vigilancias {{watches}}, consultas de CI del agente mientras tanto {{polls}}, esperas largas {{sleeps}}{{notes}} (lo que un aviso habría reemplazado).',
+          'modules.weekly.ci-watch.notes': ', avisos enviados {{injected}}',
+          'modules.name.memory': 'Memoria',
+          'modules.desc.memory': 'Al final de cada turno respondido decide si hay algo que valga la pena recordar y dónde iría: con Engram, Engram lo guarda todo y tu auto-memoria solo los avisos sobre cómo trabajar (feedback) y los datos sobre ti (user); sin Engram, la auto-memoria lo guarda todo. En sombra solo mide: no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria; tu hilo principal sigue guardando como hoy. El estado Activo, que sí escribe, todavía no está disponible.',
+          'modules.cost.memory': 'En uso: una llamada a Haiku por turno respondido y, en 1 de cada {{every}} turnos que Haiku marca para actualizar, un fork de la sesión que redacta la memoria. Las llamadas a Haiku y los forks cuentan contra la cuota de tu plan Max. La única llamada a Engram es una comprobación de solo lectura, una vez por sesión.',
+          'modules.memory.sees': 'Haiku ve tu MEMORY.md (hasta 8.000 caracteres) y el último intercambio (hasta 12.000 caracteres, con los secretos redactados y solo el nombre de cada herramienta, nunca su entrada ni su salida). El fork ve la transcripción de esta sesión y las claves de tema de tu memoria, o tus archivos de memoria si no hay Engram. El registro guarda conteos y tipos, nunca lo que se guardaría.',
+          'modules.memory.backend.unknown': 'Dónde guardaría: todavía no se ha detectado. Lo decide el primer turno respondido.',
+          'modules.memory.backend.live': 'Dónde guardaría: Engram, que está en marcha ({{signal}}). Engram guardaría todo; la auto-memoria, solo feedback y user.',
+          'modules.memory.backend.refused': 'Dónde guardaría: Engram está conectado, pero se rechazó su comprobación por falta de un permiso ({{signal}}). Permite mem_current_project de Engram en tus permisos para que el módulo pueda llamarlo.',
+          'modules.memory.backend.down': 'Dónde guardaría: Engram está configurado pero no responde ({{signal}}). Lo guardaría en la auto-memoria y lo pasaría a Engram más tarde.',
+          'modules.memory.backend.absent': 'Dónde guardaría: en la auto-memoria, porque no hay Engram ({{signal}}).',
+          'modules.memory.signal.tools+health': 'sus herramientas están conectadas y respondió a la comprobación',
+          'modules.memory.signal.tools': 'sus herramientas están conectadas',
+          'modules.memory.signal.health': 'falló la comprobación',
+          'modules.memory.signal.user-config': 'aparece en tu configuración de MCP de usuario',
+          'modules.memory.signal.plugin': 'su plugin de Claude está activado',
+          'modules.memory.signal.binary': 'el programa engram está instalado',
+          'modules.memory.signal.none': 'no hay rastro de Engram',
+          'modules.memory.week': 'Esta semana: {{gates}} decisiones de Haiku, {{rate}} para actualizar y {{forks}} forks. Guardaría {{feedback}} feedback, {{user}} user, {{project}} project y {{reference}} reference. Tu hilo principal guardó {{mainSaves}} veces por su cuenta, y Haiku coincidió con él en {{agree}} de los turnos.',
+          'modules.memory.weekNone': 'Esta semana: todavía no hay nada registrado. Las filas aparecen después de los turnos respondidos.',
+          'modules.memory.weekUnavailable': 'Esta semana: los conteos todavía no se han podido leer.',
           'modules.bg.none': 'Segundo plano: nada propio.',
           'modules.bg.processes': 'Segundo plano: unos {{n}} procesos de node por hora.',
           'modules.bg.cli': 'Segundo plano: unas {{n}} ejecuciones por hora del comando orca.',
@@ -909,12 +936,13 @@
           'modelRouter.effortLevel': 'Esfuerzo',
           'modelRouter.effortNone': 'no usa esfuerzo',
           'modelRouter.effortSave': 'Guardar esfuerzo',
-          'modelRouter.stewardHint': 'Guardián de contexto: al terminar cada turno por encima del umbral, Jev juzga si una tarea acaba de cerrarse. En modo activo compacta la sesión conservando el plan y el trabajo pendiente, y ante un tema nuevo sugiere /clear. Modo medir: solo registra lo que haría. Releer el contexto es la mayor parte del costo de una sesión larga. Al llegar a 600 mil tokens (o al 80% de la ventana del modelo principal, si es menor) compacta siempre. Desde 400 mil compacta salvo que Jev esté seguro de que la tarea sigue a medias; ese tramo tiene su propio interruptor y empieza en medir.',
+          'modelRouter.stewardHint': 'Guardián de contexto: al terminar cada turno por encima del umbral, Jev juzga si una tarea acaba de cerrarse. En modo activo compacta la sesión conservando el plan y el trabajo pendiente, y ante un tema nuevo sugiere /clear. Modo medir: solo registra lo que haría. Releer el contexto es la mayor parte del costo de una sesión larga. Al llegar a 600 mil tokens (o al 80% de la ventana del modelo principal, si es menor) compacta siempre. Desde 400 mil compacta salvo que Jev esté seguro de que la tarea sigue a medias; ese tramo tiene su propio interruptor y empieza en medir. Antes de que se enfríe la caché: si una sesión grande queda inactiva casi una hora, la caché del prompt está por vencer y al volver se reescribiría entera al doble de precio; este tramo la compacta mientras la caché sigue tibia, sin pisar la compactación inactiva del propio motor. Tiene su propio interruptor (apagado, medir, activo) y empieza en medir.',
           'modelRouter.workKindHint': 'Esfuerzo según el tipo de trabajo: al lanzar un subagente, Jev también juzga qué hará (ejecutar, leer, revisar, implementar o diseñar). En modo activo, los que solo ejecutan o leen van como mucho en alto en Sonnet 5 (nunca muy alto) y en medio en Opus 5.5 y Sonnet 5.5; revisar, implementar y diseñar no cambian. Nunca baja el esfuerzo que fija la definición del agente ni tu máximo, ni con temas sensibles o en el sitio de un cliente. Modo medir: solo registra lo que enviaría.',
           'modelRouter.workKindLabel': 'Tipo de trabajo (subagentes)',
           'modelRouter.workKindSave': 'Guardar tipo de trabajo',
           'modelRouter.stewardLabel': 'Guardián de contexto',
           'modelRouter.stewardSoft': 'Tramo de 400k',
+          'modelRouter.stewardCold': 'Antes de que se enfríe la caché',
           'modelRouter.stewardThreshold': 'Umbral',
           'modelRouter.stewardUnit': 'mil tokens',
           'modelRouter.stewardSave': 'Guardar guardián',
@@ -1112,18 +1140,44 @@
           'modules.name.skill-selection': 'Skill and tool selection',
           'modules.name.board': 'Board',
           'modules.name.verify-done': 'Verify done',
+          'modules.name.ci-watch': 'CI watcher',
           'modules.desc.gate': 'Checks every Bash command and file edit before it runs, asks you when a policy says so, and refuses the commands in the deny tier.',
           'modules.desc.model-router': 'Chooses a model for each prompt and each subagent, shows the subagent band and logs the usage of every turn.',
           'modules.desc.steward': 'Watches how far a session has grown and compacts it, or suggests /clear, once a task closes.',
           'modules.desc.skill-selection': 'Lets Jev pick the skill and the tool for a turn, instead of the model seeing the full list.',
           'modules.desc.board': 'Keeps the board: the live status of your agents, by project and branch.',
           'modules.desc.verify-done': 'On turns that edited files with no test passing, asks Jev whether its final message says the work is done, and logs it. It only measures: it blocks nothing and changes no answer. Jev gets the final message, redacted and cut, and the turn\'s counts; never file contents, nor the commands or paths the turn used.',
+          'modules.desc.ci-watch': 'After a push, a pull request or a merge, watches the CI run with gh and tells you here when it ends, with a line above the prompt and a message. In Shadow it sends nothing to the agent: it only counts the CI checks and long sleeps the agent made meanwhile. In Active it also tells the agent once, when it is idle, so it does not have to poll.',
           'modules.cost.gate': 'In use: about {{jev}} Jev calls per prompt, and {{hooks}} hook processes per Bash command or file edit (about {{seconds}} s each).',
           'modules.cost.model-router': 'In use: about {{jev}} Jev calls per prompt and, for every subagent started, {{agentJev}} Jev calls and {{agentHooks}} hook processes.',
           'modules.cost.steward': 'In use: about {{jev}} Jev calls per prompt.',
           'modules.cost.skill-selection': 'In use: about {{jev}} Jev calls per prompt.',
           'modules.cost.board': 'In use: no Jev calls and no hooks.',
           'modules.cost.verify-done': 'In use: one Jev call per candidate turn, about {{jev}} Jev calls per prompt.',
+          'modules.cost.ci-watch': 'In use: at most {{polls}} gh calls per watch (the ceiling of its polling schedule, not a measurement), no Jev or model calls.',
+          'modules.weekly.ci-watch.unknown': 'Last 7 days: not measured yet.',
+          'modules.weekly.ci-watch.none': 'Last 7 days: no watches yet.',
+          'modules.weekly.ci-watch': 'Last 7 days: watches {{watches}}, CI checks by the agent meanwhile {{polls}}, long sleeps {{sleeps}}{{notes}} (what a note would replace).',
+          'modules.weekly.ci-watch.notes': ', notes sent {{injected}}',
+          'modules.name.memory': 'Memory',
+          'modules.desc.memory': 'At the end of each answered turn, decides whether anything is worth remembering and where it would go: with Engram, Engram holds everything and your auto-memory keeps only the rules for how to work (feedback) and the facts about you (user); without Engram, auto-memory holds everything. In Shadow it only measures: it saves nothing to Engram, judges no conflict and writes no memory file; your main thread keeps saving as it does today. Active, which writes, is not offered yet.',
+          'modules.cost.memory': 'In use: one Haiku call per answered turn and, on 1 in {{every}} turns Haiku marks for an update, one fork of the session that drafts the memory. Haiku calls and forks count against your Max plan quota. The only Engram call is a read-only check, once a session.',
+          'modules.memory.sees': 'Haiku sees your MEMORY.md (up to 8,000 characters) and the last exchange (up to 12,000 characters, secrets redacted, only the name of each tool, never its input or output). The fork sees this session\'s own transcript and your memory topic keys, or your memory files when there is no Engram. The log keeps counts and types, never what would be saved.',
+          'modules.memory.backend.unknown': 'Where it would save: not detected yet. The first answered turn decides it.',
+          'modules.memory.backend.live': 'Where it would save: Engram, which is live ({{signal}}). Engram would hold everything; auto-memory, only feedback and user.',
+          'modules.memory.backend.refused': 'Where it would save: Engram is connected, but its check was refused for want of a permission rule ({{signal}}). Allow Engram\'s mem_current_project in your permissions so the module can call it.',
+          'modules.memory.backend.down': 'Where it would save: Engram is configured but not answering ({{signal}}). It would save to auto-memory and pass it to Engram later.',
+          'modules.memory.backend.absent': 'Where it would save: auto-memory, since there is no Engram ({{signal}}).',
+          'modules.memory.signal.tools+health': 'its tools are connected and it answered the check',
+          'modules.memory.signal.tools': 'its tools are connected',
+          'modules.memory.signal.health': 'the check failed',
+          'modules.memory.signal.user-config': 'found in your user MCP config',
+          'modules.memory.signal.plugin': 'its Claude plugin is enabled',
+          'modules.memory.signal.binary': 'the engram program is installed',
+          'modules.memory.signal.none': 'no sign of Engram',
+          'modules.memory.week': 'This week: {{gates}} Haiku decisions, {{rate}} marked for an update, {{forks}} forks. It would save {{feedback}} feedback, {{user}} user, {{project}} project and {{reference}} reference. Your main thread saved {{mainSaves}} times on its own, and Haiku agreed with it on {{agree}} of turns.',
+          'modules.memory.weekNone': 'This week: nothing logged yet. Rows appear after answered turns.',
+          'modules.memory.weekUnavailable': 'This week: the counts could not be read yet.',
           'modules.bg.none': 'Background: nothing of its own.',
           'modules.bg.processes': 'Background: about {{n}} node processes an hour.',
           'modules.bg.cli': 'Background: about {{n}} runs an hour of the orca command.',
@@ -1313,12 +1367,13 @@
           'modelRouter.effortLevel': 'Effort',
           'modelRouter.effortNone': 'takes no effort',
           'modelRouter.effortSave': 'Save effort',
-          'modelRouter.stewardHint': 'Context steward: at the end of each turn above the threshold, Jev judges whether a task just closed. In active mode it compacts the session, keeping the plan and the pending work, and on a new topic it suggests /clear. Measure mode only logs what it would do. Re-reading the context is most of what a long session costs. At 600 thousand tokens (or 80% of the main model\'s window, if smaller) it always compacts. From 400 thousand it compacts unless Jev is sure the task is still half done; that tier has its own switch and starts in measure.',
+          'modelRouter.stewardHint': 'Context steward: at the end of each turn above the threshold, Jev judges whether a task just closed. In active mode it compacts the session, keeping the plan and the pending work, and on a new topic it suggests /clear. Measure mode only logs what it would do. Re-reading the context is most of what a long session costs. At 600 thousand tokens (or 80% of the main model\'s window, if smaller) it always compacts. From 400 thousand it compacts unless Jev is sure the task is still half done; that tier has its own switch and starts in measure. Before the cache goes cold: when a large session sits idle for almost an hour, its prompt cache is about to expire and a return would rewrite all of it at twice the price; this tier compacts it while the cache is still warm, never racing the engine\'s own idle compaction. It has its own switch (off, measure, active) and starts in measure.',
           'modelRouter.workKindHint': 'Effort by work kind: when a subagent is spawned, Jev also judges what it will do (execute, read, review, implement or design). In active mode, runs that only execute or read go at high at most on Sonnet 5 (never extra high) and at medium on Opus 5.5 and Sonnet 5.5; review, implement and design are unchanged. It never goes below the effort an agent definition sets or your own max, nor on sensitive topics or in a client\'s site. Measure mode only logs what it would send.',
           'modelRouter.workKindLabel': 'Work kind (subagents)',
           'modelRouter.workKindSave': 'Save work kind',
           'modelRouter.stewardLabel': 'Context steward',
           'modelRouter.stewardSoft': '400k tier',
+          'modelRouter.stewardCold': 'Before the cache goes cold',
           'modelRouter.stewardThreshold': 'Threshold',
           'modelRouter.stewardUnit': 'thousand tokens',
           'modelRouter.stewardSave': 'Save steward',
@@ -3378,6 +3433,30 @@
         soft.appendChild(softLabel)
         soft.appendChild(softGroup)
 
+        // Track S: the pre-cold tier's own switch, off, measure or active; measure by default.
+        var selectedCold = target.steward.coldMode === 'off' || target.steward.coldMode === 'active' ? target.steward.coldMode : 'measure'
+        var cold = elMake('span', 'steward-cold')
+        cold.setAttribute('data-steward-cold', target.target)
+        var coldLabel = elMake('span', 'steward-unit')
+        coldLabel.textContent = t('modelRouter.stewardCold')
+        var coldGroup = elMake('div', 'mode-buttons')
+        coldGroup.setAttribute('aria-label', t('modelRouter.stewardCold'))
+        ;['off', 'measure', 'active'].forEach(function (mode) {
+          var btn = elMake('button')
+          btn.type = 'button'
+          btn.setAttribute('data-value', mode)
+          btn.textContent = t(MODEL_ROUTER_MODE_KEYS[mode])
+          pressModeButton(btn, mode === selectedCold)
+          btn.addEventListener('click', function () {
+            selectedCold = mode
+            setPressedValue(coldGroup, mode)
+            modelRouterEdited = true
+          })
+          coldGroup.appendChild(btn)
+        })
+        cold.appendChild(coldLabel)
+        cold.appendChild(coldGroup)
+
         var saveBtn = elMake('button', 'model-router-steward-save')
         saveBtn.type = 'button'
         saveBtn.textContent = t('modelRouter.stewardSave')
@@ -3388,7 +3467,7 @@
             said(saidEl, t('modelRouter.stewardRange'), true)
             return
           }
-          saveModelRouterChange(target.target, JSON.stringify(target.steward), function (row) { return JSON.stringify(row.steward) }, { steward: { mode: selectedMode, threshold: thousands * 1000, softMode: selectedSoft } }, saidEl)
+          saveModelRouterChange(target.target, JSON.stringify(target.steward), function (row) { return JSON.stringify(row.steward) }, { steward: { mode: selectedMode, threshold: thousands * 1000, softMode: selectedSoft, coldMode: selectedCold } }, saidEl)
         })
 
         row.appendChild(text)
@@ -3399,6 +3478,7 @@
         row.appendChild(buttonGroup)
         row.appendChild(threshold)
         row.appendChild(soft)
+        row.appendChild(cold)
         row.appendChild(saveBtn)
         row.appendChild(saidEl)
         return row
@@ -3983,7 +4063,7 @@
       // in odd/tasks/panel-worker-wakeup.md).
       function renderClaudeIntegrationStatus (status, heartbeat, measurements, modSkillsStatus) {
         lastClaudeIntegrationStatus = status
-        renderModules(status)
+        renderModules(status, measurements)
         claudeIntegrationStatusEl.innerHTML = ''
         if (status === null) {
           claudeIntegrationStatusEl.appendChild(li(
@@ -4142,7 +4222,14 @@
         { id: 'board', states: ['off', 'active'], cost: {}, background: { open: 38, closed: 38, kind: 'cli' } },
         // 0.8.0 (odd/tasks/verify-done-module.md): it only measures, so no active. Its cost is one Jev call per
         // candidate turn; scripts/measure-module-cost.mjs found 130 of 1252 person turns in a week (0.1 per prompt).
-        { id: 'verify-done', states: ['off', 'shadow'], cost: { jev: 0.1 }, background: { open: 0, closed: 0, kind: 'processes' } }
+        { id: 'verify-done', states: ['off', 'shadow'], cost: { jev: 0.1 }, background: { open: 0, closed: 0, kind: 'processes' } },
+        // 0.9.0 (odd/tasks/ci-watcher.md): its cost is gh calls, not Jev calls. 45 is CI_WATCH_MAX_POLLS (src/core/ci_watch.ts), the
+        // ceiling of one watch's schedule over the 60-minute cap; config_html_ci_watch.test.mjs holds the two together.
+        { id: 'ci-watch', states: ['off', 'shadow', 'active'], cost: { polls: 45 }, weekly: true, background: { open: 0, closed: 0, kind: 'processes' } },
+        // odd/tasks/memory-shadow.md: shadow only until its writes are wired (M9 to M13). `every` is the fork sample,
+        // the mod's own FORK_SAMPLE_EVERY (src/core/memory_shadow.ts), a fact and not a setting; a test holds the two
+        // equal. Its weekly counts ride on the shared measurements summary, so it starts no process of its own.
+        { id: 'memory', states: ['off', 'shadow'], cost: { every: 5 }, background: { open: 0, closed: 0, kind: 'processes' } }
       ]
       var moduleStates = null
       var moduleRowsBuilt = false
@@ -4193,11 +4280,18 @@
           head.appendChild(name)
           head.appendChild(group)
           card.appendChild(head)
-          ;['desc', 'cost', 'background', 'install'].forEach(function (part) {
+          ;(row.weekly ? ['desc', 'cost', 'weekly', 'background', 'install'] : ['desc', 'cost', 'background', 'install']).forEach(function (part) {
             var line = elMake('p', 'hint module-' + part)
             line.setAttribute('data-module-' + part, row.id)
             card.appendChild(line)
           })
+          if (row.id === 'memory') {
+            ;['sees', 'backend', 'week'].forEach(function (part) {
+              var line = elMake('p', 'hint module-memory-' + part)
+              line.setAttribute('data-module-memory', part)
+              card.appendChild(line)
+            })
+          }
           if (row.id === 'gate') {
             var warn = elMake('p', 'hint warn module-warn')
             warn.setAttribute('data-module-warn', row.id)
@@ -4226,8 +4320,65 @@
         return t('modules.install.pending')
       }
 
-      /** Paints the cards from the integration status (null while it is still being read). */
-      function renderModules (status) {
+      /**
+       * The ci-watch card's week, from the measurements summary (the log the
+       * module writes, folded by read-measurements.mjs). A summary that is not
+       * there, or has no figure for it (a worker older than the card), is
+       * "not measured yet" - never zeros; a log with no watch says so in words.
+       */
+      function ciWatchWeeklyText (measurements) {
+        var week = measurements && measurements.ok && measurements.ciWatch && typeof measurements.ciWatch === 'object' ? measurements.ciWatch : null
+        if (week === null || typeof week.watches !== 'number') return t('modules.weekly.ci-watch.unknown')
+        if (week.watches === 0) return t('modules.weekly.ci-watch.none')
+        var notes = week.injected > 0 ? t('modules.weekly.ci-watch.notes', { injected: String(week.injected) }) : ''
+        return t('modules.weekly.ci-watch', { watches: String(week.watches), polls: String(week.pollsReplaced), sleeps: String(week.sleepsReplaced), notes: notes })
+      }
+
+      /** 0.5 as "50%"; null (nothing to divide by) as a dash. */
+      function percentText (value) {
+        return typeof value === 'number' && isFinite(value) ? Math.round(value * 100) + '%' : '–'
+      }
+
+      function countOf (value) { return String(typeof value === 'number' && isFinite(value) ? value : 0) }
+
+      /**
+       * The memory card's own lines: what Haiku and the fork see, where it
+       * would save (the newest logged row's backend and the signal that
+       * decided it) and the week's counts. `summary` is read-measurements.mjs's
+       * `memory`, undefined until the worker has published it.
+       */
+      function renderMemoryCard (summary) {
+        var sees = document.querySelector('[data-module-memory="sees"]')
+        if (!sees) return
+        sees.textContent = t('modules.memory.sees')
+        var latest = summary && summary.latest && typeof summary.latest === 'object' ? summary.latest : null
+        var backend = 'unknown'
+        if (latest) backend = latest.backend === 'live' ? (latest.permission === 'refused' ? 'refused' : 'live') : (latest.backend === 'configured-down' ? 'down' : 'absent')
+        var signal = latest ? t('modules.memory.signal.' + (['tools+health', 'tools', 'health', 'user-config', 'plugin', 'binary', 'none'].indexOf(latest.decidedBy) === -1 ? 'none' : latest.decidedBy)) : ''
+        document.querySelector('[data-module-memory="backend"]').textContent = t('modules.memory.backend.' + backend, { signal: signal })
+        var week = document.querySelector('[data-module-memory="week"]')
+        if (!summary || typeof summary !== 'object' || typeof summary.decisions !== 'number') {
+          week.textContent = t('modules.memory.weekUnavailable')
+        } else if (summary.decisions === 0) {
+          week.textContent = t('modules.memory.weekNone')
+        } else {
+          var would = summary.wouldSave && typeof summary.wouldSave === 'object' ? summary.wouldSave : {}
+          week.textContent = t('modules.memory.week', {
+            gates: countOf(summary.gates),
+            rate: percentText(summary.updateRate),
+            forks: countOf(summary.forks),
+            feedback: countOf(would.feedback),
+            user: countOf(would.user),
+            project: countOf(would.project),
+            reference: countOf(would.reference),
+            mainSaves: countOf((summary.mainEngramSaves || 0) + (summary.mainAutoMemoryWrites || 0)),
+            agree: percentText(summary.agreementRate)
+          })
+        }
+      }
+
+      /** Paints the cards from the integration status (null while it is still being read) and the measurements summary. */
+      function renderModules (status, measurements) {
         buildModuleRows()
         var all = status && status.ok && status.modules && typeof status.modules === 'object' ? status.modules : null
         var states = {}
@@ -4239,6 +4390,7 @@
           moduleQuery('name', row.id).textContent = t('modules.name.' + row.id)
           moduleQuery('desc', row.id).textContent = t('modules.desc.' + row.id)
           moduleQuery('cost', row.id).textContent = moduleCostText(row)
+          if (row.id === 'ci-watch') moduleQuery('weekly', row.id).textContent = ciWatchWeeklyText(measurements)
           moduleQuery('background', row.id).textContent = moduleBackgroundText(row)
           moduleQuery('install', row.id).textContent = status === null ? t('modules.install.reading') : moduleInstallText(row.id, info, status)
           var group = moduleQuery('states', row.id)
@@ -4250,6 +4402,7 @@
           setPressedValue(group, states[row.id])
         })
         moduleStates = known ? states : null
+        renderMemoryCard(measurements && typeof measurements === 'object' ? measurements.memory : undefined)
         applyModuleVisibility()
       }
 
