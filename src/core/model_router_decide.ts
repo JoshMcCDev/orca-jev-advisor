@@ -482,6 +482,8 @@ export interface RouterDecisionRecordInput {
   readonly quotaBand: QuotaBand;
   readonly quotaSource?: QuotaSource | null;
   readonly breakEven?: { readonly contextTokens: number; readonly switchCost: number; readonly stepSaving: number; readonly expectedSteps: number } | null;
+  /** R7: a quality switch's rewrite cost (`qualitySwitchCost`), logged when there is no break-even to carry one. */
+  readonly switchCost?: number | null;
   readonly origin?: string | null;
   readonly effort?: SessionEffort | null;
   /** JEVADV-63: null when not given -- an honest "not yet known" state, not a bug. */
@@ -517,7 +519,7 @@ export function routerDecisionRecord(input: RouterDecisionRecordInput): RouterDe
     reason: input.decision.reason,
     guard: input.decision.guard,
     contextTokens: breakEven?.contextTokens ?? null,
-    switchCost: breakEven?.switchCost ?? null,
+    switchCost: breakEven?.switchCost ?? input.switchCost ?? null,
     stepSaving: breakEven?.stepSaving ?? null,
     expectedSteps: breakEven?.expectedSteps ?? null,
     quotaBand: input.quotaBand,

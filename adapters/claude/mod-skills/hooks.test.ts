@@ -1856,6 +1856,27 @@ test("R6: a transcript with no cache write says no-ttl; a known cache carries no
   for (const row of await stoplessTurns(known, 6 * 60_000)) assert.equal(hasKey(row, "cacheUnknown"), false);
 });
 
+test("R7: an applied upgrade logs the rewrite it paid, and a known cold cache makes it 0 without holding the upgrade", async () => {
+  for (const [gapMs, cost] of [[60_000, 0.64], [6 * 60_000, 0]] as const) {
+    const host = makeFakeHost();
+    seedRouterAccount(host);
+    host.transcripts.set(OWN_TRANSCRIPT, `${transcriptRow("5m")}\n`);
+    host.fetchQueue.push(tierAnswer("simple"), tierAnswer("complex"));
+    const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+    const turn1 = await playTurn(host, handlers, engine, 1, "rename userId to accountId", 1);
+    assert.equal(turn1.model, "claude-haiku-4-5-20251001");
+    host.clockOffsetMs += gapMs;
+    const turn2 = await playTurn(host, handlers, engine, 2, "design the cache invalidation across both services", 1);
+    assert.equal(turn2.model, "claude-opus-5-5", "an upgrade never waits");
+    const stage = routerDecisionLines(host).at(-1);
+    assert.equal(stage?.reason, "upgrade");
+    assert.equal(stage?.applied, true);
+    assert.equal(stage?.cacheWarm, gapMs < 5 * 60_000);
+    assert.ok(Math.abs((stage?.switchCost as number) - cost) < 1e-9, `switchCost ${String(stage?.switchCost)}`);
+    assert.equal(stage?.stepSaving, null, "a quality switch has no saving");
+  }
+});
+
 // ---------------------------------------------------------------------------
 // JEV-060 slice 2, T8: subagent routing (point B) on agent.spawn.
 // ---------------------------------------------------------------------------

@@ -598,6 +598,18 @@ test("R6: a row whose cache is unknown says why; a known or absent one carries n
   assert.equal("cacheUnknown" in routerDecisionRecord(base), false);
 });
 
+test("R7: a row given a quality switch's cost logs it as switchCost and nothing else changes; a break-even's own cost wins", () => {
+  const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
+  const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, applied: true, quotaBand: "normal", cacheWarm: true } as const;
+  const without = routerDecisionRecord(base);
+  const withCost = routerDecisionRecord({ ...base, switchCost: 0.64 });
+  assert.equal(without.switchCost, null);
+  assert.deepEqual(withCost, { ...without, switchCost: 0.64 });
+  assert.equal(routerDecisionRecord({ ...base, switchCost: null }).switchCost, null);
+  const breakEven = { contextTokens: 80_000, switchCost: 0.16, stepSaving: 0.02, expectedSteps: 12 };
+  assert.equal(routerDecisionRecord({ ...base, breakEven, switchCost: 0.64 }).switchCost, 0.16);
+});
+
 test("R2: a cold switch logs wouldApplyCold in measure and appliedCold in active; no other row carries either", () => {
   const decision = decideStart({ tiers: TIERS, jev: { tier: "simple", confidence: 0.9 }, configuredModel: "claude-opus-5-5", configuredEffort: "high", guards: CALM });
   const base = { at: "2026-09-26T14:05:00.000Z", account: "acct", point: "stage", decision, quotaBand: "normal", cacheWarm: false } as const;

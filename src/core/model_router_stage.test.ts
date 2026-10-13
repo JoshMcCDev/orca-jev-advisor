@@ -21,6 +21,7 @@ import {
   shiftForPressure,
   summarizePreviousTurn,
   summarizeSinceLastPrompt,
+  qualitySwitchCost,
   switchedByColdCache,
 } from "./model_router_stage.ts";
 import type { ActivityMessage } from "./model_router_stage.ts";
@@ -886,4 +887,58 @@ test("R2: a cold switch is one the warm cache would have held", () => {
   assert.equal(switchedByColdCache(unknownInput, decideStage(unknownInput)), false);
   const held = { ...coldInput, pending: null };
   assert.equal(switchedByColdCache(held, decideStage(held)), false);
+});
+
+// ---------------------------------------------------------------------------
+// R7 (odd/tasks/router-cache-ttl.md): a quality switch (upgrade,
+// floor-restore, effort-raise) never waits for a cold cache, but its row
+// logs the rewrite it paid.
+// ---------------------------------------------------------------------------
+
+const FAILED_TURN = { toolCalls: 2, filesEdited: 0, testsRun: 1, testsFailed: 1, errors: 0, mentions: "" };
+const QUALITY_SWITCHES = [
+  ["upgrade", { jev: { tier: "complex", confidence: 0.8 }, currentModel: "claude-haiku-4-5-20251001", currentEffort: null }],
+  ["floor-restore", { jev: { tier: "simple", confidence: 0.6 }, currentModel: "claude-haiku-4-5-20251001", currentEffort: null, guards: { ...CALM, confidence: 0.6, activity: FAILED_TURN } }],
+  ["effort-raise", { jev: { tier: "frontier", confidence: 0.8 } }],
+] as const;
+
+test("R7: a quality switch logs the rewrite at its model's cache-write price for the known context: 80k on Opus 5.5 is $0.64", () => {
+  for (const [reason, overrides] of QUALITY_SWITCHES) {
+    const input = { ...STAGE_BASE, ...overrides };
+    const decision = decideStage(input);
+    assert.equal(decision.reason, reason);
+    assert.equal(decision.breakEven, null, `${reason}: no break-even, as before`);
+    assert.ok(Math.abs((qualitySwitchCost(input, decision) ?? -1) - 0.64) < 1e-9, reason);
+  }
+});
+
+test("R7: a known cold cache makes the rewrite free (0); unknown context or prices leave it null", () => {
+  for (const [reason, overrides] of QUALITY_SWITCHES) {
+    const cold = { ...STAGE_BASE, ...overrides, cacheWarm: false };
+    assert.equal(qualitySwitchCost(cold, decideStage(cold)), 0, reason);
+    const noContext = { ...STAGE_BASE, ...overrides, usage: null };
+    assert.equal(qualitySwitchCost(noContext, decideStage(noContext)), null, reason);
+  }
+  const gateway = { ...STAGE_BASE, tiers: GATEWAY, jev: { tier: "complex", confidence: 0.8 }, currentModel: "small", currentEffort: null, configuredModel: "big" } as const;
+  const upgrade = decideStage(gateway);
+  assert.equal(upgrade.reason, "upgrade");
+  assert.equal(qualitySwitchCost(gateway, upgrade), null);
+});
+
+test("R7: only a quality switch gets this cost: a kept turn or a downgrade (which carries its break-even) gets null", () => {
+  const kept = { ...STAGE_BASE, jev: { tier: "complex", confidence: 0.9 } } as const;
+  assert.equal(qualitySwitchCost(kept, decideStage(kept)), null);
+  const down = { ...STAGE_BASE, pending: { tier: "simple", turns: 1 } } as const;
+  const downgrade = decideStage(down);
+  assert.equal(downgrade.reason, "downgrade");
+  assert.equal(qualitySwitchCost(down, downgrade), null);
+});
+
+test("R7: the decision itself is the same warm, cold or unknown: upgrades never wait", () => {
+  for (const [reason, overrides] of QUALITY_SWITCHES) {
+    const unknown = decideStage({ ...STAGE_BASE, ...overrides });
+    assert.deepEqual(decideStage({ ...STAGE_BASE, ...overrides, cacheWarm: true }), unknown, reason);
+    assert.deepEqual(decideStage({ ...STAGE_BASE, ...overrides, cacheWarm: false }), unknown, reason);
+    assert.equal(unknown.changed, true, reason);
+  }
 });

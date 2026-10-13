@@ -29,7 +29,9 @@ Out of scope: deferring upgrades to a cold cache; Windows (`tail` is not there; 
 - [x] R6 `cacheUnknown` reason on the row
   - RED: cache_warmth.test.ts failed to load (no `cacheUnknownOf`); model_router_decide.test.ts "R6: a row whose cache is unknown says why; …" failed (tsc: `cacheUnknown` not in `RouterDecisionRecordInput`); hooks.test.ts "R5: a transcript that cannot be read …" (`cacheUnknown` `[undefined, undefined]`) and "R6: a transcript with no cache write says no-ttl; …" failed.
   - GREEN: cache_warmth + model_router_decide + hooks: 317/317; typecheck clean.
-- [ ] R7 cost of applied upgrades logged
+- [x] R7 cost of applied upgrades logged
+  - RED: model_router_stage.test.ts failed to load (no `qualitySwitchCost`); model_router_decide.test.ts "R7: a row given a quality switch's cost logs it as switchCost …" failed (tsc: `switchCost` not in `RouterDecisionRecordInput`); hooks.test.ts "R7: an applied upgrade logs the rewrite it paid, …" failed (`switchCost null`).
+  - GREEN: model_router_stage + model_router_decide + model_router_summary + hooks: 386/386. "R7: the decision itself is the same warm, cold or unknown: upgrades never wait" proves upgrade, floor-restore and effort-raise decisions are deep-equal across `cacheWarm` true/false/absent; the record differs from before only in `switchCost` (80k on Opus 5.5: $0.64; 0 when known cold; null without context or prices). Not covered: the engine-started turn's `floor-restore` (`routeEngineTurn`), whose row never weighed the cache.
 - [ ] G8 402 named as "no credit"
 - [ ] Release 0.8.3 (docs, version, QA)
 - [ ] Live: a Koombea account session gives `cacheWarm` true/false; the partner's Linux shows the 402 notice text (read-only check)
