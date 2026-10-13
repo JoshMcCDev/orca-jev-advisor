@@ -236,9 +236,9 @@ Splitting into separate Orca plugins, or changing Orca. If Orca later gains mani
 ### Next modules, after the registry ships
 Each one is a registry entry that enters in `shadow`. Its own task file is written when it starts. The details and the first thing to verify are in `odd/backlog.md`, under "Candidate modules from similar tools".
 - [x] M1 Verify the "done" (jev-belay): a Stop hook that blocks an unverified "done". Delivered in 0.8.0 as a shadow measure (Off and Shadow only, no Stop hook); live check in `odd/qa/qa-0.8.0.md`. An Active (blocking) state waits for a week of data.
-- [ ] M2 Gate MCP tools against the goal (jev-browser's irreversible question). This could extend the `gate` module instead of being a new one; decide in its task file.
+- [ ] M2 Gate MCP tools against the goal (jev-browser's irreversible question). **Parked 2026-10-12:** a week held about 174 external MCP writes and the owner knows of no unwanted one; see `odd/tasks/mcp-gate-module.md`.
 - [ ] M3 Browser steps judged by Jev (jev-browser).
-- [ ] M4 Project rules on every edit (abide), turn level, shadow only.
+- [ ] M4 Project rules on every edit (abide), turn level, shadow only. **Parked 2026-10-12:** 7 days, 800 code edits: `any` in 4 (2 sessions), `debugger` in 0, backup files 0, `console.log` in 74 (15 sessions; 57 of them in two server projects where it is probably intended output). A regex would catch these with no Jev call, so a Jev module has nothing to add.
 - [ ] M5 Messages written mid-turn (Jev_steer_or_queue).
 - [ ] M6 Cheap bulk classification (quicksilver).
 - [ ] M7 Site audit (jev-seo).
