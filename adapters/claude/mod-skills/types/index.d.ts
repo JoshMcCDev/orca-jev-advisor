@@ -144,6 +144,13 @@ export type CiWatchesState = {
     total: number
     /** The workflows that did not succeed. */
     failed: string[]
+    /** The workflows still running. */
+    running: string[]
+    /** How long `typicalWorkflow` usually takes (median of its last successful runs); both null when unknown. */
+    typicalWorkflow: string | null
+    typicalSeconds: number | null
+    /** How long the runs took, once finished. */
+    durationMs: number | null
     finishedAtMs: number | null
   }[]
 }

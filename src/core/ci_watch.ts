@@ -25,7 +25,7 @@ import type { Locale } from "./i18n.ts";
 import { CI_WATCH_CATALOG } from "./i18n_ci_watch.ts";
 
 /** The fields asked of `gh run list --json`; the parser reads exactly these. */
-export const CI_RUN_FIELDS = "databaseId,status,conclusion,headBranch,headSha,workflowName,url,createdAt";
+export const CI_RUN_FIELDS = "databaseId,status,conclusion,headBranch,headSha,workflowName,url,createdAt,updatedAt";
 
 // ---------------------------------------------------------------------------
 // gh run list --json
@@ -41,6 +41,8 @@ export interface CiRun {
   readonly workflow: string;
   readonly url: string;
   readonly createdAtMs: number;
+  /** When the run last changed: for a finished run, about when it ended. 0 when gh did not say. */
+  readonly updatedAtMs: number;
 }
 
 function text(value: unknown): string {
@@ -65,6 +67,7 @@ export function parseCiRuns(stdout: string): readonly CiRun[] | null {
     if (typeof id !== "number" || typeof status !== "string" || typeof sha !== "string") continue;
     const conclusion = text(entry["conclusion"]);
     const createdAtMs = Date.parse(text(entry["createdAt"]));
+    const updatedAtMs = Date.parse(text(entry["updatedAt"]));
     runs.push({
       id,
       status,
@@ -74,9 +77,41 @@ export function parseCiRuns(stdout: string): readonly CiRun[] | null {
       workflow: text(entry["workflowName"]),
       url: text(entry["url"]),
       createdAtMs: Number.isNaN(createdAtMs) ? 0 : createdAtMs,
+      updatedAtMs: Number.isNaN(updatedAtMs) ? 0 : updatedAtMs,
     });
   }
   return runs;
+}
+
+/** The fields asked of the one lookup of how long a workflow usually takes. */
+export const CI_TYPICAL_FIELDS = "createdAt,updatedAt";
+/** Fewer finished runs than this are not a history to quote a usual time from. */
+const TYPICAL_MIN_RUNS = 3;
+
+/**
+ * How long a workflow usually takes, in seconds: the median duration of the
+ * successful runs in `gh run list --workflow <name> --status success --json
+ * createdAt,updatedAt`. Null with fewer than TYPICAL_MIN_RUNS usable runs or
+ * an answer that is not a list: an unknown time is left out, never guessed.
+ */
+export function parseTypicalSeconds(stdout: string): number | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const seconds: number[] = [];
+  for (const entry of parsed as readonly unknown[]) {
+    if (!isRecord(entry)) continue;
+    const span = (Date.parse(text(entry["updatedAt"])) - Date.parse(text(entry["createdAt"]))) / 1000;
+    if (Number.isFinite(span) && span > 0) seconds.push(span);
+  }
+  if (seconds.length < TYPICAL_MIN_RUNS) return null;
+  seconds.sort((a, b) => a - b);
+  const middle = Math.floor(seconds.length / 2);
+  return seconds.length % 2 === 1 ? (seconds[middle] ?? 0) : ((seconds[middle - 1] ?? 0) + (seconds[middle] ?? 0)) / 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,10 +428,17 @@ export interface CiWatchProgress {
   /** The last poll's runs when all were finished, to compare with the next. */
   readonly signature: string | null;
   readonly failedPolls: number;
+  /** `gh` calls made besides the polls (the usual-time lookup): they share the polls' ceiling. */
+  readonly lookups: number;
 }
 
 export function newCiWatchProgress(): CiWatchProgress {
-  return { polls: 0, elapsedMs: 0, settleFromMs: 0, signature: null, failedPolls: 0 };
+  return { polls: 0, elapsedMs: 0, settleFromMs: 0, signature: null, failedPolls: 0, lookups: 0 };
+}
+
+/** One more `gh` call that is not a poll was made: the watch ends one poll sooner, so the ceiling holds. */
+export function noteCiLookup(progress: CiWatchProgress): CiWatchProgress {
+  return { ...progress, lookups: progress.lookups + 1 };
 }
 
 /** A later trigger on the same sha (a pull request after the push): the settle window starts again and the last agreement is forgotten. */
@@ -409,12 +451,14 @@ export interface CiVerdict {
   readonly url: string;
   readonly workflows: number;
   readonly failed: readonly string[];
+  /** From the first run created to the last one updated; null when gh gave no times. */
+  readonly durationMs: number | null;
 }
 
 export type CiStopReason = "cap" | "no-runs" | "gh-failed";
 
 export type CiWatchStep =
-  | { readonly kind: "wait"; readonly delayMs: number; readonly progress: CiWatchProgress; readonly seen: number; readonly running: number }
+  | { readonly kind: "wait"; readonly delayMs: number; readonly progress: CiWatchProgress; readonly seen: number; readonly running: number; readonly runningNames: readonly string[] }
   | { readonly kind: "done"; readonly verdict: CiVerdict; readonly progress: CiWatchProgress }
   | { readonly kind: "stop"; readonly reason: CiStopReason; readonly progress: CiWatchProgress };
 
@@ -425,6 +469,13 @@ function shaMatches(runSha: string, target: string): boolean {
   return shorter >= 7 && runSha.slice(0, shorter).toLowerCase() === target.slice(0, shorter).toLowerCase();
 }
 
+function durationOf(runs: readonly CiRun[]): number | null {
+  const ends = runs.map((run) => run.updatedAtMs).filter((at) => at > 0);
+  const starts = runs.map((run) => run.createdAtMs).filter((at) => at > 0);
+  if (ends.length === 0 || starts.length === 0) return null;
+  return Math.max(0, Math.max(...ends) - Math.min(...starts));
+}
+
 function verdictOf(runs: readonly CiRun[]): CiVerdict {
   const failed = runs.filter((run) => !SUCCESS_CONCLUSIONS.has(run.conclusion ?? ""));
   return {
@@ -432,6 +483,7 @@ function verdictOf(runs: readonly CiRun[]): CiVerdict {
     url: (failed[0] ?? runs[0])?.url ?? "",
     workflows: runs.length,
     failed: failed.map((run) => run.workflow),
+    durationMs: durationOf(runs),
   };
 }
 
@@ -449,25 +501,25 @@ export function ciWatchStep(progress: CiWatchProgress, runs: readonly CiRun[] | 
   if (runs === null) {
     const failedPolls = progress.failedPolls + 1;
     if (failedPolls >= MAX_FAILED_POLLS) return { kind: "stop", reason: "gh-failed", progress: { ...at, failedPolls } };
-    return schedule({ ...at, failedPolls, signature: null }, pollDelayMs(progress.polls), 0, 0);
+    return schedule({ ...at, failedPolls, signature: null }, pollDelayMs(progress.polls), 0, 0, []);
   }
   const mine = runs.filter((run) => shaMatches(run.sha, target.sha) && run.createdAtMs >= target.sinceMs - CLOCK_SLACK_MS);
   const open = mine.filter((run) => run.status !== "completed");
   const base: CiWatchProgress = { ...at, failedPolls: 0 };
   if (mine.length === 0) {
     if (progress.elapsedMs >= CI_NO_RUN_MS) return { kind: "stop", reason: "no-runs", progress: { ...base, signature: null } };
-    return schedule({ ...base, signature: null }, pollDelayMs(progress.polls), 0, 0);
+    return schedule({ ...base, signature: null }, pollDelayMs(progress.polls), 0, 0, []);
   }
-  if (open.length > 0) return schedule({ ...base, signature: null }, pollDelayMs(progress.polls), mine.length, open.length);
+  if (open.length > 0) return schedule({ ...base, signature: null }, pollDelayMs(progress.polls), mine.length, open.length, open.map((run) => run.workflow));
   const signature = mine.map((run) => `${run.id}:${run.conclusion ?? ""}`).sort().join(",");
   if (signature === progress.signature && progress.elapsedMs - progress.settleFromMs >= CI_SETTLE_MS) return { kind: "done", verdict: verdictOf(mine), progress: { ...base, signature } };
-  return schedule({ ...base, signature }, CONFIRM_DELAY_MS, mine.length, 0);
+  return schedule({ ...base, signature }, CONFIRM_DELAY_MS, mine.length, 0, []);
 }
 
 /** The wait step for `delayMs` more, or the cap's stop when that would pass it. */
-function schedule(progress: CiWatchProgress, delayMs: number, seen: number, running: number): CiWatchStep {
-  if (progress.elapsedMs + delayMs > CI_WATCH_CAP_MS) return { kind: "stop", reason: "cap", progress };
-  return { kind: "wait", delayMs, seen, running, progress: { ...progress, elapsedMs: progress.elapsedMs + delayMs } };
+function schedule(progress: CiWatchProgress, delayMs: number, seen: number, running: number, runningNames: readonly string[]): CiWatchStep {
+  if (progress.elapsedMs + delayMs > CI_WATCH_CAP_MS || progress.polls + progress.lookups >= CI_WATCH_MAX_POLLS) return { kind: "stop", reason: "cap", progress };
+  return { kind: "wait", delayMs, seen, running, runningNames, progress: { ...progress, elapsedMs: progress.elapsedMs + delayMs } };
 }
 
 // ---------------------------------------------------------------------------
@@ -509,11 +561,22 @@ export interface CiBandRow {
   readonly done: number;
   readonly total: number;
   readonly failed: readonly string[];
+  /** The workflows still running (empty while none has appeared, and once finished). */
+  readonly running: readonly string[];
+  /** How long `typicalWorkflow` usually takes, from its last successful runs; both null when unknown. */
+  readonly typicalWorkflow: string | null;
+  readonly typicalSeconds: number | null;
+  /** How long the runs took, once finished; null when gh gave no times (the watch's own clock is used). */
+  readonly durationMs: number | null;
   readonly finishedAtMs: number | null;
 }
 
 /** How long a finished row stays in the band. */
 export const CI_ROW_KEEP_MS = 120_000;
+
+function isNames(value: unknown): boolean {
+  return Array.isArray(value) && (value as readonly unknown[]).every((name) => typeof name === "string");
+}
 
 function isBandRow(value: unknown): value is CiBandRow {
   if (!isRecord(value)) return false;
@@ -527,6 +590,10 @@ function isBandRow(value: unknown): value is CiBandRow {
     typeof value["total"] === "number" &&
     Array.isArray(value["failed"]) &&
     (value["failed"] as readonly unknown[]).every((name) => typeof name === "string") &&
+    isNames(value["running"]) &&
+    (value["typicalWorkflow"] === null || typeof value["typicalWorkflow"] === "string") &&
+    (value["typicalSeconds"] === null || typeof value["typicalSeconds"] === "number") &&
+    (value["durationMs"] === null || typeof value["durationMs"] === "number") &&
     (value["finishedAtMs"] === null || typeof value["finishedAtMs"] === "number")
   );
 }
@@ -537,14 +604,59 @@ export function parseCiBandRows(value: unknown): readonly CiBandRow[] {
   return (value["rows"] as readonly unknown[]).filter(isBandRow);
 }
 
+/** `branch (sha7)`, the sha alone when the branch is unknown. */
 function labelOf(row: CiBandRow): string {
-  return row.branch === null ? row.sha7 : `${row.sha7} ${row.branch}`;
+  return row.branch === null ? row.sha7 : `${row.branch} (${row.sha7})`;
 }
 
-/** The line for a watch that ended: passed, or failed with the workflows named. */
+/** A duration for a person: seconds under a minute, then minutes, then hours and minutes. Not locale-bound: the units are the same in es and en. */
+export function formatCiDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const rest = minutes % 60;
+  return rest === 0 ? `${minutes / 60} h` : `${Math.floor(minutes / 60)} h ${rest} min`;
+}
+
+/** A run is "slower than usual" when it passed the usual time by a quarter and by at least this long: a short job's ratio alone says little. */
+const SLOW_MIN_OVERRUN_MS = 3 * 60_000;
+const SLOW_RATIO = 1.25;
+
+export function ciIsSlow(typicalSeconds: number, elapsedMs: number): boolean {
+  const typicalMs = typicalSeconds * 1000;
+  return elapsedMs >= typicalMs * SLOW_RATIO && elapsedMs - typicalMs >= SLOW_MIN_OVERRUN_MS;
+}
+
+function quoted(locale: Locale, name: string): string {
+  return locale === "es" ? `«${name}»` : `"${name}"`;
+}
+
+function quotedList(locale: Locale, names: readonly string[]): string {
+  return names.map((name) => quoted(locale, name)).join(", ");
+}
+
+/** The line for a watch that ended: passed in so long, or failed with the workflows named and when. */
 export function ciFinishedText(locale: Locale, row: CiBandRow): string {
-  if (row.status === "success") return translate(CI_WATCH_CATALOG, locale, "band.passed", { label: labelOf(row) });
-  return translate(CI_WATCH_CATALOG, locale, "band.failed", { label: labelOf(row), workflows: row.failed.length > 0 ? ` (${row.failed.join(", ")})` : "" });
+  const elapsed = formatCiDuration(row.durationMs ?? Math.max(0, (row.finishedAtMs ?? row.startedAtMs) - row.startedAtMs));
+  if (row.status === "success") return translate(CI_WATCH_CATALOG, locale, "band.passed", { label: labelOf(row), elapsed });
+  return translate(CI_WATCH_CATALOG, locale, "band.failed", { label: labelOf(row), workflows: row.failed.length > 0 ? ` ${quotedList(locale, row.failed)}` : "", elapsed });
+}
+
+/** The line for a watch still running: what runs and for how long, how many are done, and how long it usually takes. */
+function ciRunningText(locale: Locale, row: CiBandRow, nowMs: number): string {
+  const label = labelOf(row);
+  const elapsedMs = Math.max(0, nowMs - row.startedAtMs);
+  const elapsed = formatCiDuration(elapsedMs);
+  if (row.total === 0) return translate(CI_WATCH_CATALOG, locale, "band.waiting", { label, elapsed, limit: String(CI_NO_RUN_MS / 60_000) });
+  let line = translate(CI_WATCH_CATALOG, locale, "band.running", { label, names: quotedList(locale, row.running), elapsed });
+  if (row.total > 1) line += translate(CI_WATCH_CATALOG, locale, "band.part.done", { done: String(row.done), total: String(row.total) });
+  if (row.typicalWorkflow !== null && row.typicalSeconds !== null && row.running.includes(row.typicalWorkflow)) {
+    const typical = formatCiDuration(row.typicalSeconds * 1000);
+    line += row.running.length > 1 ? translate(CI_WATCH_CATALOG, locale, "band.part.typicalOf", { name: quoted(locale, row.typicalWorkflow), typical }) : translate(CI_WATCH_CATALOG, locale, "band.part.typical", { typical });
+    if (ciIsSlow(row.typicalSeconds, elapsedMs)) line += translate(CI_WATCH_CATALOG, locale, "band.part.slow");
+  }
+  return line;
 }
 
 function fitLine(line: string, columns: number): string {
@@ -562,9 +674,7 @@ export function ciBandRows(locale: Locale, rows: readonly CiBandRow[], nowMs: nu
   for (const row of rows) {
     if (row.status === "watching") {
       if (nowMs - row.startedAtMs > CI_WATCH_CAP_MS) continue;
-      const minutes = Math.max(0, Math.floor((nowMs - row.startedAtMs) / 60_000));
-      const text = row.total === 0 ? translate(CI_WATCH_CATALOG, locale, "band.waiting", { label: labelOf(row), minutes: String(minutes) }) : translate(CI_WATCH_CATALOG, locale, "band.running", { label: labelOf(row), done: String(row.done), total: String(row.total), minutes: String(minutes) });
-      lines.push(fitLine(text, columns));
+      lines.push(fitLine(ciRunningText(locale, row, nowMs), columns));
     } else {
       if (row.finishedAtMs === null || nowMs - row.finishedAtMs > CI_ROW_KEEP_MS) continue;
       lines.push(fitLine(ciFinishedText(locale, row), columns));

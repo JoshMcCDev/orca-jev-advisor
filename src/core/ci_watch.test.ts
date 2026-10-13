@@ -12,6 +12,7 @@ import {
   CI_WATCH_DECISIONS_FILE_PATTERN,
   CI_WATCH_MAX_POLLS,
   ciBandRows,
+  ciIsSlow,
   ciBashCallFrom,
   ciNoteText,
   ciWatchDecisionFileName,
@@ -21,11 +22,14 @@ import {
   couldStartCiWatch,
   detectCiTriggers,
   extendCiWatch,
+  formatCiDuration,
   isCiPollCommand,
   isCiWatchNote,
   newCiWatchProgress,
+  noteCiLookup,
   parseCiBandRows,
   parseCiRuns,
+  parseTypicalSeconds,
   parsePrMergeView,
   sleepSeconds,
   summarizeCiWatchRows,
@@ -55,19 +59,20 @@ function ghRow(overrides: Record<string, unknown> = {}): Record<string, unknown>
     workflowName: "CI",
     url: "https://github.com/ab2webco/orca-jev-advisor/actions/runs/101",
     createdAt: "2026-10-12T10:00:30Z",
+    updatedAt: "2026-10-12T10:35:30Z",
     ...overrides,
   };
 }
 
 test("the requested fields are the ones the parser reads", () => {
-  assert.equal(CI_RUN_FIELDS, "databaseId,status,conclusion,headBranch,headSha,workflowName,url,createdAt");
+  assert.equal(CI_RUN_FIELDS, "databaseId,status,conclusion,headBranch,headSha,workflowName,url,createdAt,updatedAt");
 });
 
 test("parser: a gh run list array gives typed runs; an empty conclusion (a run still going) reads as null", () => {
   const runs = parseCiRuns(JSON.stringify([ghRow(), ghRow({ databaseId: 102, status: "in_progress", conclusion: "", workflowName: "Deploy" })]));
   assert.deepEqual(runs, [
-    { id: 101, status: "completed", conclusion: "success", branch: "feat/ci-watcher", sha: SHA, workflow: "CI", url: "https://github.com/ab2webco/orca-jev-advisor/actions/runs/101", createdAtMs: Date.parse("2026-10-12T10:00:30Z") },
-    { id: 102, status: "in_progress", conclusion: null, branch: "feat/ci-watcher", sha: SHA, workflow: "Deploy", url: "https://github.com/ab2webco/orca-jev-advisor/actions/runs/101", createdAtMs: Date.parse("2026-10-12T10:00:30Z") },
+    { id: 101, status: "completed", conclusion: "success", branch: "feat/ci-watcher", sha: SHA, workflow: "CI", url: "https://github.com/ab2webco/orca-jev-advisor/actions/runs/101", createdAtMs: Date.parse("2026-10-12T10:00:30Z"), updatedAtMs: Date.parse("2026-10-12T10:35:30Z") },
+    { id: 102, status: "in_progress", conclusion: null, branch: "feat/ci-watcher", sha: SHA, workflow: "Deploy", url: "https://github.com/ab2webco/orca-jev-advisor/actions/runs/101", createdAtMs: Date.parse("2026-10-12T10:00:30Z"), updatedAtMs: Date.parse("2026-10-12T10:35:30Z") },
   ]);
 });
 
@@ -214,7 +219,7 @@ test("classifyAgentCall: a poll is a ci-poll (even with a sleep in the same comm
 const TARGET: CiWatchTarget = { sha: SHA, sinceMs: T0 };
 
 function run(overrides: Partial<CiRun> = {}): CiRun {
-  return { id: 101, status: "completed", conclusion: "success", branch: "feat/x", sha: SHA, workflow: "CI", url: "https://github.com/a/b/actions/runs/101", createdAtMs: T0 + 5_000, ...overrides };
+  return { id: 101, status: "completed", conclusion: "success", branch: "feat/x", sha: SHA, workflow: "CI", url: "https://github.com/a/b/actions/runs/101", createdAtMs: T0 + 5_000, updatedAtMs: T0 + 65_000, ...overrides };
 }
 
 /** Feeds the step with each answer in turn, as the hook would, and returns every step. */
@@ -296,7 +301,7 @@ test("done needs two identical polls with every run completed, a settle window s
   assert.equal(third.kind, "wait");
   const fourth = ciWatchStep(third.kind === "wait" ? third.progress : progress, finished, TARGET);
   assert.equal(fourth.kind, "done");
-  assert.deepEqual(fourth.kind === "done" ? fourth.verdict : null, { outcome: "success", url: "https://github.com/a/b/actions/runs/101", workflows: 1, failed: [] });
+  assert.deepEqual(fourth.kind === "done" ? fourth.verdict : null, { outcome: "success", url: "https://github.com/a/b/actions/runs/101", workflows: 1, failed: [], durationMs: 60_000 });
 });
 
 test("done after a long wait needs only the confirming poll", () => {
@@ -392,10 +397,10 @@ test("a later trigger on the same sha extends the watch: the settle window resta
 
 test("the agent's note: sha, branch, outcome and url; a failure names the workflows", () => {
   const url = "https://github.com/a/b/actions/runs/7";
-  assert.equal(ciNoteText({ sha7: "0123456", branch: "feat/x" }, { outcome: "success", url, workflows: 2, failed: [] }), `CI for 0123456 on feat/x: success, ${url}`);
-  assert.equal(ciNoteText({ sha7: "0123456", branch: "feat/x" }, { outcome: "failure", url, workflows: 2, failed: ["CI", "Deploy"] }), `CI for 0123456 on feat/x: failure (CI, Deploy), ${url}`);
-  assert.equal(ciNoteText({ sha7: "0123456", branch: null }, { outcome: "success", url, workflows: 1, failed: [] }), `CI for 0123456: success, ${url}`);
-  assert.equal(ciNoteText({ sha7: "0123456", branch: "b" }, { outcome: "failure", url, workflows: 6, failed: ["a", "b", "c", "d", "e"] }), `CI for 0123456 on b: failure (a, b, c and 2 more), ${url}`);
+  assert.equal(ciNoteText({ sha7: "0123456", branch: "feat/x" }, { outcome: "success", url, workflows: 2, failed: [], durationMs: null }), `CI for 0123456 on feat/x: success, ${url}`);
+  assert.equal(ciNoteText({ sha7: "0123456", branch: "feat/x" }, { outcome: "failure", url, workflows: 2, failed: ["CI", "Deploy"], durationMs: null }), `CI for 0123456 on feat/x: failure (CI, Deploy), ${url}`);
+  assert.equal(ciNoteText({ sha7: "0123456", branch: null }, { outcome: "success", url, workflows: 1, failed: [], durationMs: null }), `CI for 0123456: success, ${url}`);
+  assert.equal(ciNoteText({ sha7: "0123456", branch: "b" }, { outcome: "failure", url, workflows: 6, failed: ["a", "b", "c", "d", "e"], durationMs: null }), `CI for 0123456 on b: failure (a, b, c and 2 more), ${url}`);
 });
 
 test("the note is recognised by its own wording", () => {
@@ -404,21 +409,103 @@ test("the note is recognised by its own wording", () => {
   assert.equal(isCiWatchNote("hello"), false);
 });
 
-const ROW: CiBandRow = { id: "a", sha7: "0123456", branch: "feat/x", status: "watching", startedAtMs: T0, done: 1, total: 3, failed: [], finishedAtMs: null };
+const MIN = 60_000;
+const ROW: CiBandRow = { id: "a", sha7: "0123456", branch: "feat/x", status: "watching", startedAtMs: T0, done: 0, total: 1, running: ["check"], typicalWorkflow: null, typicalSeconds: null, failed: [], durationMs: null, finishedAtMs: null };
+const TYPICAL: Partial<CiBandRow> = { typicalWorkflow: "check", typicalSeconds: 35 * 60 };
 
-test("band rows: a running watch, a passed one and a failed one, in both languages", () => {
-  assert.deepEqual(ciBandRows("en", [ROW], T0 + 4 * 60_000, 120), ["CI 0123456 feat/x: running, 1 of 3 runs done, 4 min"]);
-  assert.deepEqual(ciBandRows("es", [ROW], T0 + 4 * 60_000, 120), ["CI 0123456 feat/x: en curso, 1 de 3 ejecuciones hechas, 4 min"]);
-  assert.deepEqual(ciBandRows("en", [{ ...ROW, status: "success", finishedAtMs: T0 + 60_000 }], T0 + 90_000, 120), ["CI 0123456 feat/x: passed"]);
-  assert.deepEqual(ciBandRows("en", [{ ...ROW, status: "failure", failed: ["CI", "Deploy"], finishedAtMs: T0 + 60_000 }], T0 + 90_000, 120), ["CI 0123456 feat/x: failed (CI, Deploy)"]);
-  assert.deepEqual(ciBandRows("es", [{ ...ROW, status: "failure", failed: ["CI"], finishedAtMs: T0 + 60_000 }], T0 + 90_000, 120), ["CI 0123456 feat/x: falló (CI)"]);
-  assert.deepEqual(ciBandRows("en", [{ ...ROW, branch: null }], T0, 120), ["CI 0123456: running, 1 of 3 runs done, 0 min"]);
+test("band rows: a running workflow is named with how long it has run, and how long it usually takes when that is known", () => {
+  assert.deepEqual(ciBandRows("en", [ROW], T0 + 25 * MIN, 200), ["CI feat/x (0123456) · \"check\" running for 25 min"]);
+  assert.deepEqual(ciBandRows("es", [ROW], T0 + 25 * MIN, 200), ["CI feat/x (0123456) · «check» corriendo hace 25 min"]);
+  assert.deepEqual(ciBandRows("en", [{ ...ROW, ...TYPICAL }], T0 + 25 * MIN, 200), ["CI feat/x (0123456) · \"check\" running for 25 min · usually takes ~35 min"]);
+  assert.deepEqual(ciBandRows("es", [{ ...ROW, ...TYPICAL }], T0 + 25 * MIN, 200), ["CI feat/x (0123456) · «check» corriendo hace 25 min · suele tardar ~35 min"]);
+  assert.deepEqual(ciBandRows("es", [{ ...ROW, branch: null }], T0 + 30_000, 200), ["CI 0123456 · «check» corriendo hace 30 s"]);
 });
 
-test("band rows: before any run of the sha has appeared the row says it is waiting for them", () => {
-  const waiting: CiBandRow = { ...ROW, done: 0, total: 0 };
-  assert.deepEqual(ciBandRows("en", [waiting], T0 + 60_000, 120), ["CI 0123456 feat/x: waiting for the runs to appear, 1 min"]);
-  assert.deepEqual(ciBandRows("es", [waiting], T0 + 60_000, 120), ["CI 0123456 feat/x: esperando que aparezcan las ejecuciones, 1 min"]);
+test("band rows: several workflows say how many are done and which are still running; the usual time names its workflow", () => {
+  const several: CiBandRow = { ...ROW, done: 1, total: 3, running: ["lint", "build"], typicalWorkflow: "build", typicalSeconds: 10 * 60 };
+  assert.deepEqual(ciBandRows("es", [several], T0 + 4 * MIN, 200), ["CI feat/x (0123456) · «lint», «build» corriendo hace 4 min · 1 de 3 listos · «build» suele tardar ~10 min"]);
+  assert.deepEqual(ciBandRows("en", [several], T0 + 4 * MIN, 200), ["CI feat/x (0123456) · \"lint\", \"build\" running for 4 min · 1 of 3 done · \"build\" usually takes ~10 min"]);
+  assert.deepEqual(ciBandRows("en", [{ ...ROW, done: 1, total: 2, running: ["lint"] }], T0 + 4 * MIN, 200), ["CI feat/x (0123456) · \"lint\" running for 4 min · 1 of 2 done"]);
+});
+
+test("band rows: a run noticeably past its usual time says it is slower than usual; a small overrun does not", () => {
+  const slow = ciBandRows("es", [{ ...ROW, ...TYPICAL }], T0 + 50 * MIN, 200);
+  assert.deepEqual(slow, ["CI feat/x (0123456) · «check» corriendo hace 50 min · suele tardar ~35 min · más lento que lo usual"]);
+  assert.deepEqual(ciBandRows("en", [{ ...ROW, ...TYPICAL }], T0 + 50 * MIN, 200), ["CI feat/x (0123456) · \"check\" running for 50 min · usually takes ~35 min · slower than usual"]);
+  assert.deepEqual(ciBandRows("en", [{ ...ROW, ...TYPICAL }], T0 + 38 * MIN, 200), ["CI feat/x (0123456) · \"check\" running for 38 min · usually takes ~35 min"]);
+  assert.equal(ciIsSlow(35 * 60, 46 * MIN), true);
+  assert.equal(ciIsSlow(35 * 60, 40 * MIN), false);
+  assert.equal(ciIsSlow(60, 3 * MIN), false, "a short job gains little from a ratio alone");
+});
+
+test("band rows: the usual time is left out when it belongs to a workflow that already finished", () => {
+  const row: CiBandRow = { ...ROW, done: 1, total: 2, running: ["lint"], typicalWorkflow: "check", typicalSeconds: 35 * 60 };
+  assert.deepEqual(ciBandRows("en", [row], T0 + 4 * MIN, 200), ["CI feat/x (0123456) · \"lint\" running for 4 min · 1 of 2 done"]);
+});
+
+test("band rows: passed says how long CI took (the runs' own clock, else the watch's); failed names the workflows and when", () => {
+  const passed: CiBandRow = { ...ROW, status: "success", running: [], done: 1, total: 1, durationMs: 35 * MIN, finishedAtMs: T0 + 40 * MIN };
+  assert.deepEqual(ciBandRows("es", [passed], T0 + 41 * MIN, 200), ["CI feat/x (0123456) · pasó en 35 min"]);
+  assert.deepEqual(ciBandRows("en", [passed], T0 + 41 * MIN, 200), ["CI feat/x (0123456) · passed in 35 min"]);
+  assert.deepEqual(ciBandRows("en", [{ ...passed, durationMs: null, finishedAtMs: T0 + 7 * MIN }], T0 + 8 * MIN, 200), ["CI feat/x (0123456) · passed in 7 min"]);
+  const failed: CiBandRow = { ...passed, status: "failure", failed: ["lint", "build"], durationMs: 12 * MIN + 20_000 };
+  assert.deepEqual(ciBandRows("es", [failed], T0 + 41 * MIN, 200), ["CI feat/x (0123456) · falló «lint», «build» tras 12 min"]);
+  assert.deepEqual(ciBandRows("en", [failed], T0 + 41 * MIN, 200), ["CI feat/x (0123456) · failed \"lint\", \"build\" after 12 min"]);
+  assert.deepEqual(ciBandRows("en", [{ ...failed, failed: [], durationMs: 90 * MIN + 5 * MIN }], T0 + 41 * MIN, 200), ["CI feat/x (0123456) · failed after 1 h 35 min"]);
+});
+
+test("band rows: before any run of the sha has appeared the row says it waits for GitHub and when it stops waiting", () => {
+  const waiting: CiBandRow = { ...ROW, done: 0, total: 0, running: [] };
+  assert.deepEqual(ciBandRows("en", [waiting], T0 + MIN, 200), ["CI feat/x (0123456) · waiting for GitHub to start CI for this commit (1 min) · stops watching if none shows up in 4 min"]);
+  assert.deepEqual(ciBandRows("es", [waiting], T0 + MIN, 200), ["CI feat/x (0123456) · esperando que GitHub inicie el CI de este commit (1 min) · se deja de mirar si no aparece en 4 min"]);
+});
+
+test("formatCiDuration: seconds under a minute, minutes, then hours and minutes", () => {
+  assert.equal(formatCiDuration(0), "0 s");
+  assert.equal(formatCiDuration(45_000), "45 s");
+  assert.equal(formatCiDuration(59 * MIN + 40_000), "59 min");
+  assert.equal(formatCiDuration(125 * MIN), "2 h 5 min");
+  assert.equal(formatCiDuration(120 * MIN), "2 h");
+  assert.equal(formatCiDuration(-5), "0 s");
+});
+
+test("typical time: the median of the last successful runs' durations; unknown with too little history or a bad answer", () => {
+  const row = (start: string, end: string): Record<string, unknown> => ({ createdAt: start, updatedAt: end });
+  const runs = [row("2026-10-12T10:00:00Z", "2026-10-12T10:30:00Z"), row("2026-10-12T11:00:00Z", "2026-10-12T11:40:00Z"), row("2026-10-12T12:00:00Z", "2026-10-12T12:35:00Z"), row("2026-10-12T13:00:00Z", "2026-10-12T13:10:00Z")];
+  assert.equal(parseTypicalSeconds(JSON.stringify(runs)), 32.5 * 60);
+  assert.equal(parseTypicalSeconds(JSON.stringify(runs.slice(0, 3))), 35 * 60);
+  assert.equal(parseTypicalSeconds(JSON.stringify(runs.slice(0, 2))), null, "two runs are not a history");
+  assert.equal(parseTypicalSeconds(JSON.stringify([...runs.slice(0, 2), { createdAt: "x", updatedAt: "y" }, row("2026-10-12T12:00:00Z", "2026-10-12T11:00:00Z")])), null, "bad and negative durations are skipped");
+  assert.equal(parseTypicalSeconds("[]"), null);
+  assert.equal(parseTypicalSeconds("not json"), null);
+  assert.equal(parseTypicalSeconds("{}"), null);
+});
+
+test("the wait step names the workflows still running; a verdict carries how long the runs took", () => {
+  const first = drive([[run({ status: "in_progress", conclusion: null, workflow: "lint" }), run({ id: 2, workflow: "build" })]])[0];
+  assert.deepEqual(first?.kind === "wait" ? first.runningNames : null, ["lint"]);
+  const finished = [run({ createdAtMs: T0 + 1_000, updatedAtMs: T0 + 9 * MIN }), run({ id: 2, createdAtMs: T0 + 2_000, updatedAtMs: T0 + 5 * MIN })];
+  const last = drive([finished, finished, finished, finished]).at(-1);
+  assert.equal(last?.kind === "done" ? last.verdict.durationMs : -1, 9 * MIN - 1_000);
+  const unknown = [run({ updatedAtMs: 0 })];
+  const noClock = drive([unknown, unknown, unknown, unknown]).at(-1);
+  assert.equal(noClock?.kind === "done" ? noClock.verdict.durationMs : -1, null);
+});
+
+test("a typical-time lookup counts in the 45-call ceiling: a watch that made one stops one poll sooner", () => {
+  const running = [run({ status: "in_progress", conclusion: null })];
+  const count = (start: CiWatchProgress): number => {
+    let progress = start;
+    let polls = 0;
+    for (;;) {
+      const step = ciWatchStep(progress, running, TARGET);
+      polls += 1;
+      if (step.kind !== "wait") return polls;
+      progress = step.progress;
+    }
+  };
+  assert.equal(count(newCiWatchProgress()), CI_WATCH_MAX_POLLS);
+  assert.equal(count(noteCiLookup(newCiWatchProgress())), CI_WATCH_MAX_POLLS - 1);
 });
 
 test("band rows: every line fits the width, a watch past the cap is dropped, a finished row goes after its keep time", () => {
