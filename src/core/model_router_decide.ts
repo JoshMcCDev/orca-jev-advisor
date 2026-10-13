@@ -303,7 +303,17 @@ export function shiftForPressure(tier: RouterTier, band: QuotaBand, guards: read
 // §6.3 session start (point A)
 // ---------------------------------------------------------------------------
 
-export type StartReason = "jev-failed" | "held-by-guard" | "same" | "switch";
+export type StartReason = "jev-failed" | "jev-payment" | "held-by-guard" | "same" | "switch";
+
+/**
+ * G8 (odd/tasks/router-cache-ttl.md): a decision made without Jev because
+ * Jev answered HTTP 402 -- the key's account has no credit or plan -- is
+ * named `jev-payment` instead of `jev-failed`. It decides nothing else
+ * differently.
+ */
+export function withJevPayment<D extends { readonly reason: string }>(decision: D, payment: boolean): D | (Omit<D, "reason"> & { readonly reason: "jev-payment" }) {
+  return payment && decision.reason === "jev-failed" ? { ...decision, reason: "jev-payment" } : decision;
+}
 
 export interface RouterDecision {
   /** The (collapsed) tier Jev chose; null when Jev failed. */

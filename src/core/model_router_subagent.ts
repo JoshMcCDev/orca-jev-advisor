@@ -46,7 +46,7 @@ export function explicitModelRank(tiers: ResolvedTiers, model: string): number |
   return modelRank(tiers, model);
 }
 
-export type SubagentReason = "jev-failed" | "same" | "switch" | "held-by-guard" | "explicit" | "explicit-upgrade" | "explicit-lowered";
+export type SubagentReason = "jev-failed" | "jev-payment" | "same" | "switch" | "held-by-guard" | "explicit" | "explicit-upgrade" | "explicit-lowered";
 
 /** 0.6.8 T7: what the router does with a model the spawn already fixed. */
 export type ExplicitModelsPolicy = "judge" | "keep";

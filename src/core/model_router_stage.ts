@@ -406,6 +406,7 @@ export interface StageDecisionInput {
 
 export type StageReason =
   | "jev-failed"
+  | "jev-payment"
   | "same"
   | "upgrade"
   | "low-confidence"

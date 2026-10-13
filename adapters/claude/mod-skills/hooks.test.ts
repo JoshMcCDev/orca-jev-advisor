@@ -173,6 +173,15 @@ const LEGACY_TOOL_MEASUREMENTS_PATH = `${CACHE_DIR}/mod-tools-measurements.jsonl
 /** The engine's own limit: `$.fs.read` and `$.fs.write` reject above 4 MiB. */
 const FS_LIMIT_BYTES = 4 * 1024 * 1024;
 
+/** G8: a fetchQueue entry the fake fetch answers with this HTTP status (402: the key's account has no credit). */
+function httpFailure(status: number): { readonly httpStatus: number } {
+  return { httpStatus: status };
+}
+
+function isHttpFailure(value: unknown): value is { readonly httpStatus: number } {
+  return typeof value === "object" && value !== null && "httpStatus" in value && typeof value.httpStatus === "number";
+}
+
 /** Builds a fake `$` (EngineInterface) backed by `host`'s mutable state. */
 function makeFakeEngine(host: FakeHost): unknown {
   let clockNow = Date.parse("2026-09-25T10:00:00.000Z");
@@ -268,6 +277,8 @@ function makeFakeEngine(host: FakeHost): unknown {
         host.fetchCalls.push({ url, body: init?.body });
         const next = host.fetchQueue.shift();
         if (next === undefined) throw new Error("fake fetch: response queue exhausted -- a test queued fewer canned Jev answers than the code under test called");
+        // G8: a queued `httpFailure(status)` answers that HTTP status instead of a Jev answer.
+        if (isHttpFailure(next)) return { ok: false, status: next.httpStatus, headers: {}, text: "" } satisfies FakeHttpResponse;
         const response: FakeHttpResponse = { ok: true, status: 200, headers: {}, text: JSON.stringify(next) };
         return response;
       },
@@ -1877,6 +1888,23 @@ test("R7: an applied upgrade logs the rewrite it paid, and a known cold cache ma
   }
 });
 
+test("G8: a Jev answer of 402 (no credit) names the router rows jev-payment, at start and at a stage, instead of jev-failed", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.fetchQueue.push(httpFailure(402), httpFailure(402));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  const turn1 = await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 1);
+  const turn2 = await playTurn(host, handlers, engine, 2, "thanks, now list the files you touched", 1);
+  assert.deepEqual([turn1.model, turn2.model], ["claude-opus-5-5", "claude-opus-5-5"], "nothing changes, as with any Jev failure");
+  assert.deepEqual(routerDecisionLines(host).map((row) => [row.point, row.reason]), [["start", "jev-payment"], ["stage", "jev-payment"]]);
+  const other = makeFakeHost();
+  seedRouterAccount(other);
+  other.fetchQueue.push(httpFailure(401));
+  const loaded = loadHooks(other);
+  await playTurn(other, loaded.handlers, loaded.engine, 1, "design it", 1);
+  assert.equal(routerDecisionLines(other)[0]?.reason, "jev-failed", "any other failure stays jev-failed");
+});
+
 // ---------------------------------------------------------------------------
 // JEV-060 slice 2, T8: subagent routing (point B) on agent.spawn.
 // ---------------------------------------------------------------------------
@@ -1921,6 +1949,20 @@ test("router, active, subagent: no explicit model -- the tier's full id", async 
   assert.equal(decision?.point, "subagent");
   assert.equal(decision?.applied, true);
   assert.equal(JSON.stringify(decision).includes("summarise"), false, "no prompt text in the log");
+});
+
+test("G8: a subagent judged into a 402 logs jev-payment and spawns as it came", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.fetchQueue.push(httpFailure(402));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  const event = spawnEvent();
+  assert.deepEqual(await spawnThrough(handlers, engine, event), event);
+  await stepThrough(handlers, engine, turnStepEvent({ agentId: "agent-1", turnId: "sub-1", index: 0, model: "claude-opus-5-5", effort: undefined }));
+  const [decision] = routerDecisionLines(host);
+  assert.equal(decision?.point, "subagent");
+  assert.equal(decision?.reason, "jev-payment");
+  assert.equal(decision?.applied, false);
 });
 
 test("router, measure, subagent: logs, changes nothing", async () => {

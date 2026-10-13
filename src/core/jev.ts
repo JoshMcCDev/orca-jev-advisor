@@ -329,6 +329,11 @@ export function jevFailureOf(error: unknown): JevFailure | null {
   return error instanceof JevTimeoutError || error instanceof JevRequestError ? error.failure : null;
 }
 
+/** G8: HTTP 402 Payment Required -- the TypeSafe account behind the key has no credit or plan. It lasts until someone pays, unlike an unreachable Jev. */
+export function isJevPaymentFailure(failure: JevFailure | null): boolean {
+  return failure !== null && failure.kind === "http4xx" && failure.status === 402;
+}
+
 export interface CallJevOptions {
   /** Hard latency budget in milliseconds; enforced via AbortController. */
   budgetMs?: number;

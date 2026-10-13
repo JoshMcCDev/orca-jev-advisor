@@ -26,6 +26,9 @@
 // a reached backend resets the run, so a later outage earns a fresh warning
 // instead of the marker going stale forever.
 
+import { isJevPaymentFailure } from "./jev.ts";
+import type { JevFailure } from "./jev.ts";
+
 export interface UnreachableNoticeDecision {
   /** True when gate-bash.ts should emit the one-time-per-run "Jev is unreachable" notice this call. */
   readonly shouldWarn: boolean;
@@ -52,4 +55,15 @@ export function decideUnreachableNotice(
   const effectiveThreshold = threshold < 1 ? 1 : threshold;
   const nextConsecutiveFailures = consecutiveFailures + 1;
   return { shouldWarn: nextConsecutiveFailures === effectiveThreshold, nextConsecutiveFailures };
+}
+
+/**
+ * G8: the catalog key of that notice. A 402 is Jev answering that the key's
+ * account has no credit or plan, so it is said as such ("jevNoCredit"),
+ * never as an unreachable Jev; every other failure keeps "jevUnreachable".
+ * The command still passes and its row stays `unreachable`, with the 402 in
+ * its failure detail.
+ */
+export function unreachableNoticeKey(failure: JevFailure | null): "jevNoCredit" | "jevUnreachable" {
+  return isJevPaymentFailure(failure) ? "jevNoCredit" : "jevUnreachable";
 }

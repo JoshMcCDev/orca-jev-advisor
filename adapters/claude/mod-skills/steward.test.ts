@@ -126,6 +126,8 @@ function makeEngine(host: FakeHost): unknown {
         host.fetchCalls.push(url);
         const next = host.fetchQueue.shift();
         if (next === undefined || next === "fail") throw new Error("fake fetch: Jev unreachable");
+        // G8: "payment" answers HTTP 402, a key whose account has no credit.
+        if (next === "payment") return { ok: false, status: 402, headers: {}, text: "" };
         return { ok: true, status: 200, headers: {}, text: JSON.stringify(next) };
       },
     },
@@ -293,6 +295,15 @@ test("steward, active: at 80% of the window it compacts even mid-task", async ()
   await personTurn(host, engine, "sigue", verdict("mid-task", 0.9));
   assert.equal(host.compactCalls.length, 1);
   assert.equal(stewardLog(host)[0]?.decision, "hard-limit");
+});
+
+test("G8: a Jev answer of 402 is logged jev-payment, and compacts nothing", async () => {
+  const host = makeHost();
+  const engine = load(host);
+  setSteward(host, "active");
+  await personTurn(host, engine, "sigue", "payment");
+  assert.equal(host.compactCalls.length, 0);
+  assert.equal(stewardLog(host)[0]?.decision, "jev-payment");
 });
 
 test("steward, active: a Jev failure means no compaction", async () => {

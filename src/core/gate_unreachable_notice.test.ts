@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decideUnreachableNotice } from "./gate_unreachable_notice.ts";
+import { decideUnreachableNotice, unreachableNoticeKey } from "./gate_unreachable_notice.ts";
 
 test("backend reached -- resets the counter to 0 and never warns, regardless of prior failures", () => {
   const decision = decideUnreachableNotice(true, 5, 3);
@@ -85,4 +85,11 @@ test("a threshold below 1 still only warns once per run of failures, not on ever
   const second = decideUnreachableNotice(false, first.nextConsecutiveFailures, 1);
   assert.equal(second.shouldWarn, false);
   assert.equal(second.nextConsecutiveFailures, 2);
+});
+
+test("G8: a 402 (the key has no credit or plan) gets its own notice, never the unreachable one", () => {
+  assert.equal(unreachableNoticeKey({ kind: "http4xx", status: 402 }), "jevNoCredit");
+  for (const failure of [{ kind: "http4xx", status: 400 } as const, { kind: "http5xx", status: 502 } as const, { kind: "network" } as const, { kind: "timeout" } as const, null]) {
+    assert.equal(unreachableNoticeKey(failure), "jevUnreachable", JSON.stringify(failure));
+  }
 });

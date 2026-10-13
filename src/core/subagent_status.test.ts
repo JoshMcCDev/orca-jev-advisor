@@ -39,6 +39,9 @@ test("subagentWhy: no decision, or no Jev answer, is the inherited model (or the
   assert.equal(subagentWhy({ decision: null, applied: false, explicit: true }), "explicit");
   assert.equal(subagentWhy({ decision: decision({ reason: "jev-failed", tier: null }), applied: false, explicit: false }), "no-jev");
   assert.equal(subagentWhy({ decision: decision({ reason: "jev-failed", tier: null }), applied: false, explicit: true }), "explicit");
+  // G8: a 402 (the key has no credit) is Jev failing too.
+  assert.equal(subagentWhy({ decision: decision({ reason: "jev-payment", tier: null }), applied: false, explicit: false }), "no-jev");
+  assert.equal(subagentWhy({ decision: decision({ reason: "jev-payment", tier: null }), applied: false, explicit: true }), "explicit");
   assert.equal(subagentWhy({ decision: decision({ reason: "same" }), applied: false, explicit: false }), "same");
 });
 
