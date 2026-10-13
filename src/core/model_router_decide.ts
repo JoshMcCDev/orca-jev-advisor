@@ -20,6 +20,7 @@ import { baseModelId, collapseTier, modelRank, ROUTER_TIERS, tierOfModel } from 
 import type { EngineFallbackReason, EngineNotes, ResolvedTiers, RouterTier } from "./model_router_accounts.ts";
 import { redactSecretsForJev } from "./secret_redaction.ts";
 import type { WorkKindRecord } from "./work_kind.ts";
+import type { CacheUnknown } from "./cache_warmth.ts";
 
 export type RouterEffort = "low" | "medium" | "high" | "xhigh";
 
@@ -462,6 +463,8 @@ export interface RouterDecisionRecord {
   readonly engineVersionUnknown?: true;
   /** Track R: whether the prompt cache was warm when a stage decision weighed a switch; null unknown (which counts as warm). */
   readonly cacheWarm?: boolean | null;
+  /** R6: why `cacheWarm` is null; present only then. */
+  readonly cacheUnknown?: CacheUnknown;
   /** Track R, measure mode: a switch only the cold cache made pay, not applied. */
   readonly wouldApplyCold?: true;
   /** Track R, active mode: a switch only the cold cache made pay, applied. */
@@ -494,6 +497,8 @@ export interface RouterDecisionRecordInput {
   readonly engine?: EngineNotes;
   /** Track R: whether the prompt cache was warm at a stage decision; null unknown; absent on rows that never weigh it. */
   readonly cacheWarm?: boolean | null;
+  /** R6: why the cache is unknown (`cacheUnknownOf`); written only when `cacheWarm` is null. */
+  readonly cacheUnknown?: CacheUnknown | null;
   /** Track R: `switchedByColdCache` -- the switch passed break-even only because the cache was cold. */
   readonly coldSwitch?: boolean;
 }
@@ -530,6 +535,7 @@ export function routerDecisionRecord(input: RouterDecisionRecordInput): RouterDe
     ...(input.engine?.fallbackReason === undefined ? {} : { fallbackReason: input.engine.fallbackReason }),
     ...(input.engine?.engineVersionUnknown === undefined ? {} : { engineVersionUnknown: input.engine.engineVersionUnknown }),
     ...(input.cacheWarm === undefined ? {} : { cacheWarm: input.cacheWarm }),
+    ...(input.cacheWarm === null && input.cacheUnknown !== undefined && input.cacheUnknown !== null ? { cacheUnknown: input.cacheUnknown } : {}),
     ...(input.coldSwitch !== true ? {} : input.applied ? { appliedCold: true as const } : { wouldApplyCold: true as const }),
   };
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CACHE_TTL_1H_MS, CACHE_TTL_5M_MS, cacheClockUnknown, cacheWarm, cacheWarmth, foundTranscriptPath, mergeCacheTail, parseCacheClock, readCacheTail, transcriptFindArgv, transcriptPathOf } from "./cache_warmth.ts";
+import { CACHE_TTL_1H_MS, CACHE_TTL_5M_MS, cacheClockUnknown, cacheUnknownOf, cacheWarm, cacheWarmth, foundTranscriptPath, mergeCacheTail, parseCacheClock, readCacheTail, transcriptFindArgv, transcriptPathOf } from "./cache_warmth.ts";
 
 const AT = "2026-10-12T10:00:00.000Z";
 const AT_MS = Date.parse(AT);
@@ -109,4 +109,12 @@ test("R5: a tail merges into the stored clock: its TTL when it has one, the late
   assert.deepEqual(mergeCacheTail(stored, { ttlMs: CACHE_TTL_5M_MS, lastMainAt: AT_MS }), { ttlMs: CACHE_TTL_5M_MS, lastMainAt: AT_MS + 500 });
   assert.deepEqual(mergeCacheTail({ ttlMs: CACHE_TTL_1H_MS, lastMainAt: null }, { ttlMs: null, lastMainAt: AT_MS }), { ttlMs: CACHE_TTL_1H_MS, lastMainAt: AT_MS });
   assert.deepEqual(mergeCacheTail({ ttlMs: null, lastMainAt: null }, { ttlMs: null, lastMainAt: null }), { ttlMs: null, lastMainAt: null });
+});
+
+test("R6: an unknown cache says why: the tail read failed, else no TTL, else no last request; a known one says nothing", () => {
+  assert.equal(cacheUnknownOf({ ttlMs: null, lastMainAt: null }, true), "tail-failed");
+  assert.equal(cacheUnknownOf({ ttlMs: null, lastMainAt: AT_MS }, false), "no-ttl");
+  assert.equal(cacheUnknownOf({ ttlMs: null, lastMainAt: null }, false), "no-ttl");
+  assert.equal(cacheUnknownOf({ ttlMs: CACHE_TTL_5M_MS, lastMainAt: null }, false), "no-last-request");
+  assert.equal(cacheUnknownOf({ ttlMs: CACHE_TTL_5M_MS, lastMainAt: AT_MS }, false), null);
 });

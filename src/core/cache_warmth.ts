@@ -75,6 +75,16 @@ export function readCacheTail(tail: string): CacheClock {
   return { ttlMs, lastMainAt };
 }
 
+/** R6: why `cacheWarmth` is null: the transcript read failed, no TTL was found, or no main request is known. */
+export type CacheUnknown = "no-ttl" | "no-last-request" | "tail-failed";
+
+/** R6: the reason a clock is unknown (`tailFailed`: a read was needed and none answered); null when it is known. */
+export function cacheUnknownOf(clock: CacheClock, tailFailed: boolean): CacheUnknown | null {
+  if (!cacheClockUnknown(clock)) return null;
+  if (tailFailed) return "tail-failed";
+  return clock.ttlMs === null ? "no-ttl" : "no-last-request";
+}
+
 /** true warm, false cold, null unknown (no TTL or no last request). */
 export function cacheWarmth(clock: CacheClock, nowMs: number): boolean | null {
   if (clock.ttlMs === null || clock.lastMainAt === null) return null;

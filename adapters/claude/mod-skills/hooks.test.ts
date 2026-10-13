@@ -1842,7 +1842,18 @@ test("R5: a transcript that cannot be read leaves the cache unknown and the turn
   };
   const stages = await stoplessTurns(host, 6 * 60_000);
   assert.deepEqual(stages.map((row) => row.cacheWarm), [null, null]);
+  assert.deepEqual(stages.map((row) => row.cacheUnknown), ["tail-failed", "tail-failed"]);
   assert.deepEqual(stages.map((row) => row.reason), ["hysteresis", "break-even"]);
+});
+
+test("R6: a transcript with no cache write says no-ttl; a known cache carries no cacheUnknown", async () => {
+  const host = makeFakeHost();
+  host.transcripts.set(OWN_TRANSCRIPT, `${JSON.stringify({ type: "user", timestamp: "2026-09-25T10:00:00.000Z" })}\n`);
+  const stages = await stoplessTurns(host, 6 * 60_000);
+  assert.deepEqual(stages.map((row) => [row.cacheWarm, row.cacheUnknown]), [[null, "no-ttl"], [null, "no-ttl"]]);
+  const known = makeFakeHost();
+  known.transcripts.set(OWN_TRANSCRIPT, `${transcriptRow("5m")}\n`);
+  for (const row of await stoplessTurns(known, 6 * 60_000)) assert.equal(hasKey(row, "cacheUnknown"), false);
 });
 
 // ---------------------------------------------------------------------------

@@ -26,7 +26,9 @@ Out of scope: deferring upgrades to a cold cache; Windows (`tail` is not there; 
 - [x] R5 TTL from the router's own path
   - RED: `src/core/cache_warmth.test.ts` failed to load (the new `transcriptPathOf`, `transcriptFindArgv`, `foundTranscriptPath`, `cacheClockUnknown`, `mergeCacheTail` did not exist); `hooks.test.ts` "R5: with classic.Stop never fired, …" and "R5: … found by session id" failed with stage rows `cacheWarm` `[null, null]`.
   - GREEN: cache_warmth.test.ts 16/16; hooks.test.ts R2+R5 9/9 (stage rows `[true, false]` from the session's own transcript, `[true, true]` through `find` with `~/.claude`; a find that cannot start leaves `[null, null]` and the same reasons); hooks.test.ts 238/238.
-- [ ] R6 `cacheUnknown` reason on the row
+- [x] R6 `cacheUnknown` reason on the row
+  - RED: cache_warmth.test.ts failed to load (no `cacheUnknownOf`); model_router_decide.test.ts "R6: a row whose cache is unknown says why; …" failed (tsc: `cacheUnknown` not in `RouterDecisionRecordInput`); hooks.test.ts "R5: a transcript that cannot be read …" (`cacheUnknown` `[undefined, undefined]`) and "R6: a transcript with no cache write says no-ttl; …" failed.
+  - GREEN: cache_warmth + model_router_decide + hooks: 317/317; typecheck clean.
 - [ ] R7 cost of applied upgrades logged
 - [ ] G8 402 named as "no credit"
 - [ ] Release 0.8.3 (docs, version, QA)
