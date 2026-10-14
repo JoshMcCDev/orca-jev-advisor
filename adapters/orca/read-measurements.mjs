@@ -50,11 +50,13 @@ import { ceilingEvidence, summarizeApprovals } from '../../src/core/approval_rec
 import { foldAbResults } from '../../src/core/ab_report.ts'
 import { DEFAULT_MOD_SKILLS_READINESS_THRESHOLDS, evaluateModSkillsReadiness } from '../../src/core/mod_skills_readiness.ts'
 import { modSkillsProjectName } from '../../src/core/project_name.ts'
-import { guardGateDecisionRows, readGateAppendFailures, readGateDecisionLog } from './log-files.mjs'
+import { boardWindowsOfGateLog, guardGateDecisionRows, perBoardWindow, readGateAppendFailures, readGateDecisionLog } from './log-files.mjs'
+import { boardWindows, isInWindow, versionStartOf } from '../../src/core/board_windows.ts'
 import { HUMAN_QUEUE_FILE, parseHumanQueue, waitingItems } from '../../src/core/human_queue.ts'
 import { measurementFilesToRead } from '../../src/core/measurement_files.ts'
 import { CI_WATCH_DECISIONS_FILE_PATTERN, summarizeCiWatchRows } from '../../src/core/ci_watch.ts'
 import { MEMORY_DECISIONS_FILE_PATTERN, summarizeMemoryDecisions } from '../../src/core/memory_shadow.ts'
+import { summarizeVerifyDoneDecisions, VERIFY_DONE_DECISIONS_FILE_PATTERN } from '../../src/core/verify_done.ts'
 
 const CACHE_DIR = resolveCacheDir(normalizePlatform(process.platform), { home: homedir(), appDataDir: process.env.APPDATA, localAppDataDir: process.env.LOCALAPPDATA, xdgCacheHome: process.env.XDG_CACHE_HOME })
 const APPROVALS_LOG_PATH = join(CACHE_DIR, 'gate-approvals.jsonl')
@@ -112,11 +114,11 @@ function topByCount (counts, limit) {
 // guardGateDecisionRows: shared with read-activity.mjs and the fold, so the
 // readers of the gate log can never drift onto two different guards.
 
-async function aggregateGate () {
+async function aggregateGate (gateLog, now) {
   // 0.6.17 T4: the hourly files and the legacy single file, in order.
   // 0.6.21 T1: after the totals of the files already folded, which every
   // figure below continues -- a fold never moves one of them.
-  const { rows, corrupt, totals } = await readGateDecisionLog(CACHE_DIR)
+  const { rows, corrupt, totals } = gateLog
   const { records: decisions, malformed } = guardGateDecisionRows(rows)
   const combined = addGateDecisions(totals, { records: decisions, corruptLines: corrupt, malformedRows: malformed, jevRecordsForAb: 0 })
 
@@ -126,7 +128,6 @@ async function aggregateGate () {
   // kept readable (project/family/source/verdict/latency), never the raw `id`.
   const summary = summarizeGateTally(combined.all)
   const { pending, outcomes } = await readApprovalRecords()
-  const now = Date.now()
 
   return {
     ...summary,
@@ -142,7 +143,6 @@ async function aggregateGate () {
   }
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000
 /** The board's interventions table stops here; everything past it is one "rest" row. */
 const INTERVENTION_ROWS = 15
 
@@ -259,34 +259,33 @@ function gateWindow (fields, summary, pending, outcomes, now) {
  * more than 8 days old.
  */
 function buildGateWindows (combined, allSummary, decisions, pending, outcomes, now) {
-  const timeWindow = (key, spanMs) => {
-    const sinceMs = now - spanMs
-    return gateWindow(
-      { key, available: true, pluginVersion: null, since: new Date(sinceMs).toISOString() },
-      foldGateDecisions(decisions.filter((d) => isAtOrAfter(d.at, sinceMs))),
-      pending.filter((p) => isAtOrAfter(p.at, sinceMs)),
-      outcomes, now)
-  }
+  // odd/tasks/board-global-window.md W1: the same four windows every other
+  // reader uses (src/core/board_windows.ts). Every gate window covers all it
+  // asks for: day and week read the live files (8 days), and "all" and
+  // "version" read the folded totals, which keep every decision ever counted.
+  const windows = boardWindows(now, versionStartOf(combined))
+  const bounds = (window) => ({ sinceMs: window.sinceMs, coverageSinceMs: window.sinceMs })
+  const timeWindow = (window) => gateWindow(
+    { key: window.key, available: true, pluginVersion: null, since: new Date(window.sinceMs).toISOString(), ...bounds(window) },
+    foldGateDecisions(decisions.filter((d) => { const ms = atMs(d.at); return ms !== null && isInWindow(ms, window, now) })),
+    pending.filter((p) => isAtOrAfter(p.at, window.sinceMs)),
+    outcomes, now)
 
-  const version = combined.latestStamped === null ? null : combined.latestStamped.pluginVersion
-  const ofVersion = version === null ? undefined : combined.byVersion.find(([name]) => name === version)?.[1]
-  let versionWindow
-  if (version === null || ofVersion === undefined) {
-    versionWindow = gateWindow({ key: 'version', available: false, pluginVersion: null, since: null }, foldGateDecisions([]), [], outcomes, now)
-  } else {
-    const firstMs = ofVersion.firstAtMs
-    versionWindow = gateWindow(
-      { key: 'version', available: true, pluginVersion: version, since: firstMs === null ? null : new Date(firstMs).toISOString() },
+  const version = windows.version
+  const ofVersion = version.available ? combined.byVersion.find(([name]) => name === version.pluginVersion)?.[1] : undefined
+  const versionWindow = ofVersion === undefined
+    ? gateWindow({ key: 'version', available: false, pluginVersion: null, since: null, sinceMs: null, coverageSinceMs: null }, foldGateDecisions([]), [], outcomes, now)
+    : gateWindow(
+      { key: 'version', available: true, pluginVersion: version.pluginVersion, since: new Date(version.sinceMs).toISOString(), ...bounds(version) },
       summarizeGateTally(ofVersion.tally),
-      firstMs === null ? [] : pending.filter((p) => isAtOrAfter(p.at, firstMs)),
+      pending.filter((p) => isAtOrAfter(p.at, version.sinceMs)),
       outcomes, now)
-  }
 
   return {
     version: versionWindow,
-    day: timeWindow('day', DAY_MS),
-    week: timeWindow('week', 7 * DAY_MS),
-    all: gateWindow({ key: 'all', available: true, pluginVersion: null, since: null }, allSummary, pending, outcomes, now),
+    day: timeWindow(windows.day),
+    week: timeWindow(windows.week),
+    all: gateWindow({ key: 'all', available: true, pluginVersion: null, since: null, sinceMs: null, coverageSinceMs: null }, allSummary, pending, outcomes, now),
   }
 }
 
@@ -334,14 +333,10 @@ async function aggregateNotRunByCommandFamily () {
 
 const MEMORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
-/**
- * The memory module's week (odd/tasks/memory-shadow.md, M14): the hourly
- * memory-decisions files the mod writes, summarized for the Modules card.
- * Only the files whose hour can hold a row of the window are read; the rows
- * carry counts and types, never memory content.
- */
-async function aggregateMemory () {
-  const now = Date.now()
+/** Every row of one module's hourly log (`pattern`, e.g. memory-decisions-*),
+ *  oldest file first. These logs are never pruned, so the board's "all"
+ *  window reads them whole; a missing cache dir is no rows. */
+async function readModuleRows (pattern) {
   let names
   try {
     names = await readdir(CACHE_DIR)
@@ -349,14 +344,42 @@ async function aggregateMemory () {
     if (error?.code !== 'ENOENT') throw error
     names = []
   }
-  const sinceHour = new Date(now - MEMORY_WINDOW_MS).toISOString().slice(0, 13)
   const rows = []
-  for (const name of names.sort()) {
-    const match = MEMORY_DECISIONS_FILE_PATTERN.exec(name)
-    if (match === null || match[1] < sinceHour) continue
+  for (const name of names.filter((file) => pattern.test(file)).sort()) {
     rows.push(...(await readJsonl(join(CACHE_DIR, name))).rows)
   }
-  return summarizeMemoryDecisions(rows, now, MEMORY_WINDOW_MS)
+  return rows
+}
+
+function pick (summary, keys) {
+  const figures = {}
+  for (const key of keys) figures[key] = summary[key]
+  return figures
+}
+
+/**
+ * odd/tasks/board-global-window.md W3: the memory, CI watcher and verify-done
+ * modules for the board's Modules tab, one entry per board window holding
+ * only the figures its card shows (the same summarizers the config panel's
+ * weekly lines use, src/core/memory_shadow.ts, ci_watch.ts, verify_done.ts).
+ * `memory.latest` is where the module last saw itself save: right now, not a
+ * window. These logs are never pruned, so every window covers all it asks.
+ */
+function moduleWindows (windows, now, rows) {
+  const memoryFigures = ['decisions', 'engramSaved', 'engramFailed', 'written', 'mainEngramSaves', 'agreementRate', 'judgePending']
+  const ciFigures = ['watches', 'finished', 'failed', 'ghCalls', 'pollsReplaced']
+  return {
+    memory: {
+      latest: summarizeMemoryDecisions(rows.memory, now, Number.POSITIVE_INFINITY).latest,
+      windows: perBoardWindow(windows, now, null, (_window, spanMs) => pick(summarizeMemoryDecisions(rows.memory, now, spanMs), memoryFigures)),
+    },
+    ciWatch: {
+      windows: perBoardWindow(windows, now, null, (_window, spanMs) => pick(summarizeCiWatchRows(rows.ciWatch, now, spanMs), ciFigures)),
+    },
+    verifyDone: {
+      windows: perBoardWindow(windows, now, null, (_window, spanMs) => summarizeVerifyDoneDecisions(rows.verifyDone, now, spanMs)),
+    },
+  }
 }
 
 /** The skill-selection log across the legacy single file and its hourly files (src/core/measurement_files.ts). */
@@ -378,35 +401,49 @@ async function readModSkillsRows () {
   return { rows, corrupt }
 }
 
-/** The CI watcher's card shows a week (odd/tasks/ci-watcher.md C6). */
+/** The CI watcher's card in the config panel shows a week (odd/tasks/ci-watcher.md C6). */
 const CI_WATCH_WINDOW_MS = 7 * 24 * 3_600_000
 
 /**
- * What the CI watcher did in the last seven days, from its hourly decision
- * files (src/core/ci_watch.ts summarizeCiWatchRows). A day more of files is
- * opened than the window needs, since a file is named for its hour; the rows
- * decide what counts. No file at all is a summary of nothing, which the panel
- * shows as "no watches yet", never as zeros.
+ * odd/tasks/board-global-window.md W1: the figures the board's skills card
+ * shows, for one window. A decision whose time does not read counts only
+ * where there is no lower bound ("all"), the same rule the gate follows.
  */
-async function aggregateCiWatch () {
-  let names
-  try {
-    names = await readdir(CACHE_DIR)
-  } catch (error) {
-    if (error?.code === 'ENOENT') names = []
-    else throw error
+function modSkillsFigures (decisions, observationById, window, now) {
+  let count = 0
+  let suggestedCount = 0
+  let comparableCount = 0
+  let matchedCount = 0
+  let listing = 0
+  let listingSamples = 0
+  for (const d of decisions) {
+    const ms = typeof d.at === 'string' ? atMs(d.at) : null
+    if (ms === null ? window.sinceMs !== null : !isInWindow(ms, window, now)) continue
+    count += 1
+    if (isRecord(d.decision) && typeof d.decision.name === 'string') suggestedCount += 1
+    const countsAsNotSent = d.listingWithheld === undefined || d.listingWithheld === true
+    if (countsAsNotSent && typeof d.listingChars === 'number' && Number.isFinite(d.listingChars)) {
+      listing += d.listingChars
+      listingSamples += 1
+    }
+    const observation = d.mode === 'measurement' ? observationById.get(d.id) : undefined
+    if (observation) {
+      comparableCount += 1
+      const suggestedName = isRecord(d.decision) ? d.decision.name : null
+      if (suggestedName !== null && suggestedName === observation.skill) matchedCount += 1
+    }
   }
-  const now = Date.now()
-  const earliestDay = new Date(now - CI_WATCH_WINDOW_MS - 24 * 3_600_000).toISOString().slice(0, 10)
-  const rows = []
-  for (const name of names.filter((file) => CI_WATCH_DECISIONS_FILE_PATTERN.test(file)).sort()) {
-    if (name.slice('ci-watch-decisions-'.length, 'ci-watch-decisions-'.length + 10) < earliestDay) continue
-    rows.push(...(await readJsonl(join(CACHE_DIR, name))).rows)
+  return {
+    decisions: count,
+    suggestedCount,
+    comparableCount,
+    matchedCount,
+    matchRate: comparableCount > 0 ? matchedCount / comparableCount : null,
+    listingCharsTotal: listingSamples > 0 ? listing : null,
   }
-  return summarizeCiWatchRows(rows, now, CI_WATCH_WINDOW_MS)
 }
 
-async function aggregateModSkills () {
+async function aggregateModSkills (windows, now) {
   const { rows, corrupt } = await readModSkillsRows()
   const decisions = rows.filter((r) => r.type === 'decision')
   const observations = rows.filter((r) => r.type === 'observation')
@@ -498,6 +535,8 @@ async function aggregateModSkills () {
     fitLatencyMeanMs: mean(fitLatencies),
     byProject: topByCount(byProject, 10),
     readiness,
+    // The skills log is never pruned: every window speaks for all it asks.
+    windows: perBoardWindow(windows, now, null, (window) => modSkillsFigures(decisions, observationById, window, now)),
   }
 }
 
@@ -700,15 +739,23 @@ async function aggregateAbBenchmark () {
 async function main () {
   let result
   try {
-    const [gate, modSkills, approvals, abBenchmark, ciWatch, memory] = await Promise.all([
-      aggregateGate(),
-      aggregateModSkills(),
+    const now = Date.now()
+    const gateLog = await readGateDecisionLog(CACHE_DIR)
+    const windows = boardWindowsOfGateLog(gateLog, now)
+    const [gate, modSkills, approvals, abBenchmark, memoryRows, ciWatchRows, verifyDoneRows] = await Promise.all([
+      aggregateGate(gateLog, now),
+      aggregateModSkills(windows, now),
       aggregateApprovals(),
       aggregateAbBenchmark(),
-      aggregateCiWatch(),
-      aggregateMemory(),
+      readModuleRows(MEMORY_DECISIONS_FILE_PATTERN),
+      readModuleRows(CI_WATCH_DECISIONS_FILE_PATTERN),
+      readModuleRows(VERIFY_DONE_DECISIONS_FILE_PATTERN),
     ])
-    result = { ok: true, gate, modSkills, approvals, abBenchmark, ciWatch, memory }
+    // The config panel's weekly lines (unchanged), and the board's windows.
+    const ciWatch = summarizeCiWatchRows(ciWatchRows, now, CI_WATCH_WINDOW_MS)
+    const memory = summarizeMemoryDecisions(memoryRows, now, MEMORY_WINDOW_MS)
+    const modules = moduleWindows(windows, now, { memory: memoryRows, ciWatch: ciWatchRows, verifyDone: verifyDoneRows })
+    result = { ok: true, gate, modSkills, approvals, abBenchmark, ciWatch, memory, modules }
   } catch (error) {
     result = { ok: false, reason: 'excepcion', detail: String(error?.message ?? error).slice(0, 300) }
   }

@@ -15,6 +15,8 @@
 // qualifying data reads back as `null`, never a fabricated zero; only an
 // honest count (e.g. `stepCount: 0`) is ever a real zero.
 
+import type { BoardWindow } from "./board_windows.ts";
+import { isInWindow } from "./board_windows.ts";
 import { isRecord } from "../guards.ts";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +62,8 @@ export interface TurnUsageRecord {
 export interface ModelUsageShare {
   readonly model: string;
   readonly stepCount: number;
+  /** The model's own total (input+output+cacheRead+cacheWrite, nulls skipped); null when it reported no figure at all. */
+  readonly tokens: number | null;
   readonly inputShare: number | null;
   readonly cacheReadShare: number | null;
   readonly cacheWriteShare: number | null;
@@ -137,6 +141,7 @@ function modelShareFor(model: string, steps: readonly TurnUsageRecord[]): ModelU
   return {
     model,
     stepCount: steps.length,
+    tokens: hasAnyData ? total : null,
     inputShare: share(input.sum),
     cacheReadShare: share(cacheRead.sum),
     cacheWriteShare: share(cacheWrite.sum),
@@ -208,6 +213,18 @@ export function aggregateTurnUsage(records: readonly TurnUsageRecord[], nowMs: n
     last24h: summarizeWindow(windowSteps(LAST_24H_MS)),
     last7d: summarizeWindow(windowSteps(LAST_7D_MS)),
   };
+}
+
+/**
+ * The same summary as one of aggregateTurnUsage's windows, for any of the
+ * board's windows (src/core/board_windows.ts, odd/tasks/board-global-window.md
+ * W1). A record whose `at` does not parse is in no window.
+ */
+export function summarizeTurnUsageForWindow(records: readonly TurnUsageRecord[], nowMs: number, window: BoardWindow): TurnUsageWindowSummary {
+  return summarizeWindow(records.filter((record) => {
+    const ms = atMs(record.at);
+    return ms !== null && isInWindow(ms, window, nowMs);
+  }));
 }
 
 // ---------------------------------------------------------------------------
