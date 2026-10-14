@@ -2618,7 +2618,30 @@ test("0.6.2 E8 (hook): skill applied + tool measuring reads as such, with one je
     jevResponse({ which: { type: "choice", choice: "Bash", probabilities: { Bash: 0.6 }, confidence: 0.6 }, needsOneTool: { type: "noul", noul: 0.1 } }),
   );
   await submitPrompt(handlers, engine, "how does the auth module work");
-  assert.equal(host.statusLines.at(-1), "jev · skill: graft-helper (applied) · tools: no change (measuring only)");
+  // 0.11.1: the tool part picked nothing, so it says nothing.
+  assert.equal(host.statusLines.at(-1), "jev · skill: graft-helper (applied)");
+});
+
+test("0.11.1: a turn with no pick clears the line, so the last turn's skill is not left showing", async () => {
+  const host = makeFakeHost();
+  seedModSkillsConfig(host, { active: true, activeTools: false });
+  seedSamplingConfig(host, { enabled: true, sampleRate: 1, dailyPromptCap: 40 });
+  seedProjectSkill(host, "graft-helper", "Explores this codebase with graft.", "Read graft_repo_map first.");
+  host.toolList = [{ name: "Bash", description: "Runs a shell command", mcp: false }];
+  const { handlers, engine } = loadHooks(host);
+  host.fetchQueue.push(
+    jevResponse({ which: { type: "choice", choice: "graft-helper", probabilities: { "graft-helper": 0.9 }, confidence: 0.9 }, skill_needed: { type: "noul", noul: 0.8 } }),
+    jevResponse({ which: { type: "choice", choice: "graft-helper", probabilities: { "graft-helper": 0.95 }, confidence: 0.9 }, "fits::graft-helper": { type: "noul", noul: 0.9 } }),
+    jevResponse({ which: { type: "choice", choice: "Bash", probabilities: { Bash: 0.6 }, confidence: 0.6 }, needsOneTool: { type: "noul", noul: 0.1 } }),
+  );
+  await submitPrompt(handlers, engine, "how does the auth module work");
+  assert.equal(host.statusLines.at(-1), "jev · skill: graft-helper (applied)");
+  host.fetchQueue.push(
+    jevResponse({ which: { type: "choice", choice: "graft-helper", probabilities: { "graft-helper": 0.2 }, confidence: 0.2 }, skill_needed: { type: "noul", noul: 0.05 } }),
+    jevResponse({ which: { type: "choice", choice: "Bash", probabilities: { Bash: 0.6 }, confidence: 0.6 }, needsOneTool: { type: "noul", noul: 0.1 } }),
+  );
+  await submitPrompt(handlers, engine, "thanks");
+  assert.equal(host.statusLines.at(-1), undefined);
 });
 
 test("0.6.2 E8 (hook): skill measuring only reads as such", async () => {
@@ -3042,10 +3065,18 @@ test("0.6.14 T2: the band yields to a survey and never replaces another plugin's
   seedRouterAccount(host);
   host.fetchQueue.push(tierAnswer("simple"));
   const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  const other = { type: "Text", props: { children: "another plugin's band" } };
+  // Nothing running: another plugin's band is passed through as it is.
+  assert.deepEqual(await renderBand(handlers, engine, 120, { beneath: other }), other);
   await spawnAs(handlers, engine, spawnEvent({ model: "opus" }), "agent-1", "claude-opus-5-5");
   assert.deepEqual(await renderBand(handlers, engine, 120, { hasSurvey: true }), ENGINE_DRAWING);
-  const other = { type: "Text", props: { children: "another plugin's band" } };
-  assert.deepEqual(await renderBand(handlers, engine, 120, { beneath: other }), other);
+  // 0.11.1: a project plugin's band (an orchestrator's fleet band) no longer hides the agents; their rows stack under it.
+  const stacked = await renderBand(handlers, engine, 120, { beneath: other }) as FakeElement;
+  assert.equal(stacked.type, "Box");
+  assert.equal(stacked.props.flexDirection, "column");
+  const children = stacked.props.children as unknown[];
+  assert.deepEqual(children[0], other, "the other plugin's band stays first, untouched");
+  assert.deepEqual(bandLines({ type: "Box", props: { children: children.slice(1) } })[0], "Running agents: 1");
 });
 
 test("0.6.14 T2: the band is sized to the band's own width", async () => {
@@ -4639,9 +4670,12 @@ test("C3 ci-watch band: the engine's band and a survey are left alone; the route
   const { handlers, engine } = await pushAndWatch(host);
   await runNextTimer(host);
   const watchLine = "CI feat/x (0123456) · \"CI\" running for 0 s";
-  // Not the engine's own drawing beneath (another plugin's band): passed through as it is.
+  // 0.11.1: another plugin's band beneath stays first, the watch row stacks under it.
   const other = { type: "Box", props: { children: [] } };
-  assert.equal(await renderBand(handlers, engine, 200, { beneath: other }), other);
+  const stacked = await renderBand(handlers, engine, 200, { beneath: other }) as FakeElement;
+  const children = stacked.props.children as unknown[];
+  assert.equal(children[0], other);
+  assert.deepEqual(bandLines({ type: "Box", props: { children: children.slice(1) } }), [watchLine]);
   // A survey holds the band.
   assert.equal(await renderBand(handlers, engine, 200, { hasSurvey: true }), ENGINE_DRAWING);
   // The router off: the watch is still drawn.
