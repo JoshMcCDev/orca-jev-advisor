@@ -45,13 +45,13 @@ Every module keeps working as today with Jev alone. More providers can be added 
 
 ## Tasks
 
-- [ ] P1. A provider interface plus the Jev provider. `callJev` routes through it; behaviour is unchanged (all existing tests pass).
-- [ ] P2. A Cloudflare Clef provider: request mapping (noul criteria), envelope unwrap, error classes (auth, quota/429, 5xx, timeout), usage to neurons.
-- [ ] P3. A daily neuron budget: a counter keyed by UTC day in the cache dir. Once spent, or when Cloudflare reports the quota as exhausted, Clef is skipped until the next UTC day.
-- [ ] P4. The cascade in both mode: Clef, then Jev on doubt, failure or spent budget. Doubt is a per-call predicate; the gate's is consequence within 0.2 of its line; there is a generic default for the rest. Each decision records which provider answered and why it escalated.
-- [ ] P5. Keys and settings reach every runtime the Jev key reaches today: the worker, the gate hook, the router hook, the mod (options) and the CLIs. Settings are the mode and the Clef model (default `clef`).
-- [ ] P6. A config panel section: provider mode, Clef model, Cloudflare account id and token (stored as a secret, shown masked), and a connection test.
-- [ ] P7. A board section: answers by provider, doubt escalations, neurons against 10k, and failovers, following the global window.
+- [x] P1. A provider interface plus the Jev provider. `callJev` routes through it; behaviour is unchanged (all existing tests pass).
+- [x] P2. A Cloudflare Clef provider: request mapping (noul criteria), envelope unwrap, error classes (auth, quota/429, 5xx, timeout), usage to neurons.
+- [x] P3. A daily neuron budget: a counter keyed by UTC day in the cache dir. Once spent, or when Cloudflare reports the quota as exhausted, Clef is skipped until the next UTC day.
+- [x] P4. The cascade in both mode: Clef, then Jev on doubt, failure or spent budget. Doubt is a per-call predicate; the gate's is consequence within 0.2 of its line; there is a generic default for the rest. Each decision records which provider answered and why it escalated.
+- [x] P5. Keys and settings reach every runtime the Jev key reaches today: the worker, the gate hook, the router hook, the mod (options) and the CLIs. Settings are the mode and the Clef model (default `clef`).
+- [x] P6. A config panel section: provider mode, Clef model, Cloudflare account id and token (stored as a secret, shown masked), and a connection test.
+- [x] P7. A board section: answers by provider, doubt escalations, neurons against 10k, and failovers, following the global window.
 - [ ] P8. Release, live check and `odd/qa/qa-<version>.md`.
 
 ## Acceptance
