@@ -11,7 +11,8 @@ Every release of Jev Advisor, newest first.
   - **Confident errors.** 5% of Clef's confident answers are also asked of Jev in parallel; the board counts the disagreements.
   - **Only the gate cascades.** The router, skills, tools, memory, verify-done, the steward and secret redaction stay on Jev; their thresholds were tuned on Jev and have not been measured on Clef.
   - **Board: "Who decides?"** Answers by provider, doubt escalations, failovers by reason, policy questions sent to Jev, the confident-error rate, and today's neurons against the free allowance, following the global window.
-  - **Replay.** 54 corpus commands in Both mode with `clef`: 54/54 the same verdict as Jev, 11 sent to Jev (9 doubt, 2 Clef failures).
+  - **Replay.** 54 corpus commands in Both mode with live `clef`, against Jev answers recorded earlier the same day (no Jev key on the machine at replay time): 54/54 the same verdict, 11 sent to Jev (9 doubt, 2 Clef failures). The cause of the 2 failures was not recorded; Clef's 1.2 s sub-budget against its ~1.1 s p95 is the likely one, unverified.
+- **verify-done starts off.** Five days of shadow flagged 12 turns as "claimed done without verification"; reading their final messages, 11 were false (tests run by subagents were not counted, or the edits were notes and PR bodies). A file that already names a state keeps it.
 - **Modules: "Solo medir" instead of "Sombra"** in the Spanish panels, and the state buttons no longer wrap their label.
 
 ## 0.12.2
