@@ -153,7 +153,8 @@ function effortText(locale: Locale, agent: RunningSubagent): string {
   return translate(MODEL_ROUTER_CATALOG, locale, "agents.effort.withSource", { level, source: translate(MODEL_ROUTER_CATALOG, locale, `agents.effort.source.${effortSource}`) });
 }
 
-function whyText(locale: Locale, agent: RunningSubagent, short: boolean): string {
+/** An agent's reason as its row shows it: the full wording, or the short one (`Jev duda`). */
+export function subagentWhyText(locale: Locale, agent: RunningSubagent, short: boolean): string {
   const why = translate(MODEL_ROUTER_CATALOG, locale, (short ? WHY_SHORT_KEY : WHY_KEY)[agent.why]);
   if (agent.wouldUse === null) return why;
   return translate(MODEL_ROUTER_CATALOG, locale, short ? "agents.row.wouldUse.short" : "agents.row.wouldUse", { why, model: agent.wouldUse });
@@ -217,8 +218,8 @@ export function subagentBand(locale: Locale, agents: readonly RunningSubagent[],
     effort: effortText(locale, agent),
     place: placeText(locale, agent.place, branchPrefix, false),
     placeShort: placeText(locale, agent.place, branchPrefix, true),
-    whyFull: whyText(locale, agent, false),
-    whyShort: whyText(locale, agent, true),
+    whyFull: subagentWhyText(locale, agent, false),
+    whyShort: subagentWhyText(locale, agent, true),
   }));
   const heading = translate(MODEL_ROUTER_CATALOG, locale, "agents.heading", { n: String(agents.length) });
   const typeW = widest(cells.map((c) => c.type));
