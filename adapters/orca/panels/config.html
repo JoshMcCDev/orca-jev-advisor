@@ -278,7 +278,8 @@
       .module-row:first-child { margin-top: 0; }
       .module-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
       .module-name { font-size: 12px; font-weight: 600; flex: 1 1 10em; min-width: 0; overflow-wrap: anywhere; }
-      .module-states { flex: 0 1 18em; }
+      .module-states { flex: 0 1 21em; }
+      .module-states button { white-space: nowrap; }
       .module-row .hint { margin-top: 4px; overflow-wrap: anywhere; }
       .module-row .said:not(:empty) { margin-top: 6px; }
       .mode-buttons button[hidden] { display: none; }
@@ -742,10 +743,10 @@
           'tabs.modSkills': 'Mod de skills',
           'tabs.rules': 'Reglas',
           'modules.heading': 'Módulos',
-          'modules.intro': 'Cada función se puede apagar para que no cueste nada: sin proceso de hook, sin llamadas a Jev y sin trabajo en segundo plano. «Sombra» la deja medir y registrar lo que haría, sin cambiar tus turnos. Lo que elijas vale al instante, sin recargar Claude Code. Una sesión que ya estaba abierta antes de actualizar el plugin conserva su mod anterior hasta que la reinicies.',
+          'modules.intro': 'Cada función se puede apagar para que no cueste nada: sin proceso de hook, sin llamadas a Jev y sin trabajo en segundo plano. «Solo medir» registra lo que haría, sin cambiar tus turnos. Lo que elijas vale al instante, sin recargar Claude Code. Una sesión que ya estaba abierta antes de actualizar el plugin conserva su mod anterior hasta que la reinicies.',
           'modules.costNote': 'Las cifras salen de una semana de uso real medido (odd/tasks/feature-modules.md); las tuyas dependen de cómo trabajes. El trabajo en segundo plano cuenta solo lo que el módulo hace por sí solo: los resúmenes que comparten varios módulos siguen mientras alguno esté encendido. Con todos los módulos encendidos son unos 730 procesos de node por hora con un panel abierto y unos 240 sin ninguno abierto.',
           'modules.state.off': 'Apagado',
-          'modules.state.shadow': 'Sombra',
+          'modules.state.shadow': 'Solo medir',
           'modules.state.active': 'Activo',
           'modules.stateGroup': 'Estado de {{module}}',
           'modules.name.gate': 'Gate',
@@ -761,7 +762,7 @@
           'modules.desc.skill-selection': 'Deja que Jev elija la skill y la herramienta de un turno, en vez de que el modelo vea la lista completa.',
           'modules.desc.board': 'Mantiene el tablero: el estado en vivo de tus agentes, por proyecto y rama.',
           'modules.desc.verify-done': 'En los turnos que editaron archivos sin un test que pasara, pregunta a Jev si el mensaje final dice que el trabajo está hecho, y lo registra. Solo mide: no bloquea nada ni cambia ninguna respuesta. A Jev le envía el mensaje final, redactado y recortado, y los conteos del turno; nunca contenidos de archivos ni los comandos o rutas que usó el turno.',
-          'modules.desc.ci-watch': 'Después de un push, de abrir un pull request o de fusionarlo, vigila con gh la ejecución de CI y te avisa aquí cuando termina, con una línea sobre el prompt y un mensaje. En Sombra no le envía nada al agente: solo cuenta las consultas de CI y las esperas largas que el agente hizo mientras tanto. En Activo, además, le avisa al agente una vez, cuando está libre, para que no tenga que consultar.',
+          'modules.desc.ci-watch': 'Después de un push, de abrir un pull request o de fusionarlo, vigila con gh la ejecución de CI y te avisa aquí cuando termina, con una línea sobre el prompt y un mensaje. En «Solo medir» no le envía nada al agente: solo cuenta las consultas de CI y las esperas largas que el agente hizo mientras tanto. En Activo, además, le avisa al agente una vez, cuando está libre, para que no tenga que consultar.',
           'modules.cost.gate': 'En uso: unas {{jev}} llamadas a Jev por prompt y {{hooks}} procesos de hook por cada comando de Bash o edición de archivos (unos {{seconds}} s cada uno).',
           'modules.cost.model-router': 'En uso: unas {{jev}} llamadas a Jev por prompt y, por cada subagente que arranca, {{agentJev}} llamadas a Jev y {{agentHooks}} procesos de hook.',
           'modules.cost.steward': 'En uso: unas {{jev}} llamadas a Jev por prompt.',
@@ -774,8 +775,8 @@
           'modules.weekly.ci-watch': 'Últimos 7 días: vigilancias {{watches}}, consultas de CI del agente mientras tanto {{polls}}, esperas largas {{sleeps}}{{notes}} (lo que un aviso habría reemplazado).',
           'modules.weekly.ci-watch.notes': ', avisos enviados {{injected}}',
           'modules.name.memory': 'Memoria',
-          'modules.desc.memory': 'Al final de cada turno respondido decide si hay algo que valga la pena recordar y dónde iría: con Engram, Engram lo guarda todo y tu auto-memoria solo los avisos sobre cómo trabajar (feedback) y los datos sobre ti (user); sin Engram, la auto-memoria lo guarda todo. En sombra solo mide: no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria. En activo guarda en Engram cuando Engram está en marcha, y refleja en tu carpeta de auto-memoria las reglas sobre cómo trabajar y los datos sobre ti; sin Engram, o con Engram configurado pero sin responder, escribe en tu carpeta de auto-memoria: cada memoria nueva es un archivo con una línea en MEMORY.md, y antes de reescribir o quitar un archivo lo copia byte a byte en .memory-backup. En este release nunca borra una memoria: una copia de reserva solo se quita cuando Engram ya la tiene. Tu hilo principal sigue guardando como hoy. Cuando tu hilo principal guarda en Engram en un turno, el estado Activo no guarda nada propio en ese turno.',
-          'modules.cost.memory': 'En uso: una llamada a Haiku por turno respondido. En sombra, en 1 de cada {{every}} turnos que Haiku marca para actualizar, un fork de la sesión redacta la memoria; en activo, cada uno de esos turnos tiene su fork. Las llamadas a Haiku y los forks cuentan contra la cuota de tu plan Max. En sombra, la única llamada a Engram es una comprobación de solo lectura, una vez por sesión; en activo con Engram, cada memoria es un mem_save, y cada conflicto una lectura, una llamada a Haiku y un mem_judge.',
+          'modules.desc.memory': 'Al final de cada turno respondido decide si hay algo que valga la pena recordar y dónde iría: con Engram, Engram lo guarda todo y tu auto-memoria solo los avisos sobre cómo trabajar (feedback) y los datos sobre ti (user); sin Engram, la auto-memoria lo guarda todo. En «Solo medir» no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria. En activo guarda en Engram cuando Engram está en marcha, y refleja en tu carpeta de auto-memoria las reglas sobre cómo trabajar y los datos sobre ti; sin Engram, o con Engram configurado pero sin responder, escribe en tu carpeta de auto-memoria: cada memoria nueva es un archivo con una línea en MEMORY.md, y antes de reescribir o quitar un archivo lo copia byte a byte en .memory-backup. En este release nunca borra una memoria: una copia de reserva solo se quita cuando Engram ya la tiene. Tu hilo principal sigue guardando como hoy. Cuando tu hilo principal guarda en Engram en un turno, el estado Activo no guarda nada propio en ese turno.',
+          'modules.cost.memory': 'En uso: una llamada a Haiku por turno respondido. En «Solo medir», en 1 de cada {{every}} turnos que Haiku marca para actualizar, un fork de la sesión redacta la memoria; en activo, cada uno de esos turnos tiene su fork. Las llamadas a Haiku y los forks cuentan contra la cuota de tu plan Max. En «Solo medir», la única llamada a Engram es una comprobación de solo lectura, una vez por sesión; en activo con Engram, cada memoria es un mem_save, y cada conflicto una lectura, una llamada a Haiku y un mem_judge.',
           'modules.memory.sees': 'Haiku ve tu MEMORY.md (hasta 8.000 caracteres) y el último intercambio (hasta 12.000 caracteres, con los secretos redactados y solo el nombre de cada herramienta, nunca su entrada ni su salida). El fork ve la transcripción de esta sesión y las claves de tema de tu memoria, o tus archivos de memoria si no hay Engram. En activo, lo que el fork redacta se guarda en Engram, o en tu carpeta de auto-memoria cuando Engram no está en uso. Para juzgar un conflicto, Haiku ve solo el texto de las dos memorias. El registro guarda conteos y tipos, nunca lo que se guarda.',
           'modules.memory.active.unknown': 'Dónde guarda: todavía no se ha detectado. Lo decide el primer turno respondido.',
           'modules.memory.active.live': 'Dónde guarda: en Engram, que está en marcha ({{signal}}). Cada memoria va a Engram; las reglas sobre cómo trabajar y los datos sobre ti también se reflejan como archivos en tu carpeta de auto-memoria, para que cada sesión los lea. Cuando Engram avisa de un conflicto, Haiku juzga los claros y deja pendientes los demás.',
@@ -822,7 +823,7 @@
           'modules.invalidShape': 'El plugin rechazó esa elección porque no era válida. Vuelve a abrir este panel e inténtalo otra vez.',
           'modules.gateOffWarn': 'Con el gate apagado nada revisa los comandos de Bash ni las ediciones de archivos antes de que se ejecuten.',
           'modules.noteOff': 'El módulo {{module}} está apagado, así que sus ajustes están ocultos. Enciéndelo en General, en Módulos.',
-          'modules.noteShadow': 'El módulo {{module}} está en sombra: mide y registra lo que haría, y no cambia tus turnos. Un ajuste «Activo» de aquí queda limitado a medir hasta que el módulo esté Activo.',
+          'modules.noteShadow': 'El módulo {{module}} está en «Solo medir»: registra lo que haría, y no cambia tus turnos. Un ajuste «Activo» de aquí queda limitado a medir hasta que el módulo esté Activo.',
           'integration.hookModuleOff': 'Hook de Bash: quitado a propósito (el módulo Gate está apagado).',
           'integration.agentModelHookModuleOff': 'Hooks de modelo del Agent: quitados a propósito (el módulo Enrutador de modelo está apagado).',
           'integration.fileGuardModuleOff': 'Guarda de ediciones (reglas del propio gate): quitada a propósito (el módulo Gate está apagado).',

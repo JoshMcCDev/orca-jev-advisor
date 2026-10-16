@@ -5216,7 +5216,7 @@ test('Modules: the verify-done card in Spanish says what it measures, that it bl
   try {
     const card = (await moduleCards(page))[5]
     assert.equal(card.name, 'Verificar «hecho»')
-    assert.deepEqual(card.labels, ['Apagado', 'Sombra'])
+    assert.deepEqual(card.labels, ['Apagado', 'Solo medir'])
     assert.match(card.text, /turnos que editaron archivos sin un test que pasara/)
     assert.match(card.text, /Solo mide: no bloquea nada ni cambia ninguna respuesta\./)
     assert.match(card.text, /el mensaje final, redactado y recortado, y los conteos del turno/)
@@ -5261,9 +5261,9 @@ test('Modules: the ci-watch card in Spanish says what it watches, that Shadow te
   try {
     const card = (await moduleCards(page))[6]
     assert.equal(card.name, 'Vigía de CI')
-    assert.deepEqual(card.labels, ['Apagado', 'Sombra', 'Activo'])
+    assert.deepEqual(card.labels, ['Apagado', 'Solo medir', 'Activo'])
     assert.match(card.text, /vigila con gh la ejecución de CI y te avisa aquí cuando termina/)
-    assert.match(card.text, /En Sombra no le envía nada al agente/)
+    assert.match(card.text, /En «Solo medir» no le envía nada al agente/)
     assert.match(card.text, /En Activo, además, le avisa al agente una vez, cuando está libre/)
     assert.match(card.text, /como máximo 45 llamadas a gh por cada vigilancia \(el tope de su calendario de consultas, no una medición\), sin llamadas a Jev ni a ningún modelo/)
   } finally {
@@ -5505,11 +5505,11 @@ test('Modules: the memory card in Spanish speaks with tú and says the same', MO
   try {
     const card = (await moduleCards(page))[7]
     assert.equal(card.name, 'Memoria')
-    assert.deepEqual(card.labels, ['Apagado', 'Sombra', 'Activo'])
-    assert.match(card.text, /En sombra solo mide: no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria/)
+    assert.deepEqual(card.labels, ['Apagado', 'Solo medir', 'Activo'])
+    assert.match(card.text, /En «Solo medir» no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria/)
     assert.match(card.text, /En activo guarda en Engram cuando Engram está en marcha/)
     assert.match(card.text, /En este release nunca borra una memoria: una copia de reserva solo se quita cuando Engram ya la tiene\./)
-    assert.match(card.text, /En sombra, en 1 de cada 5 turnos que Haiku marca para actualizar, un fork de la sesión redacta la memoria; en activo, cada uno de esos turnos tiene su fork\./)
+    assert.match(card.text, /En «Solo medir», en 1 de cada 5 turnos que Haiku marca para actualizar, un fork de la sesión redacta la memoria; en activo, cada uno de esos turnos tiene su fork\./)
     assert.match(card.text, /cuentan contra la cuota de tu plan Max/)
     assert.match(card.text, /Esta semana: 212 decisiones de Haiku, 20% para actualizar y 8 forks\./)
     assert.doesNotMatch(card.text, /\b(tenés|podés|revisá|decime|querés)\b/, 'no voseo')
@@ -5683,7 +5683,7 @@ test('Modules: the section reads in Spanish, with no raw key and no neighbouring
   try {
     const cards = await moduleCards(page)
     assert.equal(await page.evaluate(() => document.querySelector('#modules-section h2').textContent), 'Módulos')
-    assert.deepEqual(cards[1].labels, ['Apagado', 'Sombra', 'Activo'])
+    assert.deepEqual(cards[1].labels, ['Apagado', 'Solo medir', 'Activo'])
     assert.match(cards[0].text, /Hooks quitados de Claude Code, como elegiste\./)
     assert.match(cards[0].text, /unas 9,3 llamadas a Jev por prompt/)
     assert.doesNotMatch(await page.evaluate(() => document.getElementById('modules-section').innerText), /(?:^|\s)(?:modules|integration)\.[a-z]/, 'a raw key was painted')
