@@ -27,6 +27,11 @@ test("parseOrcaGameMode: absent, off, empty or anything else is no game", () => 
   for (const raw of [undefined, null, "", "off", "OFF", "1", "true", "game"]) assert.equal(parseOrcaGameMode(raw), null, String(raw));
 });
 
+test("parseOrcaGameMode: a game launched with its HUD off draws no band and absorbs no line, so it is no game for Jev", () => {
+  for (const hud of ["0", "false", " FALSE "]) assert.equal(parseOrcaGameMode("on", hud), null, hud);
+  for (const hud of [undefined, null, "", "1", "true", "anything"]) assert.equal(parseOrcaGameMode("zen", hud), "zen", String(hud));
+});
+
 test("buildAdvisorState: nothing known yet is an empty, versioned value", () => {
   assert.deepEqual(buildAdvisorState({ locale: "en", line: null, main: null, agents: [], ciRows: [], nowMs: NOW, notices: [] }), {
     version: 1,

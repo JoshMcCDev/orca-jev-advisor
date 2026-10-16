@@ -19,9 +19,16 @@ import type { RunningSubagent, SubagentWhy } from "./subagent_status.ts";
 
 export type GameMode = "on" | "zen";
 
-/** The game Orca drew this pane with, from ORCA_GAME_MODE; null when there is none (absent, `off`, anything else). */
-export function parseOrcaGameMode(raw: string | null | undefined): GameMode | null {
+/**
+ * The game Orca drew this pane with, from ORCA_GAME_MODE; null when there is
+ * none (absent, `off`, anything else). ORCA_GAME_HUD `0` or `false` hides the
+ * game's band, and the game then draws no other plugin's line either
+ * (orca-game's `isAbsorbing`), so that pane is no game for Jev: it draws as always.
+ */
+export function parseOrcaGameMode(raw: string | null | undefined, hud?: string | null): GameMode | null {
   if (typeof raw !== "string") return null;
+  const hudOff = typeof hud === "string" && ["0", "false"].includes(hud.trim().toLowerCase());
+  if (hudOff) return null;
   const value = raw.trim().toLowerCase();
   return value === "on" || value === "zen" ? value : null;
 }
