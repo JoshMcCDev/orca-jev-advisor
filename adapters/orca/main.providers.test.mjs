@@ -23,7 +23,9 @@ mkdirSync(process.env.ORCA_SUPERVISOR_CONFIG_DIR, { recursive: true })
 after(() => rmSync(PATHS_OVERRIDE_DIR, { recursive: true, force: true }))
 
 const {
+  attendClefTestRequest,
   attendSecretRequest,
+  CLEF_TEST_RESULT_KEY,
   checkDecisionProviders,
   mirrorAllSecrets,
   mirrorCatalogAndPolicies,
@@ -157,4 +159,42 @@ test('doctor, Clef mode with no Cloudflare credentials says so', async () => {
   const clef = checks.find((check) => check.id === 'clef')
   assert.equal(clef.ok, false)
   assert.match(clef.detail, /No Cloudflare credentials/)
+})
+
+// P6: the config panel's "Test connection" button. A request the worker
+// attends with the stored credentials and the model the panel shows; the
+// result is a reason code the panel translates, never the token.
+test('the connection test answers ok with the latency, for the model the panel names', async () => {
+  const net = fetchBy({ 'api.cloudflare.com': { status: 200, body: CLEF_OK } })
+  const storage = fakeHost({ clefTestRequest: { id: 't-1', at: now(), model: 'clef-flash' } })
+  await attendClefTestRequest(fakeOrca(), storage, fakeHost({ cloudflareAccountId: 'acct', cloudflareApiToken: 'tok' }), { fetchImpl: net.fetchImpl })
+  const result = await storage.get(CLEF_TEST_RESULT_KEY)
+  assert.equal(result.id, 't-1')
+  assert.equal(result.ok, true)
+  assert.equal(result.reason, 'ok')
+  assert.equal(result.model, 'clef-flash')
+  assert.equal(typeof result.latencyMs, 'number')
+  assert.equal(await storage.get('clefTestRequest'), null, 'the request is consumed')
+})
+
+test('the connection test names a rejected token, missing credentials, and a spent day by code', async () => {
+  const rejected = fakeHost({ clefTestRequest: { id: 't-2', at: now(), model: 'clef' } })
+  await attendClefTestRequest(fakeOrca(), rejected, fakeHost({ cloudflareAccountId: 'acct', cloudflareApiToken: 'tok' }), { fetchImpl: fetchBy({ 'api.cloudflare.com': { status: 401, body: '{"errors":[{"code":10000}]}' } }).fetchImpl })
+  assert.deepEqual([(await rejected.get(CLEF_TEST_RESULT_KEY)).reason, (await rejected.get(CLEF_TEST_RESULT_KEY)).status], ['rejected', 401])
+  const spent = fakeHost({ clefTestRequest: { id: 't-3', at: now(), model: 'clef' } })
+  await attendClefTestRequest(fakeOrca(), spent, fakeHost({ cloudflareAccountId: 'acct', cloudflareApiToken: 'tok' }), { fetchImpl: fetchBy({ 'api.cloudflare.com': { status: 429, body: '{"errors":[{"code":3036}]}' } }).fetchImpl })
+  assert.equal((await spent.get(CLEF_TEST_RESULT_KEY)).reason, 'allowance')
+  const none = fakeHost({ clefTestRequest: { id: 't-4', at: now(), model: 'not-a-model' } })
+  const prior = { account: process.env.CLOUDFLARE_ACCOUNT_ID, token: process.env.CLOUDFLARE_API_TOKEN }
+  await attendClefTestRequest(fakeOrca(), none, fakeHost(), { fetchImpl: fetchBy({}).fetchImpl, resolveCredentials: async () => null })
+  const result = await none.get(CLEF_TEST_RESULT_KEY)
+  assert.equal(result.reason, 'no-credentials')
+  assert.equal(result.model, 'clef', 'an unknown model falls back to the default')
+  assert.deepEqual(prior, { account: process.env.CLOUDFLARE_ACCOUNT_ID, token: process.env.CLOUDFLARE_API_TOKEN })
+})
+
+test('an expired connection test request publishes expired, not silence', async () => {
+  const storage = fakeHost({ clefTestRequest: { id: 't-5', at: new Date(Date.now() - 11 * 60 * 1000).toISOString(), model: 'clef' } })
+  await attendClefTestRequest(fakeOrca(), storage, fakeHost(), { fetchImpl: fetchBy({}).fetchImpl })
+  assert.equal((await storage.get(CLEF_TEST_RESULT_KEY)).reason, 'expired')
 })

@@ -299,7 +299,9 @@ const READY = {
   // worker writes photographs a panel nobody will ever see -- the first draft
   // of this file said `isConfigured` and rendered "No key configured" while
   // claiming to show a configured one.
-  secretStatus: { configured: true, endsWith: '9f2a', checkedAt: iso },
+  secretStatus: { configured: true, endsWith: '9f2a', cloudflare: { accountId: { configured: true, endsWith: '41c2' }, token: { configured: true, endsWith: 'Qx7m' } }, checkedAt: iso },
+  // Multi-provider P6: the section in use, Both with the default Clef model.
+  decisionProvider: { mode: 'both', clefModel: 'clef' },
   claudeIntegrationStatus: {
     ok: true,
     hook: { installed: true, installedCount: 2, totalCount: 2, orcaPaneCount: 2 },
@@ -1377,6 +1379,8 @@ async function main() {
               if (tabKey === 'rules') await page.waitForSelector('#gate-authorizations-section[data-state="ready"]', { state: 'attached', timeout: 15000 })
               // 0.6.28 T7: the trusted programs are read right after them.
               if (tabKey === 'rules') await page.waitForSelector('#trusted-programs-section[data-state="ready"]', { state: 'attached', timeout: 15000 })
+              // Multi-provider P6: the provider choice is read after the first batch too.
+              if (tabKey === 'general' && panel === 'config.html') await page.waitForSelector('#provider-section[data-state="ready"]', { state: 'attached', timeout: 15000 })
 
               const overflow = await page.evaluate(() => ({
                 scrollWidth: document.documentElement.scrollWidth,

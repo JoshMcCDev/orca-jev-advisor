@@ -269,6 +269,10 @@ function hostBridge (storage) {
         // feature-modules T5: the worker answers the module switch with the id the panel minted;
         // `storage.__featureModulesResult` overrides ok/skipped/reason (a skipped install, a refusal).
         value = { ok: true, saved: true, skipped: false, reason: null, detail: null, modules: null, ...storage.__featureModulesResult, id: window.__written.featureModulesSaveRequest.id }
+      } else if (key === 'clefTestResult' && window.__written.clefTestRequest) {
+        // Multi-provider P6: the worker answers the connection test with the id
+        // the panel minted; `storage.__clefTestResult` overrides ok/reason.
+        value = { ok: true, reason: 'ok', status: null, latencyMs: 412, model: window.__written.clefTestRequest.model, ...storage.__clefTestResult, id: window.__written.clefTestRequest.id }
       } else if (key === 'modelsSeedResult' && window.__written.modelsSeedRequest) {
         // odd/tasks/model-reclassification.md T7: models-worker.mjs answers
         // one request/result channel for both apply and dismiss (unlike the
@@ -821,6 +825,67 @@ test('an install that never set the queue mode shows "ask now" and saves it', { 
     await page.waitForTimeout(SETTLE_MS)
     assert.deepEqual(await page.evaluate(() => window.__written.queueMode), { enabled: false })
     assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// Multi-provider P6: the decision provider section on the General tab.
+test('the provider section shows the stored mode and model, masks the credentials, and Save writes the choice', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({
+    decisionProvider: { mode: 'both', clefModel: 'clef-flash' },
+    secretStatus: { configured: true, endsWith: 'abcd', cloudflare: { accountId: { configured: true, endsWith: '5678' }, token: { configured: true, endsWith: 'wxyz' } }, checkedAt: new Date().toISOString() }
+  })
+  try {
+    // Read on its own after the first paint, so it may land a throttle window later.
+    await page.waitForFunction(() => document.querySelector('#provider-mode button[aria-pressed="true"]')?.dataset.value === 'both', null, { timeout: 15000 })
+    assert.deepEqual(await pressedValues(page, '#clef-model'), ['clef-flash'])
+    const status = await page.textContent('#cloudflare-status')
+    assert.match(status, /…5678/)
+    assert.match(status, /…wxyz/)
+    await page.click('#provider-mode button[data-value="clef"]')
+    await page.click('#clef-model button[data-value="clef-omni"]')
+    await page.click('#save-all')
+    await page.waitForTimeout(SETTLE_MS)
+    assert.deepEqual(await page.evaluate(() => window.__written.decisionProvider), { mode: 'clef', clefModel: 'clef-omni' })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('an install that never chose a provider shows Jev only and clef, and no credentials', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({})
+  try {
+    assert.deepEqual(await pressedValues(page, '#provider-mode'), ['jev'])
+    assert.deepEqual(await pressedValues(page, '#clef-model'), ['clef'])
+    assert.equal((await page.textContent('#cloudflare-status')).trim(), 'No Cloudflare credentials.')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Test connection sends the shown model and says what the worker answered', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ decisionProvider: { mode: 'both', clefModel: 'clef' } })
+  try {
+    await page.click('#test-clef')
+    await page.waitForFunction(() => /answered/.test(document.getElementById('cloudflare-said').textContent), null, { timeout: 15000 })
+    assert.equal(await page.evaluate(() => window.__written.clefTestRequest.model), 'clef')
+    assert.equal((await page.textContent('#cloudflare-said')).trim(), 'Connected: clef answered in 412 ms.')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('a rejected connection test is shown as an error with its status', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page } = await openPanel({ __clefTestResult: { ok: false, reason: 'rejected', status: 401, latencyMs: null } })
+  try {
+    await page.click('#test-clef')
+    await page.waitForFunction(() => /rejected/.test(document.getElementById('cloudflare-said').textContent), null, { timeout: 15000 })
+    assert.equal((await page.textContent('#cloudflare-said')).trim(), 'Cloudflare rejected the credentials (401).')
+    assert.equal(await page.getAttribute('#cloudflare-said', 'class'), 'said bad')
   } finally {
     await browser.close()
   }

@@ -55,7 +55,7 @@ import { POLICY_SEED_MARKER_KEY, parseSeedPolicies, parseSeedVersion, shouldSeed
 import { mergePolicySeeds, resolvePolicySeedImport } from '../../src/core/policy_seed_import.ts'
 import { decidePolicySeedNotice, parseOfferedVersion } from '../../src/core/policy_seed_notice.ts'
 import { CLOUDFLARE_ACCOUNT_ID_ENV, CLOUDFLARE_ACCOUNT_ID_SECRET, CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_API_TOKEN_SECRET, resolveApiKey, resolveClefCredentials, SECRET_KEY_NAME } from '../../src/core/secrets.ts'
-import { clefFailureOf, createClefProvider } from '../../src/core/clef.ts'
+import { clefFailureOf, createClefProvider, DEFAULT_CLEF_MODEL, isClefModel } from '../../src/core/clef.ts'
 import { getBoard, getCatalog, getConfig, getExplicitModels, getPolicies, getProviderSettings, getQueueMode, getTeamOwners, getTrustedPrograms, setBoard, setCatalog, setPolicies, setTrustedPrograms } from '../../src/core/store.ts'
 import { addTrustedProgram, removeTrustedProgram } from '../../src/core/trusted_programs.ts'
 import { DEFAULT_DERIVED_AUTONOMY, deriveDestinations, parseWorktreeList } from '../../src/core/worktree_catalog.ts'
@@ -2913,21 +2913,55 @@ async function pingClef (credentials, model, options = {}) {
   return { latencyMs: Date.now() - startedAt, inputTokens: response.usage.input_tokens }
 }
 
-/** Whether Cloudflare accepts the stored credentials right now. Never names the token or the account id. */
-async function checkClef (secretsHost, settings, options = {}) {
-  const credentials = await resolveClefCredentials(secretsHost)
-  if (credentials === null) return { id: 'clef', ok: false, detail: 'No Cloudflare credentials: the account id and the API token are both needed.' }
+/**
+ * Whether Cloudflare accepts the stored credentials right now, as a stable
+ * reason code (the panel translates it) plus an English detail (the doctor
+ * shows it). Never names the token or the account id.
+ * `options.resolveCredentials` and `options.fetchImpl` are test-only.
+ */
+async function probeClef (secretsHost, model, options = {}) {
+  const credentials = await (options.resolveCredentials ?? resolveClefCredentials)(secretsHost)
+  if (credentials === null) return { ok: false, reason: 'no-credentials', status: null, latencyMs: null, detail: 'No Cloudflare credentials: the account id and the API token are both needed.' }
   try {
-    const ping = await pingClef(credentials, settings.clefModel, options)
-    return { id: 'clef', ok: true, detail: `Cloudflare accepted the credentials: ${settings.clefModel} answered in ${ping.latencyMs} ms.`, latencyMs: ping.latencyMs }
+    const ping = await pingClef(credentials, model, { fetchImpl: options.fetchImpl })
+    return { ok: true, reason: 'ok', status: null, latencyMs: ping.latencyMs, detail: `Cloudflare accepted the credentials: ${model} answered in ${ping.latencyMs} ms.` }
   } catch (error) {
     const failure = clefFailureOf(error)
-    if (failure?.kind === 'auth') return { id: 'clef', ok: false, detail: `Cloudflare credentials rejected (${failure.status}).` }
-    if (failure?.kind === 'daily-allowance') return { id: 'clef', ok: false, detail: "Today's free Workers AI neurons are spent; Clef answers again after 00:00 UTC." }
-    if (failure?.kind === 'timeout') return { id: 'clef', ok: false, detail: "No network: Clef didn't respond within the budget." }
-    const status = failure !== null && 'status' in failure ? ` (${failure.status})` : ''
-    return { id: 'clef', ok: false, detail: `Clef failed${status}: ${failure?.kind ?? 'unknown'}.` }
+    const status = failure !== null && 'status' in failure ? failure.status : null
+    if (failure?.kind === 'auth') return { ok: false, reason: 'rejected', status, latencyMs: null, detail: `Cloudflare credentials rejected (${status}).` }
+    if (failure?.kind === 'daily-allowance') return { ok: false, reason: 'allowance', status, latencyMs: null, detail: "Today's free Workers AI neurons are spent; Clef answers again after 00:00 UTC." }
+    if (failure?.kind === 'timeout' || failure?.kind === 'network') return { ok: false, reason: 'unreachable', status, latencyMs: null, detail: "No network: Clef didn't respond within the budget." }
+    return { ok: false, reason: 'failed', status, latencyMs: null, detail: `Clef failed${status !== null ? ` (${status})` : ''}: ${failure?.kind ?? 'unknown'}.` }
   }
+}
+
+async function checkClef (secretsHost, settings, options = {}) {
+  const probe = await probeClef(secretsHost, settings.clefModel, options)
+  return { id: 'clef', ok: probe.ok, detail: probe.detail }
+}
+
+// ---------------------------------------------------------------------------
+// Clef connection test (multi-provider P6) -- the config panel's "Test
+// connection" button, same request/result shape as the secret channel.
+// Costs one tiny Clef call (a few dozen input tokens, under one neuron).
+// ---------------------------------------------------------------------------
+
+const CLEF_TEST_REQUEST_KEY = 'clefTestRequest'
+const CLEF_TEST_RESULT_KEY = 'clefTestResult'
+
+async function attendClefTestRequest (orca, storageHost, secretsHost, options = {}) {
+  const request = await storageHost.get(CLEF_TEST_REQUEST_KEY)
+  if (!isRecord(request) || typeof request.id !== 'string' || typeof request.at !== 'string') return
+  await storageHost.delete(CLEF_TEST_REQUEST_KEY).catch((error) =>
+    orca.log(`clef test request cleanup failed: ${error.message}`))
+  const model = isClefModel(request.model) ? request.model : DEFAULT_CLEF_MODEL
+  const age = Date.now() - Date.parse(request.at)
+  const probe = !(age >= 0) || age > SECRET_REQUEST_TTL_MS
+    ? { ok: false, reason: 'expired', status: null, latencyMs: null }
+    : await probeClef(secretsHost, model, options)
+  await storageHost.set(CLEF_TEST_RESULT_KEY, {
+    id: request.id, at: new Date().toISOString(), model, ok: probe.ok, reason: probe.reason, status: probe.status, latencyMs: probe.latencyMs
+  }).catch((error) => orca.log(`clef test result publish failed: ${error.message}`))
 }
 
 /**
@@ -3210,6 +3244,8 @@ export default function activate (orca) {
       .catch((error) => orca.log(`secret request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRequest(orca, storageHost))
       .catch((error) => orca.log(`claude integration request handling failed: ${error.message}`))
+      .then(() => attendClefTestRequest(orca, storageHost, secretsHost))
+      .catch((error) => orca.log(`clef test request handling failed: ${error.message}`))
       // Base work, outside the scheduler: the module switch must work with every module off.
       .then(() => attendFeatureModulesSaveRequest(orca, storageHost, scheduler))
       .catch((error) => orca.log(`feature modules request handling failed: ${error.message}`))
@@ -3401,7 +3437,9 @@ export {
   attendPolicySeedDismissRequest,
   attendPolicySeedImportRequest,
   attendPolicySeedNoticeRefresh,
+  attendClefTestRequest,
   attendSecretRequest,
+  CLEF_TEST_RESULT_KEY,
   checkDecisionProviders,
   mirrorAllSecrets,
   publishSecretStatus,
