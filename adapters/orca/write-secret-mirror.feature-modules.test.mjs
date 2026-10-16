@@ -37,8 +37,8 @@ function readModules (content) {
   return JSON.parse(execFileSync(process.execPath, [SCRIPT_PATH, 'feature-modules-read'], { env, encoding: 'utf8' }))
 }
 
-// Every module that existed before 0.8.0 defaults to active; verify-done, ci-watch and memory, new, to shadow.
-const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' }
+// Every module that existed before 0.8.0 defaults to active; ci-watch and memory, new, to shadow; verify-done starts off (0.13.0: 11 of its 12 flags were false).
+const DEFAULTS = { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off', 'ci-watch': 'shadow', memory: 'shadow' }
 
 test('feature-modules-read: a missing file reads as the defaults', () => {
   assert.deepEqual(readModules(undefined), { ok: true, value: DEFAULTS })

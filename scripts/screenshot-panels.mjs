@@ -1034,7 +1034,7 @@ SCENARIOS['skills-ready'] = SKILLS_READY
  * (its hooks gone, the Rules tab reduced to a note) and the model router in
  * shadow (the Models tab keeps its settings under a note). The hook lines of
  * the integration status read like the installer reports them: removed.
- * 0.8.0 V4: verify-done off, the one state other than its default shadow.
+ * 0.8.0 V4: verify-done off, which is also its default since 0.13.0.
  */
 SCENARIOS['modules-mixed'] = {
   ...READY,
@@ -1247,8 +1247,8 @@ SCENARIOS['board-full'] = {
   measurementsSummary: SCENARIOS['skills-ready'].measurementsSummary,
   consumptionSummary: { ...SCENARIOS['router-ready'].consumptionSummary, typing: SCENARIOS['skills-ready'].consumptionSummary.typing },
   activityByProjectSummary: SCENARIOS['activity-ready'].activityByProjectSummary,
-  // W3: memory and the CI watcher on, verify-done measuring, as on the owner's machine.
-  claudeIntegrationStatus: { ...READY.claudeIntegrationStatus, modules: moduleStatus({ memory: 'active', 'ci-watch': 'active' }) },
+  // W3: memory and the CI watcher on, verify-done measuring (explicitly: it starts off), as on the owner's machine.
+  claudeIntegrationStatus: { ...READY.claudeIntegrationStatus, modules: moduleStatus({ memory: 'active', 'ci-watch': 'active', 'verify-done': 'shadow' }) },
 }
 
 /** A scenario may need one click before the shot -- see SEEDS. `baseline`

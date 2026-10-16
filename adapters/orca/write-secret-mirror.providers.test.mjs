@@ -48,6 +48,12 @@ test('clear with a Cloudflare name removes only that line; the file goes when no
   assert.equal(existsSync(join(where.dir, 'env')), false)
 })
 
+test('clearing the Jev key keeps the Cloudflare lines, so Clef-only works with no Jev key', () => {
+  const where = configDir('TYPESAFE_API_KEY=jev\nCLOUDFLARE_ACCOUNT_ID=acct\nCLOUDFLARE_API_TOKEN=tok\n')
+  assert.deepEqual(run(where, ['clear', 'TYPESAFE_API_KEY']), { ok: true })
+  assert.equal(readFileSync(join(where.dir, 'env'), 'utf8'), 'CLOUDFLARE_ACCOUNT_ID=acct\nCLOUDFLARE_API_TOKEN=tok\n')
+})
+
 test('save and clear refuse any name that is not one of the three secrets', () => {
   const where = configDir('TYPESAFE_API_KEY=jev\n')
   const result = run(where, ['save', 'PATH'], 'x')

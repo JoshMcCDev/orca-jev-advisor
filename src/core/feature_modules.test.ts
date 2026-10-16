@@ -80,9 +80,9 @@ test("the registry module is pure: no node: import, so the mod sandbox can load 
   assert.doesNotMatch(source, /from "node:/);
 });
 
-test("defaults: every earlier module is active, so an upgrade with no file keeps 0.6.28 behaviour; verify-done, ci-watch and memory, new, start in shadow", () => {
-  assert.deepEqual(DEFAULT_FEATURE_MODULES, { gate: "active", "model-router": "active", steward: "active", "skill-selection": "active", board: "active", "verify-done": "shadow", "ci-watch": "shadow", memory: "shadow" });
-  for (const module of FEATURE_MODULES) assert.equal(module.defaultState, module.id === "verify-done" || module.id === "ci-watch" || module.id === "memory" ? "shadow" : "active", module.id);
+test("defaults: every earlier module is active, so an upgrade with no file keeps 0.6.28 behaviour; ci-watch and memory, new, start in shadow; verify-done starts off (0.13.0: 11 of 12 flags were false)", () => {
+  assert.deepEqual(DEFAULT_FEATURE_MODULES, { gate: "active", "model-router": "active", steward: "active", "skill-selection": "active", board: "active", "verify-done": "off", "ci-watch": "shadow", memory: "shadow" });
+  for (const module of FEATURE_MODULES) assert.equal(module.defaultState, module.id === "verify-done" ? "off" : module.id === "ci-watch" || module.id === "memory" ? "shadow" : "active", module.id);
   assert.deepEqual(parseFeatureModules(""), DEFAULT_FEATURE_MODULES);
 });
 
@@ -90,13 +90,14 @@ test("verify-done: off and shadow only, one Jev feature on turn.complete, no set
   const entry = FEATURE_MODULES.find((module) => module.id === "verify-done");
   assert.ok(entry !== undefined);
   assert.deepEqual(entry.states, ["off", "shadow"]);
-  assert.equal(entry.defaultState, "shadow");
+  assert.equal(entry.defaultState, "off");
   assert.deepEqual(entry.modFeatures, [{ id: "verify-done", hooks: ["turn.complete"], jev: true }]);
   assert.deepEqual(entry.hooks, []);
   assert.deepEqual(entry.workerJobs, []);
   assert.deepEqual(entry.modes, []);
-  // An upgrade with no module file measures; Off runs nothing of it.
-  assert.equal(modFeaturesOn(parseFeatureModules("")).includes("verify-done"), true);
+  // An install with no module file runs nothing of it; Shadow measures.
+  assert.equal(modFeaturesOn(parseFeatureModules("")).includes("verify-done"), false);
+  assert.equal(modFeaturesOn(withStates({ "verify-done": "shadow" })).includes("verify-done"), true);
   assert.equal(modFeaturesOn(withStates({ "verify-done": "off" })).includes("verify-done"), false);
   assert.equal(parseFeatureModules(fileWith({ "verify-done": "off" }))["verify-done"], "off");
 });
@@ -163,11 +164,13 @@ test("defaults: each feature's own mode decides, exactly as today", () => {
   assert.equal(effectiveMode(moduleState(modules, "gate"), "active"), "active");
 });
 
-test("defaults: every installed hook, every mod feature and every worker job stays on", () => {
+test("defaults: every installed hook, every worker job and every mod feature but verify-done stays on", () => {
   const modules = parseFeatureModules("");
   assert.deepEqual(new Set(hooksFor(modules).map(hookKey)), new Set(INSTALLED_HOOKS.map(hookKey)));
   assert.equal(hooksFor(modules).length, INSTALLED_HOOKS.length);
-  assert.deepEqual(new Set(modFeaturesOn(modules)), new Set(FEATURE_MODULES.flatMap((module) => module.modFeatures.map((feature) => feature.id))));
+  // verify-done starts off (0.13.0), so its mod feature is the only one not on; it adds no settings hook.
+  assert.deepEqual(new Set(modFeaturesOn(modules)), new Set(FEATURE_MODULES.flatMap((module) => module.modFeatures.map((feature) => feature.id)).filter((id) => id !== "verify-done")));
+  assert.equal(modFeaturesOn(modules).includes("verify-done"), false);
   assert.equal(modCopyNeeded(modules), true);
   assert.deepEqual(new Set(workerJobsOn(modules)), new Set(FEATURE_MODULES.flatMap((module) => module.workerJobs.map((job) => job.id))));
 });
@@ -246,10 +249,10 @@ test("modFeaturesOn and modCopyNeeded: the mod copy stays while any mod module i
   assert.deepEqual(modFeaturesOn(modModulesOff), []);
   assert.equal(modCopyNeeded(modModulesOff), false);
   // verify-done, ci-watch or memory in shadow is a mod module on: any one keeps the copy alone.
-  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "ci-watch": "off", memory: "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "shadow", "ci-watch": "off", memory: "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", memory: "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off", "ci-watch": "off" })), true);
-  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off" })), true);
+  assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "shadow" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "off", "verify-done": "off" })), true);
   assert.equal(modCopyNeeded(withStates({ gate: "off", board: "off" })), true);
   assert.equal(modCopyNeeded(withStates({ "model-router": "off", steward: "off", "skill-selection": "shadow" })), true);
