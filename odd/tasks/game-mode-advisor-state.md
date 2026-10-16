@@ -29,7 +29,11 @@ steward's /clear hint and a finished CI run); the toasts still show.
 - [x] G1 pure module `src/core/advisor_state.ts`: `parseOrcaGameMode`, `buildAdvisorState`, notices list. RED first.
 - [x] G2 hooks: game mode silences the line and the band and publishes `advisor`; off writes nothing. RED first.
 - [x] G3 contract type, CHANGELOG and version 0.12.0.
-- [ ] G4 checks: `npm run preflight`, `npm run shots:band` (non-game band unchanged) done; contract NOT delivered to orca-oss-d9 (not reachable on 2026-10-16), written to the brief's scratchpad as `jev-game-contract.md` instead.
+- [x] G4 checks: `npm run preflight`, `npm run shots:band` (non-game band unchanged) done; contract NOT delivered to orca-oss-d9 (not reachable on 2026-10-16), written to the brief's scratchpad as `jev-game-contract.md` instead.
+
+## Follow-ups
+- [x] G5 (0.12.1) `ORCA_GAME_HUD` `0`/`false` is no game: orca-game neither draws its band nor absorbs other plugins' lines then. RED first.
+- [ ] G6 a game turned off while the session runs (`/quest off`, Orca's live game config) is invisible to Jev, which stays silent. Needs orca-game to say so (see the 0.12.0 contract note).
 
 ## Evidence
 - `npm run preflight`: 4374 tests pass, typecheck clean; the real `claude plugin validate` passes and lists `orca-jev-mod-skills.advisor`.

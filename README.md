@@ -16,6 +16,12 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.12.1
+
+- **Jev shows again in a game pane with the game's band hidden.** When Orca's agent game runs with its band (HUD) turned off, Jev now draws its own status line and agents band, as it does everywhere else.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.12.0
 
 - **Jev inside Orca's agent game.** In a Claude Agent Teams pane that Orca opens with its game, Jev no longer draws its own status line or its agents band over the scene. It keeps working exactly as before and hands the same information (model, effort, running agents, CI watches and its notices) to the game, which shows it in its own style. Everywhere else nothing changes.
