@@ -77,6 +77,14 @@ test("free checks: a slash command is skipped, in the typed form and the transcr
   assert.deepEqual(freeChecks({ agentId: undefined, reason: "answer", prompt: "<command-name>/clear</command-name>" }), { pass: false, skip: "slash-command" });
 });
 
+test("free checks: a prompt a plugin submitted between turns is not the person's words, so no Haiku call", () => {
+  // As the transcript stores it (this session, 2026-10-16): the CI watcher's note, wrapped by Claude Code.
+  const note = "The orca-jev-mod-skills plugin sent a message:\nCI for 03eb3e7 on feat/x: success, https://github.com/a/b/actions/runs/1\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.";
+  assert.deepEqual(freeChecks({ agentId: undefined, reason: "answer", prompt: note }), { pass: false, skip: "plugin-prompt" });
+  assert.deepEqual(freeChecks({ agentId: undefined, reason: "answer", prompt: "The acme-tools plugin sent a message:\nbuild done" }), { pass: false, skip: "plugin-prompt" });
+  assert.deepEqual(freeChecks({ agentId: undefined, reason: "answer", prompt: "The plugin sent a message: did you see it?" }), { pass: true }, "a person writing about a plugin");
+});
+
 test("free checks: a path or a division typed mid-sentence is not a slash command", () => {
   assert.deepEqual(freeChecks({ agentId: undefined, reason: "answer", prompt: "mira src/a.ts y 6/3" }), { pass: true });
 });
