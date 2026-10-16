@@ -92,7 +92,8 @@
       "kind": "net:fetch",
       "hosts": [
         "api.typesafe.ai",
-        "platform.claude.com"
+        "platform.claude.com",
+        "api.cloudflare.com"
       ]
     }
   ]
