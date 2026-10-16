@@ -62,3 +62,16 @@ test("appends only add lines, and reads see the day the clock is in", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the ledger's entries read back one by one, for the board's windows; bad lines skipped", async () => {
+  const { parseNeuronLedgerEntries } = await import("./neuron_budget.ts");
+  const raw =
+    serializeNeuronLedgerEntry({ type: "neurons", at: "2026-10-16T01:00:00.000Z", model: "clef", neurons: 10.5 }) +
+    "{bad\n" +
+    JSON.stringify({ type: "neurons", at: 3, model: "clef", neurons: 1 }) + "\n" +
+    serializeNeuronLedgerEntry({ type: "allowance-exhausted", at: "2026-10-16T03:00:00.000Z" });
+  assert.deepEqual(parseNeuronLedgerEntries(raw), [
+    { type: "neurons", at: "2026-10-16T01:00:00.000Z", model: "clef", neurons: 10.5 },
+    { type: "allowance-exhausted", at: "2026-10-16T03:00:00.000Z" },
+  ]);
+});

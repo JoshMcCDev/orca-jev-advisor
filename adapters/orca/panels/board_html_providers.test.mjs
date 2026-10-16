@@ -1,0 +1,71 @@
+// Multi-provider P7 (odd/tasks/multi-provider.md): the board's "Who decides"
+// card -- answers by provider, doubt escalations, failovers, Clef's
+// confident errors and neurons against the free allowance, for the board's
+// global window. board.html has no module graph, so its pure helper is read
+// from the panel's own source and evaluated here; real-DOM coverage is in
+// scripts/panels.spec.mjs.
+import { strict as assert } from 'node:assert'
+import { readFileSync } from 'node:fs'
+import { test } from 'node:test'
+
+import { extractFunction } from './panel_html_copies.mjs'
+
+const boardHtml = readFileSync(new URL('./board.html', import.meta.url), 'utf8')
+const providerFacts = new Function(`${extractFunction(boardHtml, 'providerFacts')}; return providerFacts`)()
+
+function catalogBlock (locale) {
+  const start = boardHtml.indexOf(`        ${locale}: {`)
+  return boardHtml.slice(start, boardHtml.indexOf('\n        }', start))
+}
+
+const escalations = (over) => ({ doubt: 0, failure: 0, 'rate-limit': 0, budget: 0, unsupported: 0, policy: 0, unconfigured: 0, ...over })
+const window = (providers, neurons = { spent: 0, calls: 0 }) => ({ providers, neurons })
+const budget = (spent, exhausted = false) => ({ today: { spent, calls: 1, exhausted }, allowance: 10000, stop: 9000 })
+
+test('a Jev-only window with no spend today shows no card', () => {
+  const facts = providerFacts(window({ tagged: 0, answeredBy: { jev: 0, clef: 0 }, escalations: escalations({}), clefUnanswered: 0, shadow: { agree: 0, disagree: 0 } }), budget(0))
+  assert.equal(facts.visible, false)
+  assert.equal(providerFacts({}, null).visible, false, 'an older reading without the fields shows nothing')
+})
+
+test('the figures: answers, doubt, failovers by reason, unanswered, confident errors, neurons', () => {
+  const facts = providerFacts(window({
+    tagged: 30,
+    answeredBy: { jev: 8, clef: 20 },
+    escalations: escalations({ doubt: 5, failure: 1, 'rate-limit': 1, budget: 1, unsupported: 0, policy: 2 }),
+    clefUnanswered: 2,
+    shadow: { agree: 3, disagree: 1 }
+  }, { spent: 210.4, calls: 20 }), budget(4500))
+  assert.equal(facts.visible, true)
+  assert.equal(facts.clef, 20)
+  assert.equal(facts.jev, 8)
+  assert.equal(facts.doubt, 5)
+  assert.equal(facts.failovers, 3)
+  assert.equal(facts.policy, 2)
+  assert.equal(facts.unanswered, 2)
+  assert.equal(facts.shadowTotal, 4)
+  assert.equal(facts.confidentErrors, 1)
+  assert.equal(facts.windowNeurons, 210.4)
+  assert.equal(facts.todaySpent, 4500)
+  assert.equal(facts.todayShare, 45)
+  assert.equal(facts.clefOff, false)
+})
+
+test('Clef is off for the day once the stop is reached or Cloudflare said the allowance is spent', () => {
+  const tagged = { tagged: 1, answeredBy: { jev: 1, clef: 0 }, escalations: escalations({ budget: 1 }), clefUnanswered: 0, shadow: { agree: 0, disagree: 0 } }
+  assert.equal(providerFacts(window(tagged), budget(9000)).clefOff, true)
+  assert.equal(providerFacts(window(tagged), budget(10, true)).clefOff, true)
+  assert.equal(providerFacts(window(tagged), budget(8999)).clefOff, false)
+  // Spend today with no tagged decision in the window still shows the card.
+  assert.equal(providerFacts(window({ ...tagged, tagged: 0 }), budget(5)).visible, true)
+})
+
+test('the card and every string it uses exist, in both languages', () => {
+  assert.match(boardHtml, /<section class="card wide" id="card-providers"/)
+  const keys = ['providers.heading', 'providers.answered', 'providers.clef', 'providers.jev', 'providers.doubt', 'providers.failovers',
+    'providers.policy', 'providers.unanswered', 'providers.shadow', 'providers.shadowNone', 'providers.windowNeurons', 'providers.today', 'providers.off']
+  for (const locale of ['es', 'en']) {
+    const block = catalogBlock(locale)
+    for (const key of keys) assert.ok(block.includes(`'${key}':`), `${locale} is missing ${key}`)
+  }
+})

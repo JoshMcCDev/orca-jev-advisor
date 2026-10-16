@@ -35,7 +35,7 @@ import { decidePolicySeedNotice } from '../src/core/policy_seed_notice.ts'
 import { parseModelSeedEntries, parseModelSeedVersion } from '../src/core/model_catalog.ts'
 import { decideModelSeedNotice, diffModelSeed } from '../src/core/model_seed_notice.ts'
 import { summarizeModelMeasurements } from '../src/core/model_measurement.ts'
-import { foldGateDecisions } from '../src/core/gate_stats.ts'
+import { emptyProviderCounts, foldGateDecisions } from '../src/core/gate_stats.ts'
 import { foldAbResults } from '../src/core/ab_report.ts'
 import { EMPTY_AUTHORIZATIONS, authorizationRows, recordAuthorization } from '../src/core/gate_authorizations.ts'
 import { parseTrustedPrograms } from '../src/core/trusted_programs.ts'
@@ -194,6 +194,21 @@ const READY_DAY = {
     quiet: { families: 60, total: 935 },
   },
   approvals: { asked: 89, approved: 71, rejected: 0, notRun: 9, awaiting: 9, ceiling: { highestApproved: 2.65, lowestRejected: null, band: null, suggestedCeiling: null, approvedCount: 37, rejectedCount: 0 } },
+  // Multi-provider P7: a day in Both mode, the owner's volume (about 2,100
+  // model calls) against Clef's free allowance. The 2,101 model-judged
+  // decisions split into 700 Clef and 1,401 Jev answers; most of Jev's are the
+  // spent day (Clef stopped at 9,000 neurons), the rest doubt (about one in
+  // five of what Clef answered, as in the 2026-10-16 replay), failures,
+  // per-minute limits and policy questions. 850 Clef calls at ~10.5 neurons.
+  providers: {
+    ...emptyProviderCounts(),
+    tagged: 2146,
+    answeredBy: { jev: 1401, clef: 700 },
+    escalations: { ...emptyProviderCounts().escalations, doubt: 150, failure: 6, 'rate-limit': 5, budget: 1220, policy: 20 },
+    clefUnanswered: 0,
+    shadow: { agree: 34, disagree: 1 },
+  },
+  neurons: { spent: 8899.7, calls: 850 },
 }
 const READY_ALL = {
   key: 'all', available: true, pluginVersion: null, since: null, sinceMs: null, coverageSinceMs: null,
@@ -223,6 +238,9 @@ const READY_ALL = {
     quiet: { families: 69, total: 779 },
   },
   approvals: { asked: 106, approved: 81, rejected: 1, notRun: 15, awaiting: 9, ceiling: { highestApproved: 2.65, lowestRejected: null, band: null, suggestedCeiling: null, approvedCount: 43, rejectedCount: 0 } },
+  // Multi-provider: Both mode was turned on today, so everything Clef did is in the day too.
+  providers: READY_DAY.providers,
+  neurons: READY_DAY.neurons,
 }
 const READY_WINDOWS = {
   version: { ...emptyWindow('version'), available: false },
@@ -244,6 +262,8 @@ function emptyWindow (key) {
       asked: 0, approved: 0, rejected: 0, notRun: 0, awaiting: 0,
       ceiling: { highestApproved: null, lowestRejected: null, band: null, suggestedCeiling: null, approvedCount: 0, rejectedCount: 0 },
     },
+    providers: emptyProviderCounts(),
+    neurons: { spent: 0, calls: 0 },
   }
 }
 
@@ -407,6 +427,7 @@ const READY = {
       bySource: {'local-rule': 126, cache: 278, jev: 3262, none: 45},
       jevLatency: {sampleCount: 3262, medianMs: 530, p95Ms: 1131, maxMs: 1809},
       windows: READY_WINDOWS,
+      clefBudget: { today: { spent: 8899.7, calls: 850, exhausted: false }, allowance: 10000, stop: 9000 },
       health: { lastJevAt: '2026-09-25T00:28:45.360Z', consecutiveFailures: 0, lastFailureAt: '2026-09-24T20:25:32.366Z', appendFailures: { count: 0, lastAt: null } },
       byCommandFamily: [
         { commandFamily: 'cd', total: 511, byVerdict: { allow: 498, ask: 13, deny: 0 } },
@@ -611,6 +632,7 @@ const EMPTY = {
     gate: {
       ...EMPTY_GATE_SUMMARY,
       windows: { version: emptyWindow('version'), day: emptyWindow('day'), week: emptyWindow('week'), all: emptyWindow('all') },
+      clefBudget: { today: { spent: 0, calls: 0, exhausted: false }, allowance: 10000, stop: 9000 },
       health: { lastJevAt: null, consecutiveFailures: 0, lastFailureAt: null, appendFailures: { count: 0, lastAt: null } },
       corruptLines: 0,
       cacheHitRate: null,

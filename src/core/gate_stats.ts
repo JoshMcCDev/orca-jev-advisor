@@ -21,6 +21,7 @@
 // latency sample.
 
 import type { GateDecisionRecord, GateSource, GateVerdict } from "./gate_measurement.ts";
+import { ESCALATIONS, type Escalation } from "./provider_cascade.ts";
 
 export interface GateVerdictCounts {
   readonly allow: number;
@@ -82,6 +83,47 @@ export interface GateProjectStat {
   readonly total: number;
 }
 
+/**
+ * Multi-provider (odd/tasks/multi-provider.md, P7): the decisions that carry
+ * a `provider` -- only written outside Jev-only mode, so a Jev-only log has
+ * none (`tagged` 0).
+ *   answeredBy     -- model-judged decisions by who answered.
+ *   escalations    -- why Jev answered in both mode.
+ *   clefUnanswered -- Clef was the one asked and nobody answered (Clef-only
+ *                     mode, or both mode with no Jev key): the gate failed open.
+ *   shadow         -- sampled confident Clef answers also put to Jev: whether
+ *                     Jev's verdict agreed (Clef's confident-error rate).
+ */
+export interface GateProviderCounts {
+  readonly tagged: number;
+  readonly answeredBy: { readonly jev: number; readonly clef: number };
+  readonly escalations: Readonly<Record<Escalation, number>>;
+  readonly clefUnanswered: number;
+  readonly shadow: { readonly agree: number; readonly disagree: number };
+}
+
+export function emptyProviderCounts(): GateProviderCounts {
+  const escalations = Object.fromEntries(ESCALATIONS.map((reason) => [reason, 0])) as Record<Escalation, number>;
+  return { tagged: 0, answeredBy: { jev: 0, clef: 0 }, escalations, clefUnanswered: 0, shadow: { agree: 0, disagree: 0 } };
+}
+
+function addProviderRecord(counts: GateProviderCounts, record: GateDecisionRecord): GateProviderCounts {
+  if (record.provider === undefined) return counts;
+  const answered = record.source === "jev";
+  return {
+    tagged: counts.tagged + 1,
+    answeredBy: answered ? { ...counts.answeredBy, [record.provider]: counts.answeredBy[record.provider] + 1 } : counts.answeredBy,
+    escalations: record.escalation !== undefined ? { ...counts.escalations, [record.escalation]: counts.escalations[record.escalation] + 1 } : counts.escalations,
+    clefUnanswered: counts.clefUnanswered + (record.source === "none" && record.provider === "clef" ? 1 : 0),
+    shadow:
+      record.shadowAgrees === undefined
+        ? counts.shadow
+        : record.shadowAgrees
+          ? { ...counts.shadow, agree: counts.shadow.agree + 1 }
+          : { ...counts.shadow, disagree: counts.shadow.disagree + 1 },
+  };
+}
+
 export interface GateStatsSummary {
   readonly totalDecisions: number;
   readonly byVerdict: GateVerdictCounts;
@@ -104,6 +146,8 @@ export interface GateStatsSummary {
   readonly byPluginVersion: readonly GatePluginVersionStat[];
   /** How many folded records carry no `pluginVersion` at all -- written before that field existed. */
   readonly noPluginVersionCount: number;
+  /** Multi-provider: who answered and why Jev did. */
+  readonly providers: GateProviderCounts;
 }
 
 function emptyVerdictCounts(): GateVerdictCounts {
@@ -180,6 +224,8 @@ export interface GateTally {
   readonly noPluginVersionCount: number;
   /** `[latencyMs, how many jev records had it]`, ascending by latency. */
   readonly jevLatencies: readonly (readonly [number, number])[];
+  /** Multi-provider; zero in a tally read from a totals file written before it existed. */
+  readonly providers: GateProviderCounts;
 }
 
 export function emptyGateTally(): GateTally {
@@ -192,6 +238,7 @@ export function emptyGateTally(): GateTally {
     pluginVersions: [],
     noPluginVersionCount: 0,
     jevLatencies: [],
+    providers: emptyProviderCounts(),
   };
 }
 
@@ -204,8 +251,10 @@ export function tallyGateDecisions(tally: GateTally, records: readonly GateDecis
   const pluginVersions = new Map<string, number>(tally.pluginVersions);
   let noPluginVersionCount = tally.noPluginVersionCount;
   const latencies = new Map<number, number>(tally.jevLatencies);
+  let providers = tally.providers;
 
   for (const record of records) {
+    providers = addProviderRecord(providers, record);
     byVerdict = incrementVerdict(byVerdict, record.verdict);
     bySource[record.source] += 1;
 
@@ -231,6 +280,7 @@ export function tallyGateDecisions(tally: GateTally, records: readonly GateDecis
     pluginVersions: [...pluginVersions.entries()],
     noPluginVersionCount,
     jevLatencies: [...latencies.entries()].sort((a, b) => a[0] - b[0]),
+    providers,
   };
 }
 
@@ -272,6 +322,7 @@ export function summarizeGateTally(tally: GateTally): GateStatsSummary {
     byProject,
     byPluginVersion,
     noPluginVersionCount: tally.noPluginVersionCount,
+    providers: tally.providers,
   };
 }
 

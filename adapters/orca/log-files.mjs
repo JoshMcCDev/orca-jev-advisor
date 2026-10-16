@@ -18,6 +18,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { canonicalCommandFamily } from '../../src/core/gate_measurement.ts'
+import { isEscalation } from '../../src/core/provider_cascade.ts'
 import { GATE_DECISIONS_APPEND_FAILURES_FILE, gateDecisionFilesToRead, parseAppendFailures } from '../../src/core/measurement_files.ts'
 import { addGateDecisions, emptyGateDecisionTotals, GATE_DECISION_TOTALS_FILE, isFoldedFile, parseGateDecisionTotals } from '../../src/core/gate_decision_totals.ts'
 import { BOARD_WINDOW_KEYS, boardWindows, coverageSinceMs, versionStartOf, windowSpanMs } from '../../src/core/board_windows.ts'
@@ -296,6 +297,12 @@ export function toGateDecisionRecord (row) {
     // disk where the key never existed at all, same reasoning as
     // buildGateDecisionRecord in gate_measurement.ts.
     ...(row.pluginVersion !== undefined ? { pluginVersion: row.pluginVersion } : {}),
+    // Multi-provider (odd/tasks/multi-provider.md): who answered and why Jev
+    // did. Optional on read, like pluginVersion; a value this reader does not
+    // know is left out rather than dropping the whole decision.
+    ...(row.provider === 'jev' || row.provider === 'clef' ? { provider: row.provider } : {}),
+    ...(isEscalation(row.escalation) ? { escalation: row.escalation } : {}),
+    ...(typeof row.shadowAgrees === 'boolean' ? { shadowAgrees: row.shadowAgrees } : {}),
   }
 }
 

@@ -147,3 +147,21 @@ test("T1: a reader skips a folded file only while it is still the file that was 
   assert.equal(isFoldedFile(totals, "gate-decisions.jsonl", { size: 40, mtimeMs: 9 }), false, "written again under the same name");
   assert.equal(isFoldedFile(totals, "gate-decisions-2026-09-01T10.jsonl", { size: 100, mtimeMs: 5 }), false);
 });
+
+// Multi-provider P7: the provider counts survive a fold, and a totals file written before they existed still reads.
+test("provider counts are kept in the totals, and an older totals file reads with them at zero", () => {
+  const totals = addGateDecisions(emptyGateDecisionTotals(), batch([
+    record({ at: "2026-10-16T10:00:00.000Z", source: "jev", verdict: "allow", provider: "clef" }),
+    record({ at: "2026-10-16T10:01:00.000Z", source: "jev", verdict: "allow", provider: "jev", escalation: "doubt" }),
+  ]));
+  const roundTrip = parseGateDecisionTotals(JSON.parse(JSON.stringify(totals)));
+  assert.ok(roundTrip !== null);
+  assert.equal(roundTrip.all.providers.answeredBy.clef, 1);
+  assert.equal(roundTrip.all.providers.escalations.doubt, 1);
+  const older = JSON.parse(JSON.stringify(totals));
+  delete older.all.providers;
+  const parsedOlder = parseGateDecisionTotals(older);
+  assert.ok(parsedOlder !== null, "a totals file from before the provider counts must not be thrown away");
+  assert.equal(parsedOlder.all.providers.tagged, 0);
+  assert.equal(parsedOlder.all.totalDecisions, 2);
+});

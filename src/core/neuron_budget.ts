@@ -41,11 +41,9 @@ export function serializeNeuronLedgerEntry(entry: NeuronLedgerEntry): string {
   return `${JSON.stringify(entry)}\n`;
 }
 
-/** Sums one day's ledger; a malformed line is skipped, never thrown on. */
-export function parseNeuronLedger(raw: string): NeuronBudgetDay {
-  let spent = 0;
-  let calls = 0;
-  let exhausted = false;
+/** One ledger's entries, in file order; a malformed line is skipped, never thrown on. */
+export function parseNeuronLedgerEntries(raw: string): NeuronLedgerEntry[] {
+  const entries: NeuronLedgerEntry[] = [];
   for (const line of raw.split("\n")) {
     if (line.trim().length === 0) continue;
     let parsed: unknown;
@@ -54,11 +52,26 @@ export function parseNeuronLedger(raw: string): NeuronBudgetDay {
     } catch {
       continue;
     }
-    if (!isRecord(parsed)) continue;
-    if (parsed.type === "neurons" && typeof parsed.neurons === "number" && Number.isFinite(parsed.neurons) && parsed.neurons >= 0) {
-      spent += parsed.neurons;
-      calls += 1;
+    if (!isRecord(parsed) || typeof parsed.at !== "string") continue;
+    if (parsed.type === "neurons" && typeof parsed.model === "string" && typeof parsed.neurons === "number" && Number.isFinite(parsed.neurons) && parsed.neurons >= 0) {
+      entries.push({ type: "neurons", at: parsed.at, model: parsed.model, neurons: parsed.neurons });
     } else if (parsed.type === "allowance-exhausted") {
+      entries.push({ type: "allowance-exhausted", at: parsed.at });
+    }
+  }
+  return entries;
+}
+
+/** Sums one day's ledger; a malformed line is skipped, never thrown on. */
+export function parseNeuronLedger(raw: string): NeuronBudgetDay {
+  let spent = 0;
+  let calls = 0;
+  let exhausted = false;
+  for (const entry of parseNeuronLedgerEntries(raw)) {
+    if (entry.type === "neurons") {
+      spent += entry.neurons;
+      calls += 1;
+    } else {
       exhausted = true;
     }
   }

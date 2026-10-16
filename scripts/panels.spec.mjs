@@ -830,6 +830,33 @@ test('an install that never set the queue mode shows "ask now" and saves it', { 
   }
 })
 
+// Multi-provider P7: the board's "Who decides?" card follows the global window.
+test('the board shows who decided, the escalations, the confident errors and today\'s neurons', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openBoardPanel(SCENARIOS.ready)
+  try {
+    assert.equal(await page.evaluate(() => document.getElementById('card-providers').style.display), '')
+    const text = await page.textContent('#card-providers')
+    assert.match(text, /2,101/)
+    assert.match(text, /Clef was in doubt 150 times/)
+    assert.match(text, /Sent to Jev because Clef failed: 1,231/)
+    assert.match(text, /Jev disagreed with 1 of 35 sampled Clef answers/)
+    assert.match(text, /Today \(UTC\): 8,900 of 10,000 free neurons; Clef stops at 9,000\./)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('the board hides the provider card on an install with no provider decision and no Clef spend', { skip: chromium && SCENARIOS ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openBoardPanel(SCENARIOS.empty)
+  try {
+    assert.equal(await page.evaluate(() => document.getElementById('card-providers').style.display), 'none')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
 // Multi-provider P6: the decision provider section on the General tab.
 test('the provider section shows the stored mode and model, masks the credentials, and Save writes the choice', { skip: chromium ? false : 'playwright is not installed' }, async () => {
   const { browser, page, errors } = await openPanel({
@@ -2544,7 +2571,7 @@ test('every consumption.* key in one language catalog exists in the other, and t
 
 const BOARD_TABS = ['gate', 'activity', 'consumption', 'skills']
 const BOARD_TAB_SECTIONS = {
-  gate: ['card-calibration', 'card-empty', 'card-interventions', 'card-recent', 'card-speed', 'card-status', 'card-toll', 'card-unmeasured', 'card-waiting'],
+  gate: ['card-calibration', 'card-empty', 'card-interventions', 'card-providers', 'card-recent', 'card-speed', 'card-status', 'card-toll', 'card-unmeasured', 'card-waiting'],
   activity: ['card-live', 'card-projects'],
   consumption: ['card-consumption'],
   // W3: the last tab is the modules' -- the skills mod, memory, the CI

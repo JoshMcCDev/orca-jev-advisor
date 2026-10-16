@@ -243,6 +243,9 @@
       .cmp-track { background: var(--secondary, var(--fb-secondary)); border-radius: var(--radius-md); height: 16px; overflow: hidden; }
       .cmp-fill { display: block; height: 100%; background: var(--viz); border-radius: var(--radius-md); min-width: 3px; }
       .cmp-foot { font-size: 11px; color: var(--muted-foreground, var(--fb-muted-foreground)); margin: 2px 0 0; }
+      /* Multi-provider: a line that says the gate is not judging (Clef unanswered, Clef off for the day). */
+      .provider-meter { margin-top: 6px; }
+      .cmp-foot.alarm-line { color: var(--destructive, var(--fb-destructive)); font-weight: 600; }
       .verdict-chip { font-variant-numeric: tabular-nums; }
 
       /* ---- the four questions ------------------------------------------
@@ -461,6 +464,17 @@
     </div>
 
     <div class="cards">
+      <!--
+        Multi-provider P7 (odd/tasks/multi-provider.md): who answered the gate
+        in this window, why Jev did, failovers, Clef's confident errors and
+        the neurons against the free allowance. Hidden on a Jev-only install
+        (no provider-tagged decision and no Clef spend) -- see providerFacts.
+      -->
+      <section class="card wide" id="card-providers" style="display:none">
+        <h2><span data-i18n="providers.heading"></span><span class="win" id="win-providers"></span></h2>
+        <div id="providers-body"></div>
+      </section>
+
       <section class="card wide" id="card-recent">
         <h2><span data-i18n="stats.recentHeading"></span><span class="win" id="win-recent"></span></h2>
         <div id="stats-recent"></div>
@@ -543,6 +557,19 @@
       // ---------- catalogo de idioma (es/en) --------------------------------
       var CATALOG = {
         es: {
+          'providers.heading': '¿Quién decide?',
+          'providers.answered': 'juzgados por un modelo',
+          'providers.clef': 'Clef',
+          'providers.jev': 'Jev',
+          'providers.doubt': 'Clef dudó {{n}} veces; esas las respondió Jev.',
+          'providers.failovers': 'Pasaron a Jev por falla de Clef: {{n}} (error {{failure}}, límite por minuto {{rate}}, cuota del día {{budget}}, demasiado grande {{unsupported}}).',
+          'providers.policy': 'Preguntas de política enviadas directo a Jev: {{n}}.',
+          'providers.unanswered': 'Se le preguntó a Clef y nadie respondió {{n}} veces: esos comandos pasaron sin juicio.',
+          'providers.shadow': 'Errores con confianza: Jev no estuvo de acuerdo con {{n}} de {{total}} respuestas de Clef muestreadas ({{pct}}).',
+          'providers.shadowNone': 'Errores con confianza: todavía no hay respuestas de Clef muestreadas.',
+          'providers.windowNeurons': 'Neuronas de Clef en esta ventana: {{n}} en {{calls}} llamadas.',
+          'providers.today': 'Hoy (UTC): {{n}} de {{allowance}} neuronas gratis; Clef se detiene en {{stop}}.',
+          'providers.off': 'Clef está apagado hasta las 00:00 UTC: en «Ambos» responde Jev; en «Solo Clef» los comandos pasan sin juicio.',
           'window.label': 'Ventana de tiempo',
           'window.version': 'Esta versión ({{v}})',
           'window.versionNone': 'Esta versión',
@@ -812,6 +839,19 @@
           'consumption.stewardVerified': 'Ahorro verificado: {{tokens}} tokens que el agente principal no releyó, un {{share}} de su contexto. Medido sobre el uso real en {{verified}} de {{compactions}} compactaciones.',
         },
         en: {
+          'providers.heading': 'Who decides?',
+          'providers.answered': 'judged by a model',
+          'providers.clef': 'Clef',
+          'providers.jev': 'Jev',
+          'providers.doubt': 'Clef was in doubt {{n}} times; Jev answered those.',
+          'providers.failovers': 'Sent to Jev because Clef failed: {{n}} (error {{failure}}, per-minute limit {{rate}}, spent day {{budget}}, too large {{unsupported}}).',
+          'providers.policy': 'Policy questions sent straight to Jev: {{n}}.',
+          'providers.unanswered': 'Clef was asked and nobody answered {{n}} times: those commands passed unjudged.',
+          'providers.shadow': 'Confident errors: Jev disagreed with {{n}} of {{total}} sampled Clef answers ({{pct}}).',
+          'providers.shadowNone': 'Confident errors: no sampled Clef answer yet.',
+          'providers.windowNeurons': 'Clef neurons in this window: {{n}} over {{calls}} calls.',
+          'providers.today': 'Today (UTC): {{n}} of {{allowance}} free neurons; Clef stops at {{stop}}.',
+          'providers.off': 'Clef is off until 00:00 UTC: in Both, Jev answers; in Clef only, commands pass unjudged.',
           'window.label': 'Time window',
           'window.version': 'This version ({{v}})',
           'window.versionNone': 'This version',
@@ -1751,6 +1791,77 @@
           (unjudged > 0 ? line(t('load.unjudged', { n: num(unjudged) })) : '')
       }
 
+      // ---------- who decides (multi-provider P7) ------------------------------
+      /**
+       * The card's figures from one gate window and today's Clef budget. Pure:
+       * no DOM, no t(), so it is tested from the panel's own source
+       * (board_html_providers.test.mjs). Hidden (`visible` false) when the
+       * window holds no provider-tagged decision and Clef spent nothing today
+       * -- every Jev-only install, and any reading from before these fields.
+       */
+      function providerFacts (w, clefBudget) {
+        var p = (w && w.providers) || null
+        var esc = (p && p.escalations) || {}
+        var count = function (value) { return typeof value === 'number' && isFinite(value) ? value : 0 }
+        var today = (clefBudget && clefBudget.today) || { spent: 0, calls: 0, exhausted: false }
+        var allowance = clefBudget && clefBudget.allowance > 0 ? clefBudget.allowance : 10000
+        var stop = clefBudget && clefBudget.stop > 0 ? clefBudget.stop : 9000
+        var shadow = (p && p.shadow) || { agree: 0, disagree: 0 }
+        var neurons = (w && w.neurons) || { spent: 0, calls: 0 }
+        var todaySpent = count(today.spent)
+        return {
+          visible: count(p && p.tagged) > 0 || todaySpent > 0,
+          clef: count(p && p.answeredBy && p.answeredBy.clef),
+          jev: count(p && p.answeredBy && p.answeredBy.jev),
+          doubt: count(esc.doubt),
+          failure: count(esc.failure),
+          rateLimit: count(esc['rate-limit']),
+          budget: count(esc.budget),
+          unsupported: count(esc.unsupported),
+          failovers: count(esc.failure) + count(esc['rate-limit']) + count(esc.budget) + count(esc.unsupported),
+          policy: count(esc.policy),
+          unanswered: count(p && p.clefUnanswered),
+          shadowTotal: count(shadow.agree) + count(shadow.disagree),
+          confidentErrors: count(shadow.disagree),
+          windowNeurons: count(neurons.spent),
+          windowCalls: count(neurons.calls),
+          todaySpent: todaySpent,
+          todayShare: allowance > 0 ? (todaySpent / allowance) * 100 : 0,
+          allowance: allowance,
+          stop: stop,
+          clefOff: today.exhausted === true || todaySpent >= stop
+        }
+      }
+
+      function renderProviders (w, clefBudget) {
+        var f = providerFacts(w, clefBudget)
+        show('card-providers', f.visible)
+        if (!f.visible) return
+        var segments = [
+          { value: f.clef, cls: 'v1', label: t('providers.clef') },
+          { value: f.jev, cls: 'v2', label: t('providers.jev') }
+        ]
+        var answered = f.clef + f.jev
+        var parts = [
+          '<div class="kpi"><span class="kpi-n">' + esc(num(answered)) + '</span>' +
+            '<span class="kpi-unit">' + esc(t('providers.answered')) + '</span></div>',
+          stackedBar(segments, answered),
+          legendList(segments, answered)
+        ]
+        if (f.doubt > 0) parts.push(line(t('providers.doubt', { n: num(f.doubt) })))
+        if (f.failovers > 0) parts.push(line(t('providers.failovers', { n: num(f.failovers), failure: num(f.failure), rate: num(f.rateLimit), budget: num(f.budget), unsupported: num(f.unsupported) })))
+        if (f.policy > 0) parts.push(line(t('providers.policy', { n: num(f.policy) })))
+        if (f.unanswered > 0) parts.push(line(t('providers.unanswered', { n: num(f.unanswered) }), 'cmp-foot alarm-line'))
+        parts.push(line(f.shadowTotal > 0
+          ? t('providers.shadow', { n: num(f.confidentErrors), total: num(f.shadowTotal), pct: percentText((f.confidentErrors / f.shadowTotal) * 100) })
+          : t('providers.shadowNone')))
+        parts.push(line(t('providers.windowNeurons', { n: num(Math.round(f.windowNeurons)), calls: num(f.windowCalls) })))
+        parts.push(line(t('providers.today', { n: num(Math.round(f.todaySpent)), allowance: num(f.allowance), stop: num(f.stop) })))
+        parts.push('<div class="provider-meter">' + stackedBar([{ value: f.todaySpent, cls: f.clefOff ? 'vd' : 'v1', label: t('providers.today', { n: num(Math.round(f.todaySpent)), allowance: num(f.allowance), stop: num(f.stop) }) }], f.allowance) + '</div>')
+        if (f.clefOff) parts.push(line(t('providers.off'), 'cmp-foot alarm-line'))
+        el('providers-body').innerHTML = parts.join('')
+      }
+
       function countCell (value, cls) {
         var n = value || 0
         return '<td class="' + (n === 0 ? 'zero' : (cls || '')) + '">' + esc(num(n)) + '</td>'
@@ -2602,6 +2713,7 @@
         setWindowLabel('win-status', gateLabel)
         setWindowLabel('win-toll', gateLabel)
         setWindowLabel('win-interv', gateLabel)
+        setWindowLabel('win-providers', gateLabel)
         setWindowLabel('win-calibration', gateLabel)
         setWindowLabel('win-recent', t('window.ignoresRecent', { n: num((gate.recent || []).length) }))
         setWindowLabel('win-speed', t('window.ignoresAb'))
@@ -2623,6 +2735,8 @@
           // exactly what "no gate data" means here).
           renderStatus(gate.health || {}, {}, lastPoliciesWithoutKind)
         }
+        // Multi-provider P7: follows the window; Clef spend today shows it even before a decision is logged.
+        renderProviders(hasGate ? w : {}, gate.clefBudget || null)
         if (hasMeasurements) {
           renderUnmeasured()
           renderSpeed(ab)
