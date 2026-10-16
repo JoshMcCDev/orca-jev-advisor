@@ -200,6 +200,8 @@ import { CONSOLIDATE_LOCK, backupDir, checkUpdate, effectiveMemoryMode, lockHeld
 import { completeEngramSave, engramTypeOf, enqueueSave, isSettled, mirrors, nextAction, parseMemSaveResult, parseSpoolItem, planReplay, supersedeItem } from '../../../../src/core/memory_spool.ts'
 import type { FileOp, MemSaveOutcome, SpoolItem } from '../../../../src/core/memory_spool.ts'
 import { lockPid } from '../../../../src/core/memory_tidy.ts'
+import { buildAdvisorState, parseOrcaGameMode, withNotice } from '../../../../src/core/advisor_state.ts'
+import type { AdvisorMain, AdvisorNotice, GameMode } from '../../../../src/core/advisor_state.ts'
 import { isRecord } from '../../../../src/guards.ts'
 
 const DEFAULT_BUDGET_MS = 800
@@ -812,6 +814,8 @@ interface RunningSet {
   hydrated: Promise<void> | null
   writes: Promise<void>
   beforeLoad: Set<string> | null
+  /** Game mode: each write is where the band would redraw, so `advisor` is published after it (nothing without the game). */
+  readonly game: GameHost
 }
 
 /** 0.6.20 T2: once per load, at its first session.start: the agents the host runs already started before this load. Fails open: no list, no snapshot. */
@@ -845,6 +849,7 @@ function persistRunning($: EngineInterface, set: RunningSet): Promise<void> {
     } catch {
       // A lost copy only costs a reload's memory, never the spawn or the step.
     }
+    await publishIfGame($, set.game)
   })
   return set.writes
 }
@@ -1825,7 +1830,7 @@ async function routeTeammate($: EngineInterface, e: Frozen<TurnStepInput>, mode:
  * pre-computed target (a guard can hold a higher inherited value than the
  * tier's own target, which spawn time never sees).
  */
-async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, next: StreamNext<'turn.step'>, mode: RouterMode, options: PluginOptions, showRouterStatus: (text: string) => void, subagentEffortTarget: Map<string, SubagentEffortTarget>, project: string | null, noteEffort: (agentId: string, effort: SessionEffort | null, source: SubagentEffortSource, answeredBy?: string | null) => Promise<void>, effortLog: (e: Frozen<TurnStepInput>, input: TurnStepInput | Frozen<TurnStepInput>, r: TurnStepResult) => Promise<Record<string, unknown>>): StreamHookBody<TurnStepChunk, TurnStepResult> {
+async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, next: StreamNext<'turn.step'>, mode: RouterMode, options: PluginOptions, showRouterStatus: (text: string) => void, subagentEffortTarget: Map<string, SubagentEffortTarget>, project: string | null, noteEffort: (agentId: string, effort: SessionEffort | null, source: SubagentEffortSource, answeredBy?: string | null) => Promise<void>, effortLog: (e: Frozen<TurnStepInput>, input: TurnStepInput | Frozen<TurnStepInput>, r: TurnStepResult) => Promise<Record<string, unknown>>, noteMain: (model: string, effort: SessionEffort | null) => void): StreamHookBody<TurnStepChunk, TurnStepResult> {
   let input: TurnStepInput | Frozen<TurnStepInput> = e
   if (mode !== 'off' && e.agentId === undefined) {
     let held: RouterSticky | undefined
@@ -1907,6 +1912,9 @@ async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, nex
     } catch {
       // Visibility only: never a reason to hold the step.
     }
+  } else {
+    // Game mode: the model and effort the main loop is sent with, for `advisor`.
+    noteMain(input.model, input.effort ?? null)
   }
   const r = yield* next(input)
   if (e.agentId !== undefined) {
@@ -1968,6 +1976,8 @@ interface StewardHost {
   readonly runningTurn: () => string | null
   /** Sets the steward's part of the status line; null clears it. */
   readonly show: (text: string | null) => void
+  /** Game mode: the /clear suggestion's toast is kept as a notice in `advisor` (nothing without the game). */
+  readonly game: GameHost
   /** Track S: the idle timer's bookkeeping, plain data held by `register`. */
   readonly cold: PreColdIdle
 }
@@ -2194,7 +2204,11 @@ async function finishSteward($: EngineInterface, plan: StewardPlan, applied: boo
   })
   await appendStewardDecision($, at, `${JSON.stringify(record)}\n`)
   host.show(stewardStatusPart(plan.locale, { mode: plan.mode, decision: plan.decision.decision, applied, before: plan.contextBefore, after: contextAfter }))
-  if (applied && plan.decision.suggestClear) $.ui.toast(stewardClearHint(plan.locale), { timeoutMs: 15000 })
+  if (applied && plan.decision.suggestClear) {
+    const hint = stewardClearHint(plan.locale)
+    $.ui.toast(hint, { timeoutMs: 15000 })
+    await notifyGame($, host.game, { id: 'steward:clear', level: 'info', text: hint, at: await $.clock.now() })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2617,6 +2631,8 @@ interface CiWatchHost {
   /** The main turn running now (turn.start to turn.complete), null when the session is idle. */
   readonly runningTurn: () => string | null
   readonly modulesFile: FeatureModulesFile
+  /** Game mode: each write of the rows is where the band would redraw, so `advisor` is published after it; a finished run's toast is kept as a notice (nothing without the game). */
+  readonly game: GameHost
 }
 
 /** One command's answer, trimmed; null when it fails, prints nothing or cannot start. Never throws. */
@@ -2659,6 +2675,7 @@ async function ciPublishRows($: EngineInterface, host: CiWatchHost): Promise<voi
   } catch {
     // The band is never a reason to fail a watch.
   }
+  await publishIfGame($, host.game)
 }
 
 function ciSetRow(host: CiWatchHost, row: CiBandRow): void {
@@ -2810,7 +2827,9 @@ async function ciWatchFinish($: EngineInterface, host: CiWatchHost, watch: CiWat
     const row: CiBandRow = { ...ciWatchingRow(watch, 0, 0, []), status: verdict.outcome, done: verdict.workflows, total: verdict.workflows, failed: verdict.failed, durationMs: verdict.durationMs, finishedAtMs }
     ciSetRow(host, row)
     await ciPublishRows($, host)
-    $.ui.toast(`${ciFinishedText(await resolveLocale($), row)}${verdict.url.length > 0 ? ` · ${verdict.url}` : ''}`, { timeoutMs: CI_TOAST_MS })
+    const toast = `${ciFinishedText(await resolveLocale($), row)}${verdict.url.length > 0 ? ` · ${verdict.url}` : ''}`
+    $.ui.toast(toast, { timeoutMs: CI_TOAST_MS })
+    await notifyGame($, host.game, { id: `ci:${row.id}`, level: verdict.outcome === 'failure' ? 'warn' : 'info', text: toast, at: finishedAtMs })
     $.clock.after(CI_ROW_KEEP_MS, () => ciRowsExpire($, host))
   }
   const at = new Date(finishedAtMs).toISOString()
@@ -3584,6 +3603,113 @@ async function resolveActiveToolMode($: EngineInterface, optionActiveTools: bool
   return cache.value.activeTools
 }
 
+// ---------------------------------------------------------------------------
+// Game mode (odd/tasks/game-mode-advisor-state.md): in a pane Orca launched
+// with its `orca-game` mod (ORCA_GAME_MODE `on` or `zen`), the game draws the
+// scene. Jev does all its work but draws neither the status line nor the
+// band; it publishes what they would show under `advisor`, for the game to
+// draw. Without the game nothing here runs and `advisor` is never written.
+// ---------------------------------------------------------------------------
+
+/**
+ * What `register` keeps for game mode: ORCA_GAME_MODE (read once a load), the
+ * notices, the last value written and the write chain; and where the value's
+ * parts come from: the line as `register` composes it, the module switches,
+ * and the agents the host already ran at this load's start.
+ */
+interface GameHost {
+  mode: Promise<GameMode | null> | null
+  notices: readonly AdvisorNotice[]
+  /** The notices a previous load published are read back once, before the first write. */
+  noticesHydrated: boolean
+  last: string | null
+  writes: Promise<void>
+  /** The main loop's model and effort as its last step was sent; null before one in this load. */
+  main: { readonly modelId: string; readonly effort: SessionEffort | null } | null
+  readonly line: () => string | null
+  readonly modulesFile: FeatureModulesFile
+  /**
+   * The running set and the CI rows as this load holds them: what was just
+   * written to `$.state`, which a read in the same dispatch may not show yet
+   * (every `get` of one dispatch reads one moment).
+   */
+  readonly agents: () => readonly RunningSubagent[]
+  readonly ciRows: () => readonly CiBandRow[]
+  readonly beforeLoad: () => Set<string> | undefined
+}
+
+/** The game this pane is drawn by; a failed read is no game, so Jev draws as always. */
+function gameModeOf($: EngineInterface, game: GameHost): Promise<GameMode | null> {
+  game.mode ??= (async () => {
+    try {
+      return parseOrcaGameMode(await $.env.get('ORCA_GAME_MODE'))
+    } catch {
+      return null
+    }
+  })()
+  return game.mode
+}
+
+/**
+ * The main conversation's model: as its last step was sent, else (no step yet
+ * in this load: a reload, a session start) as the router last chose it (its
+ * rewrite when one applies, else the session's own); null before either.
+ */
+async function advisorMain($: EngineInterface, game: GameHost): Promise<AdvisorMain | null> {
+  let main = game.main
+  if (main === null) {
+    const sticky = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' })).value
+    if (sticky === undefined) return null
+    main = sticky.rewrite ? { modelId: sticky.model, effort: sticky.effort } : { modelId: sticky.configuredModel, effort: sticky.configuredEffort }
+  }
+  return { modelId: main.modelId, label: subagentModelLabel(main.modelId, await accountTiers($)), effort: main.effort }
+}
+
+/** Writes `advisor` from what the line and the band would show now, after any write already queued; an unchanged value is not written again. Best-effort. */
+function publishAdvisor($: EngineInterface, game: GameHost): Promise<void> {
+  game.writes = game.writes.then(async () => {
+    try {
+      const modules = await resolveFeatureModules($, game.modulesFile)
+      const routerOn = moduleState(modules, 'model-router') !== 'off'
+      const ciOn = moduleState(modules, 'ci-watch') !== 'off'
+      if (!game.noticesHydrated) {
+        game.noticesHydrated = true
+        const kept = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'advisor' })).value
+        if (kept !== undefined && Array.isArray(kept.notices)) game.notices = game.notices.reduce(withNotice, kept.notices)
+      }
+      // The band's own reconciling, of the set this load holds, against the host's list.
+      const agents = routerOn ? reconcileRunning([...game.agents()], await listAgents($), null, game.beforeLoad()).shown : []
+      const ciRows = ciOn ? game.ciRows() : []
+      const value = buildAdvisorState({ locale: await resolveLocale($), line: game.line(), main: routerOn ? await advisorMain($, game) : null, agents, ciRows, nowMs: await $.clock.now(), notices: game.notices })
+      const json = JSON.stringify(value)
+      if (json === game.last) return
+      await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'advisor' }, value)
+      game.last = json
+    } catch {
+      // The game shows the last value written; Jev's work never waits on it.
+    }
+  })
+  return game.writes
+}
+
+/** Publishes `advisor` in a game pane; nothing without the game. */
+async function publishIfGame($: EngineInterface, game: GameHost): Promise<void> {
+  if ((await gameModeOf($, game)) !== null) await publishAdvisor($, game)
+}
+
+/** The status line, or in a game pane the `advisor` value it is part of. */
+async function showLine($: EngineInterface, game: GameHost, text: string | undefined): Promise<void> {
+  if ((await gameModeOf($, game)) !== null) return publishAdvisor($, game)
+  $.ui.status(text)
+}
+
+/** A toast's notice, kept and published only in a game pane (the toast shows either way). */
+async function notifyGame($: EngineInterface, game: GameHost, notice: AdvisorNotice): Promise<void> {
+  if ((await gameModeOf($, game)) === null) return
+  game.notices = withNotice(game.notices, notice)
+  await publishAdvisor($, game)
+}
+
 // =============================================================================
 // register -- a NAMED export (JEVADV-43: the engine requires exactly this
 // shape, `export function register(on, options)`; a default export,
@@ -3694,7 +3820,21 @@ export function register(on: On, options: PluginOptions): void {
   // 0.6.8 T6: the subagents running now (agent.spawn adds one, its own
   // turn.complete removes it) and their status-line part. 0.6.14 T1: kept
   // in `$.state` too, so a reload does not forget them (RunningSet).
-  const runningSubagents: RunningSet = { agents: new Map<string, RunningSubagent>(), hydrated: null, writes: Promise.resolve(), beforeLoad: null }
+  // Game mode: in a pane Orca's game draws, the line and the band become the `advisor` value (publishAdvisor).
+  const game: GameHost = {
+    mode: null,
+    notices: [],
+    noticesHydrated: false,
+    last: null,
+    writes: Promise.resolve(),
+    main: null,
+    line: () => statusLine(),
+    modulesFile,
+    agents: () => [...runningSubagents.agents.values()],
+    ciRows: () => ciWatch.rows,
+    beforeLoad: () => runningSubagents.beforeLoad ?? undefined,
+  }
+  const runningSubagents: RunningSet = { agents: new Map<string, RunningSubagent>(), hydrated: null, writes: Promise.resolve(), beforeLoad: null, game }
   const teammateRouting: TeammateRouting = { tasks: [], judged: new Set<string>() }
   // 0.6.23 T1 (JEVADV-102): where each running agent works (PlaceTracking).
   const places: PlaceTracking = { cache: newPlaceCache(), lead: null, home: null, bases: new Map<string, string | null>(), lastDirs: new Map<string, string>(), isolated: [], work: Promise.resolve() }
@@ -3720,7 +3860,7 @@ export function register(on: On, options: PluginOptions): void {
   const preColdIdle: PreColdIdle = { armedAt: null, timer: null, lastAutoCompactAt: null, autoCompactRunning: false, ownCallPending: false }
   const compactionWatch: Pick<StewardHost, 'runningTurn' | 'cold'> = { runningTurn: () => activeTurnId, cold: preColdIdle }
   // The CI watcher's watches and the notes waiting for the main turn to end (plain data; a reload starts with none).
-  const ciWatch: CiWatchHost = { watches: [], rows: [], notes: [], runningTurn: () => activeTurnId, modulesFile }
+  const ciWatch: CiWatchHost = { watches: [], rows: [], notes: [], runningTurn: () => activeTurnId, modulesFile, game }
 
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
     // A subagent's own listing is left alone, since nothing here suggests
@@ -4131,7 +4271,7 @@ export function register(on: On, options: PluginOptions): void {
     const statusParts = [skillOutcome.status, toolOutcome.status].filter((part): part is string => part !== null)
     promptStatusText = statusParts.length > 0 ? statusParts.join(' · ') : null
     // Nothing to say clears the line: the last turn's skill must not stay showing.
-    $.ui.status(statusLine() ?? undefined)
+    await showLine($, game, statusLine() ?? undefined)
 
     const extraContext = [skillOutcome.block, toolOutcome.block].filter((block): block is string => block !== null)
     if (extraContext.length === 0) return next(e)
@@ -4162,9 +4302,12 @@ export function register(on: On, options: PluginOptions): void {
     const routerState = moduleState(await resolveFeatureModules($, modulesFile), 'model-router')
     if (routerState === 'off') return yield* next(e)
     const stepMode = effectiveMode(routerState, routerMode)
+    // Read before the step, so the stream never waits on it.
+    const gameMode = await gameModeOf($, game)
     const showRouterStatus = (text: string): void => {
       routerStatusText = text
-      $.ui.status(statusLine() ?? text)
+      if (gameMode !== null) void publishAdvisor($, game)
+      else $.ui.status(statusLine() ?? text)
     }
     // JEVADV-63: read from the closure's own orcaContextCache (plain data,
     // not `$`) -- never a fresh resolveOrcaContext call per step. null when
@@ -4181,7 +4324,12 @@ export function register(on: On, options: PluginOptions): void {
         // A teammate the router could not judge runs as it came.
       }
     }
-    return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }))
+    const noteMain = (modelId: string, effort: SessionEffort | null): void => {
+      if (gameMode === null || (game.main?.modelId === modelId && game.main.effort === effort)) return
+      game.main = { modelId, effort }
+      void publishAdvisor($, game)
+    }
+    return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }), noteMain)
   })
 
   // Track R: after each turn, which cache bucket (1h or 5m) the main thread wrote.
@@ -4206,7 +4354,7 @@ export function register(on: On, options: PluginOptions): void {
       queuePlace(places, () => placeAtSpawn($, runningSubagents, places, e, agentId))
       try {
         agentsStatusText = await runningSubagentsStatus($, runningSubagents, result.agentId)
-        $.ui.status(statusLine() ?? undefined)
+        await showLine($, game, statusLine() ?? undefined)
       } catch {
         // The status line is never a reason to fail a spawn.
       }
@@ -4222,6 +4370,8 @@ export function register(on: On, options: PluginOptions): void {
   // a plugin beneath already drew a band (a project's own, like a fleet
   // band), it stays first and untouched, and these rows stack under it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // Game mode: the game draws the band from `advisor`; nothing is read here, so nothing subscribes this band.
+    if ((await gameModeOf($, game)) !== null) return next(e)
     if (e.props.hasSurvey) return next(e)
     const modules = await resolveFeatureModules($, modulesFile)
     const routerOn = moduleState(modules, 'model-router') !== 'off'
@@ -4286,11 +4436,13 @@ export function register(on: On, options: PluginOptions): void {
         await snapshotBeforeLoad($, runningSubagents)
         agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
         const line = statusLine()
-        if (line !== null) $.ui.status(line)
+        if (line !== null) await showLine($, game, line)
       } catch {
         // The status line is never a reason to fail a start.
       }
     }
+    // Game mode: the game gets a value from the start, even with nothing to say yet.
+    await publishIfGame($, game)
     // Memory (memoryDetectAtStart): the backend is decided on a timer, so the start never waits on an MCP dial.
     if (moduleState(modules, 'memory') !== 'off') {
       try {
@@ -4310,7 +4462,7 @@ export function register(on: On, options: PluginOptions): void {
     if (moduleState(modules, 'model-router') !== 'off' && e.agentId !== undefined && runningSubagents.agents.get(e.agentId)?.type !== TEAMMATE_TYPE && runningSubagents.agents.delete(e.agentId)) {
       try {
         agentsStatusText = await runningSubagentsStatus($, runningSubagents, null)
-        $.ui.status(statusLine() ?? undefined)
+        await showLine($, game, statusLine() ?? undefined)
       } catch {
         // The status line is never a reason to fail a turn.
       }
@@ -4330,8 +4482,9 @@ export function register(on: On, options: PluginOptions): void {
           runningTurn: () => activeTurnId,
           show: (text) => {
             stewardStatusText = text
-            $.ui.status(statusLine() ?? undefined)
+            void showLine($, game, statusLine() ?? undefined)
           },
+          game,
           cold: preColdIdle,
         }
         try {

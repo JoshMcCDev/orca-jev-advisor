@@ -904,3 +904,16 @@ test("S2 engine observed: an auto PreCompact with no PostCompact (blocked or fai
   assert.equal(host.compactCalls.length, 1);
   assert.equal(preColdRows(host)[0]?.applied, true);
 });
+
+test("steward, game mode: the /clear suggestion is published as a notice, the toast still shows, and no status line is drawn", async () => {
+  const host = makeHost();
+  host.env.set("ORCA_GAME_MODE", "on");
+  const engine = load(host);
+  setSteward(host, "active");
+  await personTurn(host, engine, "otro tema", verdict("new-topic", 0.8));
+  assert.deepEqual(host.toasts, ["tarea cerrada: /clear libera todo el contexto"]);
+  assert.deepEqual(host.statusLines, []);
+  const advisor = host.state.get("advisor") as { line: string | null; notices: { level: string; text: string }[] } | undefined;
+  assert.deepEqual(advisor?.notices.map((notice) => [notice.level, notice.text]), [["info", "tarea cerrada: /clear libera todo el contexto"]]);
+  assert.match(advisor?.line ?? "", /^jev · /);
+});

@@ -6196,3 +6196,123 @@ test("E3 replay into Engram: a save that fails again stays parked with its copy,
   const row = replayRows(host).at(-1);
   assert.deepEqual([row?.engramFailed, row?.replayedToEngram, row?.replayed, row?.writeFailures], [1, 0, 0, 0]);
 });
+
+// ---------------------------------------------------------------------------
+// Game mode (odd/tasks/game-mode-advisor-state.md, G2): with ORCA_GAME_MODE
+// `on` or `zen`, Orca's game draws the pane. Jev keeps working but draws no
+// status line and no band; it publishes the same data under `advisor`.
+// ---------------------------------------------------------------------------
+
+interface AdvisorValue {
+  version: number;
+  locale: string;
+  line: string | null;
+  model: string | null;
+  modelId: string | null;
+  effort: unknown;
+  subagents: { id: string; title: string; model: string | null; verdict: string; status: string }[];
+  ci: { id: string; status: string }[];
+  notices: { id: string; level: string; text: string; at: number }[];
+}
+
+function advisorOf(host: FakeHost): AdvisorValue | undefined {
+  return host.state.get("advisor") as AdvisorValue | undefined;
+}
+
+/** A session start, a main turn the router decides and a subagent spawn, with ORCA_GAME_MODE set to `mode` (null: unset). */
+async function gameScenario(mode: string | null): Promise<{ host: FakeHost; handlers: Map<string, Hook>; engine: unknown }> {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  if (mode !== null) host.env.set("ORCA_GAME_MODE", mode);
+  host.files.set(`${CONFIG_DIR}/explicit-models.json`, JSON.stringify({ mode: "keep" }));
+  host.fetchQueue.push(tierAnswer("complex"), tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await startSession(handlers, engine);
+  await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 2);
+  await spawnAs(handlers, engine, spawnEvent({ model: "opus", description: "Reading the spec" }), "agent-1", "claude-opus-5-5");
+  return { host, handlers, engine };
+}
+
+test("game mode: on draws no status line and publishes the line a pane without the game shows", async () => {
+  const plain = await gameScenario(null);
+  const game = await gameScenario("on");
+  assert.deepEqual(game.host.statusLines, [], "no $.ui.status call in a game pane");
+  const advisor = advisorOf(game.host);
+  assert.ok(advisor, "advisor was published");
+  assert.equal(advisor.version, 1);
+  assert.equal(advisor.locale, "en");
+  assert.equal(advisor.line, lastStatus(plain.host));
+  assert.equal(advisor.model, "Opus 5.5");
+  assert.equal(advisor.modelId, "claude-opus-5-5");
+  assert.equal(advisor.effort, "high");
+  assert.deepEqual(advisor.subagents.map((row) => [row.id, row.title, row.model, row.status, row.verdict]), [["agent-1", "Reading the spec", "Opus 5.5", "running", "explicit"]]);
+  assert.equal(game.host.fetchCalls.length, plain.host.fetchCalls.length, "Jev is asked exactly as without the game");
+});
+
+test("game mode: zen is the game too, and a finished subagent leaves the published list", async () => {
+  const { host, handlers, engine } = await gameScenario(" ZEN ");
+  await completeSubagent(handlers, engine, "agent-1");
+  assert.deepEqual(host.statusLines, []);
+  assert.deepEqual(advisorOf(host)?.subagents, []);
+  assert.doesNotMatch(advisorOf(host)?.line ?? "", /agents/);
+});
+
+test("game mode: the band passes what is beneath it, untouched, without reading state", async () => {
+  const { host, handlers, engine } = await gameScenario("on");
+  const beneath = { type: "Box", props: { children: ["a project's own band"] } };
+  const reads: string[] = [];
+  const watched = { ...(engine as Record<string, unknown>), state: { get: async (ref: { key: string }) => { reads.push(ref.key); return { value: host.state.get(ref.key), version: 1 }; }, set: async () => ({ isSet: true, version: 1 }) } };
+  assert.equal(await renderBand(handlers, watched, 120, { beneath }), beneath);
+  assert.equal(await renderBand(handlers, watched, 120), ENGINE_DRAWING);
+  assert.deepEqual(reads, [], "a band that reads state subscribes to it");
+});
+
+test("game mode: off or absent changes nothing and never writes advisor", async () => {
+  for (const mode of [null, "off", ""]) {
+    const { host, handlers, engine } = await gameScenario(mode);
+    assert.ok(host.statusLines.length > 0, String(mode));
+    assert.equal(advisorOf(host), undefined, String(mode));
+    assert.match(await bandText(handlers, engine), /Reading the spec/);
+  }
+});
+
+test("game mode: a finished CI run is published as a notice and a row, and its toast still shows", async () => {
+  const host = makeFakeHost();
+  host.env.set("ORCA_GAME_MODE", "on");
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED, ghRun({ databaseId: 102, workflowName: "Deploy", conclusion: "failure" })]] });
+  const { handlers, engine } = await pushAndWatch(host);
+  await runNextTimer(host);
+  assert.deepEqual(advisorOf(host)?.ci.map((row) => row.status), ["watching"], "the watch is published while it runs");
+  await runTimers(host);
+  assert.equal(host.toasts.length, 1);
+  const notices = advisorOf(host)?.notices ?? [];
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]?.level, "warn");
+  assert.equal(notices[0]?.text, host.toasts[0]);
+  assert.deepEqual(host.statusLines, []);
+  assert.equal(await renderBand(handlers, engine, 120), ENGINE_DRAWING);
+});
+
+test("game mode off: a finished CI run writes no advisor", async () => {
+  const host = makeFakeHost();
+  seedCiRepo(host, { polls: [[RUNNING], [PASSED]] });
+  await pushAndWatch(host);
+  await runTimers(host);
+  assert.equal(host.toasts.length, 1);
+  assert.equal(advisorOf(host), undefined);
+});
+
+test("game mode: a read that does not see this dispatch's own write still publishes the just-spawned agent", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.env.set("ORCA_GAME_MODE", "on");
+  host.files.set(`${CONFIG_DIR}/explicit-models.json`, JSON.stringify({ mode: "keep" }));
+  host.fetchQueue.push(tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  // The real engine: every get of one dispatch reads one moment, whatever is written meanwhile.
+  const base = engine as { state: { get: (ref: { key: string }) => Promise<unknown>; set: (ref: { key: string }, value: unknown) => Promise<unknown> } };
+  const snapshot = new Map(host.state);
+  const stale = { ...base, state: { get: async (ref: { key: string }) => ({ value: snapshot.get(ref.key), version: 0 }), set: base.state.set } };
+  await spawnAs(handlers, stale, spawnEvent({ model: "opus", description: "Reading the spec" }), "agent-1", "claude-opus-5-5");
+  assert.deepEqual(advisorOf(host)?.subagents.map((row) => row.title), ["Reading the spec"]);
+});

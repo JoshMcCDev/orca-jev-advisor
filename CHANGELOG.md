@@ -2,6 +2,10 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.12.0
+
+- **Game mode: Jev publishes instead of drawing in a game pane** (odd/tasks/game-mode-advisor-state.md, ORCA-586 T5). Orca sets `ORCA_GAME_MODE` (`on` or `zen`) when it launches a Claude Agent Teams pane with its `orca-game` mod, which draws the pane as a scene. There Jev keeps all its work (routing, advice, the steward, the CI watcher, memory, toasts) but makes no `$.ui.status` call and its AbovePrompt hook returns `next(e)` untouched before reading any state. It writes `{ plugin: 'orca-jev-mod-skills', key: 'advisor' }` instead, wherever the line or the band would have redrawn (the status-line sites, every `runningSubagents` and `ciWatches` write), serialized and skipped when unchanged. It is built from what this load holds, not re-read from `$.state`, because every `get` of one dispatch reads one moment and would miss the write just made. The value (`AdvisorState`, `version: 1`, declared in `types/index.d.ts`, built by `src/core/advisor_state.ts`) carries `locale`, `line` (the exact status line), the main conversation's `model`/`modelId`/`effort` as its last step was sent (the router's kept choice before any step in a load), `subagents` (the band's rows: type, title, branch, worktree, model, effort, reason code and short translated verdict), `ci` (the band's CI rows with their line) and `notices` (the steward's /clear hint and finished CI runs, newest last, at most 5). Absent, `off` or any other value: nothing changes and `advisor` is never written.
+
 ## 0.11.1
 
 - **Band: stacks under another plugin's band** (`adapters/claude/mod-skills/hooks/index.ts`, AbovePrompt). Since 0.6.14 the subagent band (and, since the CI watcher, its rows) passed whenever a plugin beneath had already drawn a band, so in a project whose own plugin draws one (a client project's orchestrator plugin draws a "Fleet" band in its orchestrator session) the running agents, their model and effort never showed. The other plugin's tree is now kept first and untouched, and these rows stack under it in one column. With nothing running, the other band is passed through as before; a survey still holds the band.

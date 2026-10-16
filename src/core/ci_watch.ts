@@ -670,17 +670,22 @@ function fitLine(line: string, columns: number): string {
  * nothing polls it), and a finished row after CI_ROW_KEEP_MS.
  */
 export function ciBandRows(locale: Locale, rows: readonly CiBandRow[], nowMs: number, columns: number): readonly string[] {
-  const lines: string[] = [];
+  return ciShownRows(locale, rows, nowMs).map(({ text }) => fitLine(text, columns));
+}
+
+/** The rows the band shows now, each with its line at full length: a watch past its cap and a finished row past CI_ROW_KEEP_MS are left out. */
+export function ciShownRows(locale: Locale, rows: readonly CiBandRow[], nowMs: number): readonly { readonly row: CiBandRow; readonly text: string }[] {
+  const shown: { readonly row: CiBandRow; readonly text: string }[] = [];
   for (const row of rows) {
     if (row.status === "watching") {
       if (nowMs - row.startedAtMs > CI_WATCH_CAP_MS) continue;
-      lines.push(fitLine(ciRunningText(locale, row, nowMs), columns));
+      shown.push({ row, text: ciRunningText(locale, row, nowMs) });
     } else {
       if (row.finishedAtMs === null || nowMs - row.finishedAtMs > CI_ROW_KEEP_MS) continue;
-      lines.push(fitLine(ciFinishedText(locale, row), columns));
+      shown.push({ row, text: ciFinishedText(locale, row) });
     }
   }
-  return lines;
+  return shown;
 }
 
 // ---------------------------------------------------------------------------
