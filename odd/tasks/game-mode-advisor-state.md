@@ -29,10 +29,10 @@ steward's /clear hint and a finished CI run); the toasts still show.
 - [x] G1 pure module `src/core/advisor_state.ts`: `parseOrcaGameMode`, `buildAdvisorState`, notices list. RED first.
 - [x] G2 hooks: game mode silences the line and the band and publishes `advisor`; off writes nothing. RED first.
 - [x] G3 contract type, CHANGELOG and version 0.12.0.
-- [x] G4 checks: `npm run preflight`, `npm run shots:band` (non-game band unchanged), contract sent to orca-oss-d9.
+- [ ] G4 checks: `npm run preflight`, `npm run shots:band` (non-game band unchanged) done; contract NOT delivered to orca-oss-d9 (not reachable on 2026-10-16), written to the brief's scratchpad as `jev-game-contract.md` instead.
 
 ## Evidence
-- `npm run preflight`: 4373 tests pass, typecheck clean; the real `claude plugin validate` passes and lists `orca-jev-mod-skills.advisor`.
+- `npm run preflight`: 4374 tests pass, typecheck clean; the real `claude plugin validate` passes and lists `orca-jev-mod-skills.advisor`.
 - `npm run shots:band`: 16 shots (es/en, 40/80/120/200, light/dark); es-120-dark and en-40-light read, the non-game band is unchanged.
 - The game scene itself is in orca-oss and was not photographed here.
 
