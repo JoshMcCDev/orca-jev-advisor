@@ -306,8 +306,8 @@ function failureFromStatus(status: number | null): JevFailure {
 
 export class JevTimeoutError extends Error {
   readonly failure: JevFailure = { kind: "timeout" };
-  constructor(budgetMs: number) {
-    super(`Jev didn't respond within the ${budgetMs}ms budget`);
+  constructor(budgetMs: number, name = "Jev") {
+    super(`${name} didn't respond within the ${budgetMs}ms budget`);
     this.name = "JevTimeoutError";
   }
 }
@@ -315,11 +315,14 @@ export class JevTimeoutError extends Error {
 export class JevRequestError extends Error {
   readonly status: number | null;
   readonly failure: JevFailure;
+  /** The error body a non-2xx answer carried (multi-provider P2: Cloudflare names its daily-allowance error there). Empty when there was none. */
+  readonly responseBody: string;
   /** `malformed` marks a 200 whose body is not a Jev answer; otherwise the class follows from `status` (null: the request never got an answer). */
-  constructor(message: string, status: number | null, malformed = false) {
+  constructor(message: string, status: number | null, malformed = false, responseBody = "") {
     super(message);
     this.name = "JevRequestError";
     this.status = status;
+    this.responseBody = responseBody;
     this.failure = malformed ? { kind: "malformed" } : failureFromStatus(status);
   }
 }
@@ -379,14 +382,40 @@ export interface CallJevOptions {
  *   is misconfigured, never a hang.
  */
 export async function callJev(apiKey: string, state: JsonValue, questions: Record<string, Question>, options: CallJevOptions = {}): Promise<JevResponse> {
+  const request: JevRequest = { state, model: "jev-latest", questions };
+  return postSystemOne({ name: "Jev", url: JEV_ENDPOINT, token: apiKey }, request, options);
+}
+
+/**
+ * Where one System One request goes (multi-provider P1). Jev and Cloudflare's
+ * Clef speak the same request and answer contract; only the endpoint, the
+ * token, an optional envelope around the answer and the retry policy differ.
+ */
+export interface SystemOneEndpoint {
+  /** Who answers, for error messages only ("Jev", "Clef"). Never a secret. */
+  readonly name: string;
+  readonly url: string;
+  /** Sent as a Bearer token; never logged, never put in a thrown error. */
+  readonly token: string;
+  /** Takes the answer out of a provider's envelope (Cloudflare wraps it in `{result}`). Identity when absent. */
+  readonly unwrap?: (parsed: unknown) => unknown;
+  /** How many retries one call may use; callJev's MAX_RETRIES when absent. A cascade's first provider uses 0: the next provider is its retry. */
+  readonly maxRetries?: number;
+}
+
+/**
+ * The transport behind callJev, shared by every System One provider. Same
+ * budget, retry and failure-class rules as callJev documents above; a
+ * provider only changes what SystemOneEndpoint describes.
+ */
+export async function postSystemOne(endpoint: SystemOneEndpoint, request: unknown, options: CallJevOptions = {}): Promise<JevResponse> {
+  const { name } = endpoint;
+  const maxRetries = endpoint.maxRetries ?? MAX_RETRIES;
   const budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
   const doFetch = options.fetchImpl ?? defaultFetch();
   const doSleep = options.sleepImpl ?? defaultSleep();
   if (!doFetch) throw new JevRequestError("callJev: no fetch implementation available (neither injected nor global)", null);
   if (!doSleep) throw new JevRequestError("callJev: no timers available (neither injected nor global)", null);
-
-  const request: JevRequest = { state, model: "jev-latest", questions };
-
   const now = options.nowImpl ?? Date.now;
   const startedAt = now();
   let retriesUsed = 0;
@@ -407,25 +436,25 @@ export async function callJev(apiKey: string, state: JsonValue, questions: Recor
       if (budgetSettled.signal.aborted) return new Promise<never>(() => undefined);
       timedOut = true;
       controller.abort();
-      throw new JevTimeoutError(thisBudgetMs);
+      throw new JevTimeoutError(thisBudgetMs, name);
     });
 
     let response: JevFetchResponse | null = null;
     let networkError: JevRequestError | null = null;
     try {
       response = await Promise.race([
-        doFetch(JEV_ENDPOINT, {
+        doFetch(endpoint.url, {
           method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          headers: { Authorization: `Bearer ${endpoint.token}`, "Content-Type": "application/json" },
           body: JSON.stringify(request),
           signal: controller.signal,
         }),
         budget,
       ]);
     } catch (error) {
-      if (timedOut || error instanceof JevTimeoutError) throw new JevTimeoutError(thisBudgetMs);
-      if (error instanceof Error && error.name === "AbortError") throw new JevTimeoutError(thisBudgetMs);
-      networkError = new JevRequestError(`Couldn't reach Jev: ${error instanceof Error ? error.message : String(error)}`, null);
+      if (timedOut || error instanceof JevTimeoutError) throw new JevTimeoutError(thisBudgetMs, name);
+      if (error instanceof Error && error.name === "AbortError") throw new JevTimeoutError(thisBudgetMs, name);
+      networkError = new JevRequestError(`Couldn't reach ${name}: ${error instanceof Error ? error.message : String(error)}`, null);
     } finally {
       budgetSettled.abort();
     }
@@ -434,7 +463,7 @@ export async function callJev(apiKey: string, state: JsonValue, questions: Recor
     let waitMs: number;
     let transient: boolean;
     if (response === null) {
-      failure = networkError ?? new JevRequestError("Jev: unknown failure", null);
+      failure = networkError ?? new JevRequestError(`${name}: unknown failure`, null);
       transient = true;
       waitMs = TRANSIENT_BACKOFF_MS;
     } else if (response.ok) {
@@ -443,20 +472,21 @@ export async function callJev(apiKey: string, state: JsonValue, questions: Recor
       try {
         parsed = JSON.parse(bodyText);
       } catch {
-        throw new JevRequestError("Jev responded 200 but the body isn't valid JSON", response.status, true);
+        throw new JevRequestError(`${name} responded 200 but the body isn't valid JSON`, response.status, true);
       }
-      if (!isJevResponse(parsed)) {
-        throw new JevRequestError("Jev responded 200 but the body doesn't have the expected shape {model, answers, usage}", response.status, true);
+      const answer = endpoint.unwrap !== undefined ? endpoint.unwrap(parsed) : parsed;
+      if (!isJevResponse(answer)) {
+        throw new JevRequestError(`${name} responded 200 but the body doesn't have the expected shape {model, answers, usage}`, response.status, true);
       }
-      return parsed;
+      return answer;
     } else {
       const bodyText = await response.text().catch(() => "");
-      failure = new JevRequestError(`Jev responded ${response.status}: ${bodyText || `HTTP ${response.status}`}`, response.status);
+      failure = new JevRequestError(`${name} responded ${response.status}: ${bodyText || `HTTP ${response.status}`}`, response.status, false, bodyText);
       transient = failure.failure.kind === "http5xx";
       waitMs = transient ? (retryAfterMs(response.headers?.get("retry-after"), now()) ?? TRANSIENT_BACKOFF_MS) : 500;
     }
 
-    if (retriesUsed >= MAX_RETRIES) throw failure;
+    if (retriesUsed >= maxRetries) throw failure;
     if (transient) {
       // The retry must be able to finish: what is left once the wait is over has to fit a whole call.
       const remainingMs = budgetMs - (now() - startedAt) - waitMs;
