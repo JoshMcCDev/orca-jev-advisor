@@ -26,10 +26,15 @@ the game draws it inside its scene. Request from orca-oss (ORCA-586 T5).
 steward's /clear hint and a finished CI run); the toasts still show.
 
 ## Tasks
-- [ ] G1 pure module `src/core/advisor_state.ts`: `parseOrcaGameMode`, `buildAdvisorState`, notices list. RED first.
-- [ ] G2 hooks: game mode silences the line and the band and publishes `advisor`; off writes nothing. RED first.
-- [ ] G3 contract type, CHANGELOG and version 0.12.0.
-- [ ] G4 checks: `npm run preflight`, `npm run shots:band` (non-game band unchanged), contract sent to orca-oss-d9.
+- [x] G1 pure module `src/core/advisor_state.ts`: `parseOrcaGameMode`, `buildAdvisorState`, notices list. RED first.
+- [x] G2 hooks: game mode silences the line and the band and publishes `advisor`; off writes nothing. RED first.
+- [x] G3 contract type, CHANGELOG and version 0.12.0.
+- [x] G4 checks: `npm run preflight`, `npm run shots:band` (non-game band unchanged), contract sent to orca-oss-d9.
+
+## Evidence
+- `npm run preflight`: 4373 tests pass, typecheck clean; the real `claude plugin validate` passes and lists `orca-jev-mod-skills.advisor`.
+- `npm run shots:band`: 16 shots (es/en, 40/80/120/200, light/dark); es-120-dark and en-40-light read, the non-game band is unchanged.
+- The game scene itself is in orca-oss and was not photographed here.
 
 ## Acceptance criteria
 - With `ORCA_GAME_MODE=on` or `zen`, no `ui.status` call across submit, spawn,
