@@ -1830,7 +1830,7 @@ async function routeTeammate($: EngineInterface, e: Frozen<TurnStepInput>, mode:
  * pre-computed target (a guard can hold a higher inherited value than the
  * tier's own target, which spawn time never sees).
  */
-async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, next: StreamNext<'turn.step'>, mode: RouterMode, options: PluginOptions, showRouterStatus: (text: string) => void, subagentEffortTarget: Map<string, SubagentEffortTarget>, project: string | null, noteEffort: (agentId: string, effort: SessionEffort | null, source: SubagentEffortSource, answeredBy?: string | null) => Promise<void>, effortLog: (e: Frozen<TurnStepInput>, input: TurnStepInput | Frozen<TurnStepInput>, r: TurnStepResult) => Promise<Record<string, unknown>>): StreamHookBody<TurnStepChunk, TurnStepResult> {
+async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, next: StreamNext<'turn.step'>, mode: RouterMode, options: PluginOptions, showRouterStatus: (text: string) => void, subagentEffortTarget: Map<string, SubagentEffortTarget>, project: string | null, noteEffort: (agentId: string, effort: SessionEffort | null, source: SubagentEffortSource, answeredBy?: string | null) => Promise<void>, effortLog: (e: Frozen<TurnStepInput>, input: TurnStepInput | Frozen<TurnStepInput>, r: TurnStepResult) => Promise<Record<string, unknown>>, noteMain: (model: string, effort: SessionEffort | null) => void): StreamHookBody<TurnStepChunk, TurnStepResult> {
   let input: TurnStepInput | Frozen<TurnStepInput> = e
   if (mode !== 'off' && e.agentId === undefined) {
     let held: RouterSticky | undefined
@@ -1912,6 +1912,9 @@ async function* handleTurnStep($: EngineInterface, e: Frozen<TurnStepInput>, nex
     } catch {
       // Visibility only: never a reason to hold the step.
     }
+  } else {
+    // Game mode: the model and effort the main loop is sent with, for `advisor`.
+    noteMain(input.model, input.effort ?? null)
   }
   const r = yield* next(input)
   if (e.agentId !== undefined) {
@@ -3621,8 +3624,17 @@ interface GameHost {
   noticesHydrated: boolean
   last: string | null
   writes: Promise<void>
+  /** The main loop's model and effort as its last step was sent; null before one in this load. */
+  main: { readonly modelId: string; readonly effort: SessionEffort | null } | null
   readonly line: () => string | null
   readonly modulesFile: FeatureModulesFile
+  /**
+   * The running set and the CI rows as this load holds them: what was just
+   * written to `$.state`, which a read in the same dispatch may not show yet
+   * (every `get` of one dispatch reads one moment).
+   */
+  readonly agents: () => readonly RunningSubagent[]
+  readonly ciRows: () => readonly CiBandRow[]
   readonly beforeLoad: () => Set<string> | undefined
 }
 
@@ -3638,12 +3650,19 @@ function gameModeOf($: EngineInterface, game: GameHost): Promise<GameMode | null
   return game.mode
 }
 
-/** The main conversation's model as the router last saw it run (its rewrite when one applies, else the session's own); null before it decided. */
-async function advisorMain($: EngineInterface): Promise<AdvisorMain | null> {
-  const sticky = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' })).value
-  if (sticky === undefined) return null
-  const modelId = sticky.rewrite ? sticky.model : sticky.configuredModel
-  return { modelId, label: subagentModelLabel(modelId, await accountTiers($)), effort: sticky.rewrite ? sticky.effort : sticky.configuredEffort }
+/**
+ * The main conversation's model: as its last step was sent, else (no step yet
+ * in this load: a reload, a session start) as the router last chose it (its
+ * rewrite when one applies, else the session's own); null before either.
+ */
+async function advisorMain($: EngineInterface, game: GameHost): Promise<AdvisorMain | null> {
+  let main = game.main
+  if (main === null) {
+    const sticky = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' })).value
+    if (sticky === undefined) return null
+    main = sticky.rewrite ? { modelId: sticky.model, effort: sticky.effort } : { modelId: sticky.configuredModel, effort: sticky.configuredEffort }
+  }
+  return { modelId: main.modelId, label: subagentModelLabel(main.modelId, await accountTiers($)), effort: main.effort }
 }
 
 /** Writes `advisor` from what the line and the band would show now, after any write already queued; an unchanged value is not written again. Best-effort. */
@@ -3658,10 +3677,10 @@ function publishAdvisor($: EngineInterface, game: GameHost): Promise<void> {
         const kept = (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'advisor' })).value
         if (kept !== undefined && Array.isArray(kept.notices)) game.notices = game.notices.reduce(withNotice, kept.notices)
       }
-      // The band's own reading: the kept running set against the host's list.
-      const agents = routerOn ? reconcileRunning(parseRunningSubagents((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'runningSubagents' })).value), await listAgents($), null, game.beforeLoad()).shown : []
-      const ciRows = ciOn ? parseCiBandRows((await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'ciWatches' })).value) : []
-      const value = buildAdvisorState({ locale: await resolveLocale($), line: game.line(), main: routerOn ? await advisorMain($) : null, agents, ciRows, nowMs: await $.clock.now(), notices: game.notices })
+      // The band's own reconciling, of the set this load holds, against the host's list.
+      const agents = routerOn ? reconcileRunning([...game.agents()], await listAgents($), null, game.beforeLoad()).shown : []
+      const ciRows = ciOn ? game.ciRows() : []
+      const value = buildAdvisorState({ locale: await resolveLocale($), line: game.line(), main: routerOn ? await advisorMain($, game) : null, agents, ciRows, nowMs: await $.clock.now(), notices: game.notices })
       const json = JSON.stringify(value)
       if (json === game.last) return
       await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'advisor' }, value)
@@ -3802,7 +3821,19 @@ export function register(on: On, options: PluginOptions): void {
   // turn.complete removes it) and their status-line part. 0.6.14 T1: kept
   // in `$.state` too, so a reload does not forget them (RunningSet).
   // Game mode: in a pane Orca's game draws, the line and the band become the `advisor` value (publishAdvisor).
-  const game: GameHost = { mode: null, notices: [], noticesHydrated: false, last: null, writes: Promise.resolve(), line: () => statusLine(), modulesFile, beforeLoad: () => runningSubagents.beforeLoad ?? undefined }
+  const game: GameHost = {
+    mode: null,
+    notices: [],
+    noticesHydrated: false,
+    last: null,
+    writes: Promise.resolve(),
+    main: null,
+    line: () => statusLine(),
+    modulesFile,
+    agents: () => [...runningSubagents.agents.values()],
+    ciRows: () => ciWatch.rows,
+    beforeLoad: () => runningSubagents.beforeLoad ?? undefined,
+  }
   const runningSubagents: RunningSet = { agents: new Map<string, RunningSubagent>(), hydrated: null, writes: Promise.resolve(), beforeLoad: null, game }
   const teammateRouting: TeammateRouting = { tasks: [], judged: new Set<string>() }
   // 0.6.23 T1 (JEVADV-102): where each running agent works (PlaceTracking).
@@ -4293,7 +4324,12 @@ export function register(on: On, options: PluginOptions): void {
         // A teammate the router could not judge runs as it came.
       }
     }
-    return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }))
+    const noteMain = (modelId: string, effort: SessionEffort | null): void => {
+      if (gameMode === null || (game.main?.modelId === modelId && game.main.effort === effort)) return
+      game.main = { modelId, effort }
+      void publishAdvisor($, game)
+    }
+    return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }), noteMain)
   })
 
   // Track R: after each turn, which cache bucket (1h or 5m) the main thread wrote.

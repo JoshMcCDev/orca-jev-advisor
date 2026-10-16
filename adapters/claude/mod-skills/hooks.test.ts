@@ -6301,3 +6301,18 @@ test("game mode off: a finished CI run writes no advisor", async () => {
   assert.equal(host.toasts.length, 1);
   assert.equal(advisorOf(host), undefined);
 });
+
+test("game mode: a read that does not see this dispatch's own write still publishes the just-spawned agent", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.env.set("ORCA_GAME_MODE", "on");
+  host.files.set(`${CONFIG_DIR}/explicit-models.json`, JSON.stringify({ mode: "keep" }));
+  host.fetchQueue.push(tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  // The real engine: every get of one dispatch reads one moment, whatever is written meanwhile.
+  const base = engine as { state: { get: (ref: { key: string }) => Promise<unknown>; set: (ref: { key: string }, value: unknown) => Promise<unknown> } };
+  const snapshot = new Map(host.state);
+  const stale = { ...base, state: { get: async (ref: { key: string }) => ({ value: snapshot.get(ref.key), version: 0 }), set: base.state.set } };
+  await spawnAs(handlers, stale, spawnEvent({ model: "opus", description: "Reading the spec" }), "agent-1", "claude-opus-5-5");
+  assert.deepEqual(advisorOf(host)?.subagents.map((row) => row.title), ["Reading the spec"]);
+});
