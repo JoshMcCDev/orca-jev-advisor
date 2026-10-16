@@ -6316,3 +6316,17 @@ test("game mode: a read that does not see this dispatch's own write still publis
   await spawnAs(handlers, stale, spawnEvent({ model: "opus", description: "Reading the spec" }), "agent-1", "claude-opus-5-5");
   assert.deepEqual(advisorOf(host)?.subagents.map((row) => row.title), ["Reading the spec"]);
 });
+
+test("game mode: ORCA_GAME_HUD=0 hides the game's band, so Jev draws its line and band as without the game", async () => {
+  const host = makeFakeHost();
+  host.env.set("ORCA_GAME_HUD", "0");
+  seedRouterAccount(host);
+  host.env.set("ORCA_GAME_MODE", "on");
+  host.files.set(`${CONFIG_DIR}/explicit-models.json`, JSON.stringify({ mode: "keep" }));
+  host.fetchQueue.push(tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await spawnAs(handlers, engine, spawnEvent({ model: "opus", description: "Reading the spec" }), "agent-1", "claude-opus-5-5");
+  assert.match(lastStatus(host), /agents: 1$/);
+  assert.match(await bandText(handlers, engine), /Reading the spec/);
+  assert.equal(advisorOf(host), undefined);
+});

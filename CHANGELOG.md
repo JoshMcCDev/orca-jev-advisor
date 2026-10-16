@@ -2,6 +2,10 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.12.1
+
+- **Game mode: a game with its HUD off is no game for Jev** (`src/core/advisor_state.ts`, `parseOrcaGameMode`). Orca launches a game pane with `ORCA_GAME_HUD=0` when the person hid the game's band; orca-game then draws no band and passes every other plugin's `$.ui.status` through (its `isAbsorbing` is false). 0.12.0 still went silent there, so Jev showed nowhere. With `ORCA_GAME_HUD` `0` or `false`, Jev now draws its line and band as without the game and does not write `advisor`.
+
 ## 0.12.0
 
 - **Game mode: Jev publishes instead of drawing in a game pane** (odd/tasks/game-mode-advisor-state.md, ORCA-586 T5). Orca sets `ORCA_GAME_MODE` (`on` or `zen`) when it launches a Claude Agent Teams pane with its `orca-game` mod, which draws the pane as a scene. There Jev keeps all its work (routing, advice, the steward, the CI watcher, memory, toasts) but makes no `$.ui.status` call and its AbovePrompt hook returns `next(e)` untouched before reading any state. It writes `{ plugin: 'orca-jev-mod-skills', key: 'advisor' }` instead, wherever the line or the band would have redrawn (the status-line sites, every `runningSubagents` and `ciWatches` write), serialized and skipped when unchanged. It is built from what this load holds, not re-read from `$.state`, because every `get` of one dispatch reads one moment and would miss the write just made. The value (`AdvisorState`, `version: 1`, declared in `types/index.d.ts`, built by `src/core/advisor_state.ts`) carries `locale`, `line` (the exact status line), the main conversation's `model`/`modelId`/`effort` as its last step was sent (the router's kept choice before any step in a load), `subagents` (the band's rows: type, title, branch, worktree, model, effort, reason code and short translated verdict), `ci` (the band's CI rows with their line) and `notices` (the steward's /clear hint and finished CI runs, newest last, at most 5). Absent, `off` or any other value: nothing changes and `advisor` is never written.

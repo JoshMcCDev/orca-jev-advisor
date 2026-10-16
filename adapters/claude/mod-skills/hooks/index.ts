@@ -3642,7 +3642,8 @@ interface GameHost {
 function gameModeOf($: EngineInterface, game: GameHost): Promise<GameMode | null> {
   game.mode ??= (async () => {
     try {
-      return parseOrcaGameMode(await $.env.get('ORCA_GAME_MODE'))
+      const [mode, hud] = await Promise.all([$.env.get('ORCA_GAME_MODE'), $.env.get('ORCA_GAME_HUD')])
+      return parseOrcaGameMode(mode, hud)
     } catch {
       return null
     }
