@@ -16,6 +16,14 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.13.0
+
+- **Choose who judges your commands: Jev, Clef or both.** Clef is Cloudflare's model on Workers AI, with a free daily allowance. In Both, Clef answers first and Jev answers whenever Clef is unsure, fails or has spent the day's free allowance. Set it in Configuration → Decision provider with your Cloudflare account id and a Workers AI token. Nothing changes until you choose it: after updating, Jev still judges everything.
+- **The board shows who decided,** how often Jev was asked instead, and how much of today's free Clef allowance is used. Clef stops before the free allowance ends, so it never bills your Cloudflare account.
+- **"Solo medir"** replaces "Sombra" as the Spanish name for a module that only measures.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.12.2
 
 - **Memory costs less, saves the same.** When your agent already saved a memory itself in a turn, the Memory module no longer re-reads the whole session to draft one it would throw away, and it no longer asks Haiku about messages a plugin posted (such as the CI watcher's "CI … success" notes).

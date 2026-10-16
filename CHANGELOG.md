@@ -2,6 +2,18 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.13.0
+
+- **Decision providers: Jev, Clef or both** (odd/tasks/multi-provider.md, P1-P7). The gate can now ask Cloudflare's Clef models (Workers AI, `@cf/cloudflare/clef`, `clef-flash`, `clef-omni`) as well as Jev. Clef speaks the same System One contract; named noul criteria are mapped to `criteria.true` because Clef rejects them (HTTP 422). The config panel's "Decision provider" section chooses the mode (Jev only, the default after an upgrade; Both; Clef only) and the Clef model, stores the Cloudflare account id and token in Orca's secret store (shown masked) and tests the connection. The worker mirrors them to the same `0600` env file as the Jev key, so the gate hook reads them the same way. `api.cloudflare.com` is added to the manifest's network hosts.
+  - **Both mode is a cascade.** Clef answers first. Jev answers, alone and for every question, when Clef is in doubt (consequence within 0.2 of the effective line), when a command-scoped policy question is present, when there are more than 64 questions, when Clef fails or times out (it gets a sub-budget that leaves room for a full Jev call), or when the day's neuron budget is spent. Answers from the two providers are never mixed.
+  - **Neuron budget.** An append-only ledger per UTC day counts Clef's neurons and stops Clef at 9,000 of the 10,000 free neurons, so a Workers Paid account is never billed. A daily-allowance error (429, code 3036) skips Clef until 00:00 UTC; a per-minute limit only sends that one call to Jev.
+  - **Records.** `source` keeps its meaning; outside Jev-only mode decisions add `provider`, `escalation` and `shadowAgrees`, and the gate cache is keyed by provider. In Jev-only mode records and cache keys are byte for byte as before.
+  - **Confident errors.** 5% of Clef's confident answers are also asked of Jev in parallel; the board counts the disagreements.
+  - **Only the gate cascades.** The router, skills, tools, memory, verify-done, the steward and secret redaction stay on Jev; their thresholds were tuned on Jev and have not been measured on Clef.
+  - **Board: "Who decides?"** Answers by provider, doubt escalations, failovers by reason, policy questions sent to Jev, the confident-error rate, and today's neurons against the free allowance, following the global window.
+  - **Replay.** 54 corpus commands in Both mode with `clef`: 54/54 the same verdict as Jev, 11 sent to Jev (9 doubt, 2 Clef failures).
+- **Modules: "Solo medir" instead of "Sombra"** in the Spanish panels, and the state buttons no longer wrap their label.
+
 ## 0.12.2
 
 - **Memory: no fork whose saves would all be dropped** (`adapters/claude/mod-skills/hooks/index.ts`, `memoryAfterTurn`). In Active with Engram usable, a turn whose main thread already called `mem_save` has every save of the fork's draft dropped (no double save, 0.10.0), but the fork still ran over the whole session to measure the drop. On the owner's machine (2026-10-13 to 16) 21 of 21 such forks wrote nothing, for about 4.1 M cached input tokens read. The fork is now not made; the row says `fork: main-saved` (`forkSampled: false`). The Haiku gate still runs, so the turn stays measured.
