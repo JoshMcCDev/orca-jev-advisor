@@ -3150,6 +3150,8 @@ async function memoryAfterTurn($: EngineInterface, modulesFile: FeatureModulesFi
     if (verdict !== null && verdict.kind === 'update') {
       if (effective === 'shadow' && !isForkSampled(sessionId, turnId)) fork = 'not-sampled'
       else if (host.runningTurn() !== null) fork = 'turn-moved-on'
+      // writeMemoryDraft would drop every save of it (no double save), and the fork reads the whole session.
+      else if (effective === 'active' && engramUsable(backend) && seen.engramSaves > 0) fork = 'main-saved'
       else ({ fork, forkMs, forkUsage, draft } = await draftMemory($, verdict.reason, backend, dir, new Date(answered).toISOString().slice(0, 10)))
     }
     // A malformed gate or draft leaves `draft` null: nothing is written, and the row says which step failed.
