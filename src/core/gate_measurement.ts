@@ -11,6 +11,9 @@
 import { locateCommandSegments } from "./command_locations.ts";
 import { splitOnCommandSeparators, startsWithGitDiscard } from "./git_discard.ts";
 import type { JevFailure } from "./jev.ts";
+import type { ClefFailure } from "./clef.ts";
+import type { ProviderId } from "./decision_provider.ts";
+import { isEscalation, type Escalation } from "./provider_cascade.ts";
 
 /**
  * `"none"` means the gate reached the point of asking Jev and got no answer
@@ -114,7 +117,7 @@ export type GateVerdict = "allow" | "ask" | "deny" | "advise";
  * failed Jev call (src/core/jev.ts) plus `oversized`: the command's state was
  * over the cap, so Jev was never asked (src/core/jev_state_cap.ts).
  */
-export type GateFailure = JevFailure | { readonly kind: "oversized" };
+export type GateFailure = JevFailure | ClefFailure | { readonly kind: "oversized" } | { readonly kind: "budget" };
 export type GateFailureClass = GateFailure["kind"];
 
 export type GateStopReason = "policy" | "local-rule" | "local-allow" | "risk" | "unreachable" | "cache" | "advice-retry" | "queue" | "authorized" | "contained" | "own-tree" | "trusted" | "secret-publish";
@@ -176,6 +179,18 @@ export interface GateDecisionRecord {
    * stays exactly what it was before this field existed.
    */
   readonly teamInternal?: true;
+  /**
+   * Multi-provider (odd/tasks/multi-provider.md): who answered a model-judged
+   * decision. `source` keeps its meaning -- "jev" is still "the model stage
+   * judged it" -- and this says which model. Written only when the provider
+   * mode is not Jev-only, so a Jev-only record is byte-for-byte what it was;
+   * absent reads as Jev.
+   */
+  readonly provider?: ProviderId;
+  /** Why Jev answered in both mode (src/core/provider_cascade.ts's Escalation). Absent when the mode's first provider answered. */
+  readonly escalation?: Escalation;
+  /** A sampled, confident Clef answer that Jev was also asked: whether Jev's verdict agreed (review note 12). */
+  readonly shadowAgrees?: boolean;
 }
 
 /** The family for discarding uncommitted work. Records written before checkout and restore joined it carry `LEGACY_DISCARD_FAMILY`. */
@@ -364,6 +379,10 @@ export interface BuildGateDecisionRecordInput {
   readonly policyId?: string;
   /** 0.6.8 T3 -- see GateDecisionRecord.teamInternal. `false` and absent both write no key. */
   readonly teamInternal?: boolean;
+  /** Multi-provider -- see GateDecisionRecord.provider. Absent writes no key. */
+  readonly provider?: ProviderId;
+  readonly escalation?: Escalation | null;
+  readonly shadowAgrees?: boolean | null;
 }
 
 export function buildGateDecisionRecord(input: BuildGateDecisionRecordInput): GateDecisionRecord {
@@ -399,6 +418,9 @@ export function buildGateDecisionRecord(input: BuildGateDecisionRecordInput): Ga
     ...(input.failure !== undefined && "status" in input.failure ? { failureStatus: input.failure.status } : {}),
     ...(input.stateCondensed === true ? { stateCondensed: true as const } : {}),
     ...(input.teamInternal === true ? { teamInternal: true as const } : {}),
+    ...(input.provider !== undefined ? { provider: input.provider } : {}),
+    ...(input.escalation !== undefined && input.escalation !== null ? { escalation: input.escalation } : {}),
+    ...(typeof input.shadowAgrees === "boolean" ? { shadowAgrees: input.shadowAgrees } : {}),
   };
 }
 
@@ -433,7 +455,20 @@ function isGateStopReason(value: unknown): value is GateStopReason {
 }
 
 function isGateFailureClass(value: unknown): value is GateFailureClass {
-  return value === "timeout" || value === "network" || value === "http4xx" || value === "http5xx" || value === "overload" || value === "malformed" || value === "oversized";
+  return (
+    value === "timeout" ||
+    value === "network" ||
+    value === "http4xx" ||
+    value === "http5xx" ||
+    value === "overload" ||
+    value === "malformed" ||
+    value === "oversized" ||
+    value === "auth" ||
+    value === "rate-limit" ||
+    value === "daily-allowance" ||
+    value === "unsupported" ||
+    value === "budget"
+  );
 }
 
 function isGateDecisionRecord(value: unknown): value is GateDecisionRecord {
@@ -456,7 +491,10 @@ function isGateDecisionRecord(value: unknown): value is GateDecisionRecord {
     (record.failureClass === undefined || isGateFailureClass(record.failureClass)) &&
     (record.failureStatus === undefined || typeof record.failureStatus === "number") &&
     (record.stateCondensed === undefined || record.stateCondensed === true) &&
-    (record.teamInternal === undefined || record.teamInternal === true)
+    (record.teamInternal === undefined || record.teamInternal === true) &&
+    (record.provider === undefined || record.provider === "jev" || record.provider === "clef") &&
+    (record.escalation === undefined || isEscalation(record.escalation)) &&
+    (record.shadowAgrees === undefined || typeof record.shadowAgrees === "boolean")
   );
 }
 

@@ -93,3 +93,15 @@ test("G8: a 402 (the key has no credit or plan) gets its own notice, never the u
     assert.equal(unreachableNoticeKey(failure), "jevUnreachable", JSON.stringify(failure));
   }
 });
+
+// Multi-provider: when Clef was the one asked and nobody answered, the notice names Clef.
+test("a Clef-side failure names Clef, and a spent day says when Clef comes back", () => {
+  assert.equal(unreachableNoticeKey({ kind: "budget" }, "clef"), "clefBudgetSpent");
+  assert.equal(unreachableNoticeKey({ kind: "daily-allowance" }, "clef"), "clefBudgetSpent");
+  assert.equal(unreachableNoticeKey({ kind: "timeout" }, "clef"), "clefUnreachable");
+  assert.equal(unreachableNoticeKey({ kind: "rate-limit", status: 429 }, "clef"), "clefUnreachable");
+  assert.equal(unreachableNoticeKey(null, "clef"), "clefUnreachable");
+  // Jev's own keys are unchanged, and the provider defaults to Jev.
+  assert.equal(unreachableNoticeKey({ kind: "http4xx", status: 402 }, "jev"), "jevNoCredit");
+  assert.equal(unreachableNoticeKey({ kind: "timeout" }), "jevUnreachable");
+});
