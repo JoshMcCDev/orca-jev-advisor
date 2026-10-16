@@ -176,8 +176,58 @@ export type MemoryShadowState = {
   rechecked: boolean
 }
 
+/**
+ * Game mode (odd/tasks/game-mode-advisor-state.md): written only in a pane
+ * Orca launched with its `orca-game` mod (ORCA_GAME_MODE `on` or `zen`), where
+ * Jev draws neither its status line nor its band. The game reads this value
+ * and draws it. Never written without the game. Built by
+ * src/core/advisor_state.ts (`buildAdvisorState`). Every absent value is null.
+ */
+export type AdvisorState = {
+  version: 1
+  locale: 'es' | 'en'
+  /** The status line Jev would show (`jev · …`); null when it would show none. */
+  line: string | null
+  /** The main conversation's model as a person reads it (`Opus 5.5`), its id, and its effort; null before the router decided or with it off. */
+  model: string | null
+  modelId: string | null
+  effort: RouterStickyEffort | null
+  /** The agents running now, as the band's rows. */
+  subagents: readonly {
+    id: string
+    type: string
+    /** The Agent call's description. */
+    title: string
+    branch: string | null
+    /** The worktree's directory name, only when it is not the lead's. */
+    worktree: string | null
+    model: string | null
+    effort: RouterStickyEffort | null
+    status: 'running'
+    why: 'explicit' | 'lowered' | 'raised' | 'chosen' | 'same' | 'kept-unsure' | 'kept-pointer' | 'measuring' | 'inherited' | 'no-jev' | 'teammate' | 'teammate-routed' | 'before-load' | 'unseen'
+    /** The short reason, translated (`Jev duda`). */
+    verdict: string
+  }[]
+  /** The CI watches the band shows, each with its band line (`text`). */
+  ci: readonly {
+    id: string
+    sha7: string
+    branch: string | null
+    status: 'watching' | 'success' | 'failure'
+    done: number
+    total: number
+    failed: readonly string[]
+    running: readonly string[]
+    text: string
+    startedAtMs: number
+    finishedAtMs: number | null
+  }[]
+  /** The mod's toasts (the steward's /clear hint, a finished CI run), newest last, at most 5; the toasts still show. */
+  notices: readonly { id: string; level: 'info' | 'warn' | 'block'; text: string; at: number }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState; ciWatches: CiWatchesState; memory: MemoryShadowState }
+    'orca-jev-mod-skills': { routerSticky: RouterSticky; routerPromptOrigin: RouterPromptOrigin; routerCache: RouterCacheState; steward: StewardState; stewardCold: StewardColdState; runningSubagents: RunningSubagentsState; ciWatches: CiWatchesState; memory: MemoryShadowState; advisor: AdvisorState }
   }
 }
