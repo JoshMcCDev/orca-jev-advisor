@@ -16,6 +16,13 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.13.3
+
+- **Your saved settings can no longer be wiped by a slow read.** When Orca was slow to answer, the Configuration panel could show a section as empty and Save would then write that empty value over what you had saved; that is how a list of policies disappeared. Now the panel only saves a section it has actually read: it shows "Leyendo lo guardado…" while it tries again, says so if it cannot read it, and Save tells you which sections it left alone. While a section has not loaded, its controls stay disabled, so a late answer cannot overwrite what you typed, and an older answer never replaces something you just saved. It also never saves an empty policies list or destination list over stored ones unless you removed the rows yourself.
+- **The modules show their state again.** After a failed read they appeared neither on nor off. Now they say "Leyendo el estado de los módulos…" while the panel tries again, with the state you chose once it arrives.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.13.2
 
 - **The gate keeps its Jev key.** A hiccup reading Orca's secret store could make the gate lose its Jev key until you saved it again. Now a failed read leaves the saved key where it is.

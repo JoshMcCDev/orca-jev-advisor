@@ -812,6 +812,8 @@
           'modules.bg.cli': 'Segundo plano: unas {{n}} ejecuciones por hora del comando orca.',
           'modules.bg.panelOnly': 'Segundo plano: unos {{open}} procesos de node por hora con un panel abierto, ninguno sin panel abierto.',
           'modules.install.reading': 'Leyendo el estado de los módulos…',
+          'modules.readFailed': 'No se pudo leer el estado de los módulos. Cierra el panel y vuelve a abrirlo.',
+          'modules.install.readFailed': 'No se pudo leer el estado de los módulos.',
           'modules.install.unavailable': 'No se pudo leer el estado de este módulo.',
           'modules.install.noHooks': 'No tiene hooks en Claude Code: sigue al interruptor directamente.',
           'modules.install.installed': 'Hooks puestos ({{n}}), como elegiste.',
@@ -1115,6 +1117,14 @@
           'save.whichQueueMode': 'Qué hacer cuando una persona debe aprobar',
           'save.whichExplicitModels': 'Los modelos fijados por un agente',
           'save.whichProvider': 'El proveedor de decisiones',
+          // 0.13.3: a section whose stored value could not be read is never written from what the page shows.
+          'section.reading': 'Leyendo lo guardado de «{{which}}»…',
+          'section.readFailed': 'No se pudo leer lo guardado de «{{which}}». No se sobrescribirá; cierra el panel y vuelve a abrirlo.',
+          'section.notSent': 'No se envió «{{which}}»: lo guardado todavía no se ha leído, así que no se tocó. Espera a que cargue e inténtalo de nuevo.',
+          'section.whichModelsConfig': 'Los interruptores del catálogo de modelos',
+          'save.nothingLoaded': 'No se guardó nada: todavía no ha cargado nada de lo guardado. Espera a que cargue e inténtalo de nuevo.',
+          'save.notLoaded': 'Se guardó el resto, pero no se tocó lo que aún no se había leído: {{which}}. Vuelve a guardar cuando cargue.',
+          'save.emptyRefused': 'No se guardó una lista vacía de: {{which}}. Si querías vaciarla, quita las filas con «Quitar» y guarda de nuevo.',
           'save.rejectedWhich': 'El host rechazó esto: {{which}}.',
           'save.invalidField': 'Hay un campo con un valor no válido; se cambió a su pestaña y quedó enfocado.',
           'common.timeout': 'Tiempo de espera agotado.',
@@ -1287,6 +1297,8 @@
           'modules.bg.cli': 'Background: about {{n}} runs an hour of the orca command.',
           'modules.bg.panelOnly': 'Background: about {{open}} node processes an hour with a panel open, none with no panel open.',
           'modules.install.reading': 'Reading the state of the modules…',
+          'modules.readFailed': 'Could not read the state of the modules. Close the panel and open it again.',
+          'modules.install.readFailed': 'Could not read the state of the modules.',
           'modules.install.unavailable': 'The state of this module could not be read.',
           'modules.install.noHooks': 'It has no Claude Code hooks: it follows the switch directly.',
           'modules.install.installed': 'Hooks installed ({{n}}), as you chose.',
@@ -1590,6 +1602,14 @@
           'save.whichQueueMode': 'What to do when a person must approve',
           'save.whichExplicitModels': 'Models fixed by an agent',
           'save.whichProvider': 'The decision provider',
+          // 0.13.3: a section whose stored value could not be read is never written from what the page shows.
+          'section.reading': 'Reading what is saved for "{{which}}"…',
+          'section.readFailed': 'Could not read what is saved for "{{which}}". It will not be overwritten; close the panel and open it again.',
+          'section.notSent': '"{{which}}" was not sent: what is saved has not been read yet, so it was left alone. Wait for it to load and try again.',
+          'section.whichModelsConfig': 'The model catalog switches',
+          'save.nothingLoaded': 'Nothing was saved: nothing that is saved has loaded yet. Wait for it to load and try again.',
+          'save.notLoaded': 'Saved the rest, but left alone what had not been read yet: {{which}}. Save again once it has loaded.',
+          'save.emptyRefused': 'An empty list was not saved for: {{which}}. If you meant to empty it, remove the rows with "Remove" and save again.',
           'save.rejectedWhich': 'The host rejected this: {{which}}.',
           'save.invalidField': 'A field has an invalid value; switched to its tab and focused it.',
           'common.timeout': 'Timed out.',
@@ -1907,6 +1927,110 @@
         return result.value.value === undefined ? null : result.value.value
       }
       function read (key, usuario) { return call('storage.get', { key: key }, usuario).then(stored) }
+
+      // 0.13.3: read() answers null both for "nothing saved" and for a read the
+      // host refused (ok: false, mostly its per-window throttle). That is fine
+      // to display, but never to write back: a section whose stored value was
+      // not read must not be saved from what the page shows. Everything a click
+      // writes from the page goes through these instead.
+      /** { ok: false } when the host refused the read; { ok: true, value } otherwise (value null when nothing is saved). */
+      function readStrict (key) {
+        return call('storage.get', { key: key }, false).then(function (result) {
+          if (!result || !result.ok) return { ok: false, value: null }
+          return { ok: true, value: stored(result) }
+        })
+      }
+      function pause (ms) { return new Promise(function (resolve) { setTimeout(resolve, ms) }) }
+      /** Retries a refused read on the next throttle windows, one CUPO.ventanaMs apart. */
+      function readStrictRetrying (key, retriesLeft) {
+        return readStrict(key).then(function (result) {
+          if (result.ok || retriesLeft <= 0) return result
+          return pause(CUPO.ventanaMs).then(function () { return readStrictRetrying(key, retriesLeft - 1) })
+        })
+      }
+
+      // One entry per stored section a click writes from the page. `loaded`
+      // flips only on a successful read; until then the section shows a hint
+      // and its save is refused. `list` sections also remember how many rows
+      // were stored and whether the person removed rows in this panel session.
+      var SECTION_READ_RETRIES = 3
+      var sections = {}
+      // `generation` orders the reads and writes of one section: every new read
+      // and every successful write bumps it, and a read result that carries an
+      // older one is dropped, so a slow retry can never put an older value back
+      // over what was just read or saved. `controls()` lists what edits it.
+      function defineSection (id, key, whichKey, anchor, apply, controls) {
+        sections[id] = { id: id, key: key, whichKey: whichKey, anchor: anchor, apply: apply, controls: controls || null, loaded: false, generation: 0, hintEl: null, state: 'ready', failedKey: 'section.readFailed', quietReading: false, count: 0, removed: false }
+      }
+      /** Call right before issuing a read of the section; pass the result to settleSection with it. */
+      function beginSectionRead (id) { return ++sections[id].generation }
+      /** A section's controls are editable only while its stored value is loaded: a late read must not overwrite an edit. */
+      function lockSection (section) {
+        if (!section.controls) return
+        section.controls().forEach(function (control) {
+          if (!section.loaded) {
+            // A control that was already disabled (a row's own move-up, say) is not ours to re-enable.
+            if (!control.disabled) { control.disabled = true; control.setAttribute('data-section-locked', '') }
+          } else if (control.hasAttribute('data-section-locked')) {
+            control.disabled = false
+            control.removeAttribute('data-section-locked')
+          }
+        })
+      }
+      function paintSectionHint (section) {
+        if (!section.hintEl) {
+          var anchorEl = section.anchor()
+          if (!anchorEl || !anchorEl.parentNode) return
+          section.hintEl = document.createElement('p')
+          section.hintEl.setAttribute('data-section-hint', section.id)
+          anchorEl.parentNode.insertBefore(section.hintEl, anchorEl)
+        }
+        var hint = section.hintEl
+        var failed = section.state === 'failed'
+        hint.setAttribute('data-state', section.state)
+        hint.className = 'hint' + (failed ? ' warn' : '')
+        hint.style.display = section.state === 'ready' || (section.quietReading && !failed) ? 'none' : ''
+        hint.textContent = t(failed ? section.failedKey : 'section.reading', { which: section.whichKey ? t(section.whichKey) : '' })
+      }
+      function setSectionHint (id, state) {
+        sections[id].state = state
+        paintSectionHint(sections[id])
+      }
+      function markSectionLoaded (section, value) {
+        section.apply(value)
+        section.loaded = true
+        lockSection(section)
+        setSectionHint(section.id, 'ready')
+      }
+      /**
+       * Takes the strict result of a read already made (the first batch, or a
+       * re-read after a worker change). Applied and marked loaded on success;
+       * otherwise the section stays unloaded, says it is reading, and is read
+       * again on the next windows, with a failed hint after the last one.
+       */
+      function settleSection (id, result, generation) {
+        var section = sections[id]
+        if (generation !== section.generation) return Promise.resolve()
+        if (result.ok) { markSectionLoaded(section, result.value); return Promise.resolve() }
+        section.loaded = false
+        lockSection(section)
+        setSectionHint(id, 'reading')
+        return pause(CUPO.ventanaMs).then(function () {
+          if (generation !== section.generation) return null
+          return readStrictRetrying(section.key, SECTION_READ_RETRIES - 1)
+        }).then(function (retry) {
+          if (retry === null || generation !== section.generation) return
+          if (retry.ok) markSectionLoaded(section, retry.value)
+          else setSectionHint(id, 'failed')
+        }).catch(function () { if (generation === section.generation) setSectionHint(id, 'failed') })
+      }
+      /** For the buttons that send one whole section: says so and returns true when it was not read. */
+      function refuseUnreadSection (id, saidNode) {
+        var section = sections[id]
+        if (section.loaded) return false
+        said(saidNode, t('section.notSent', { which: t(section.whichKey) }), true)
+        return true
+      }
       // Every value passed through here is deep-stripped of undefined-valued
       // keys first (stripUndefinedValues, above) -- the one choke point
       // every write goes through, so a future `field || undefined` spot
@@ -2751,7 +2875,7 @@
         var removeBtn = elMake('button', 'link')
         removeBtn.type = 'button'
         removeBtn.textContent = t('catalog.remove')
-        removeBtn.addEventListener('click', function () { entry.remove() })
+        removeBtn.addEventListener('click', function () { sections.catalog.removed = true; entry.remove() })
         actions.appendChild(removeBtn)
         entry.appendChild(actions)
 
@@ -2851,12 +2975,11 @@
           sendCatalogProposalAcceptRequest(accepted).then(function (result) {
             var added = (result && typeof result.added === 'number') ? result.added : 0
             said(proposalsSaidEl, t('catalog.proposalsAdded', { count: String(added) }))
-            return Promise.all([read('catalog', false), read(CATALOG_PROPOSALS_STATUS_KEY, false)])
+            var generation = beginSectionRead('catalog')
+            return Promise.all([readStrict('catalog'), read(CATALOG_PROPOSALS_STATUS_KEY, false)]).then(function (results) { return [results[0], results[1], generation] })
           }).then(function (results) {
-            if (results[0]) {
-              catalogListEl.innerHTML = ''
-              ;(results[0].destinations || []).forEach(addCatalogRow)
-            }
+            // A refused re-read leaves the rows as they were but no longer proves they match storage: unloaded until read again.
+            if (!results[0].ok || results[0].value) settleSection('catalog', results[0], results[2])
             renderCatalogProposals(results[1])
           }).catch(function (error) {
             said(proposalsSaidEl, errorText(error), true)
@@ -3037,7 +3160,7 @@
         var removeBtn = elMake('button', 'link')
         removeBtn.type = 'button'
         removeBtn.textContent = t('policies.remove')
-        removeBtn.addEventListener('click', function () { entry.remove() })
+        removeBtn.addEventListener('click', function () { sections.policies.removed = true; entry.remove() })
         actions.appendChild(removeBtn)
         entry.appendChild(actions)
 
@@ -3229,11 +3352,10 @@
           if (replaced > 0) said(policyImportSaidEl, t('policies.importReplaced', { replaced: String(replaced), added: String(added) }))
           else said(policyImportSaidEl, added > 0 ? t('policies.importDone', { added: String(added), skipped: String(skipped) }) : t('policies.importNone'))
           renderPolicySeedDiffs(result && result.differing)
-          return read('policies', false)
-        }).then(function (policies) {
-          if (!policies) return
-          policiesListEl.innerHTML = ''
-          policies.forEach(addPolicyRow)
+          var generation = beginSectionRead('policies')
+          return readStrict('policies').then(function (result) { return { result: result, generation: generation } })
+        }).then(function (outcome) {
+          if (!outcome.result.ok || outcome.result.value) settleSection('policies', outcome.result, outcome.generation)
         }).catch(function (error) {
           said(policyImportSaidEl, errorText(error), true)
         })
@@ -3346,6 +3468,7 @@
 
       var modSkillsSaidEl = el('mod-skills-said')
       el('save-mod-skills').addEventListener('click', function () {
+        if (refuseUnreadSection('modSkills', modSkillsSaidEl)) return
         said(modSkillsSaidEl, t('modSkills.saving'))
         var active = el('mod-skills-active').checked
         var activeTools = el('mod-skills-active-tools').checked
@@ -3750,6 +3873,7 @@
 
       var denyTierSaidEl = el('deny-tier-said')
       el('save-deny-tier').addEventListener('click', function () {
+        if (refuseUnreadSection('denyTier', denyTierSaidEl)) return
         said(denyTierSaidEl, t('denyTier.saving'))
         var switches = {}
         DENY_RULES.forEach(function (rule) { switches[rule.key] = el('deny-' + rule.name).checked })
@@ -4170,13 +4294,9 @@
        * only the second one means the default.
        */
       function loadProviderSettings (retriesLeft) {
-        return call('storage.get', { key: 'decisionProvider' }, false).then(function (result) {
-          if (!result || !result.ok) {
-            if (retriesLeft <= 0) { showProviderUnread('failed'); return }
-            return new Promise(function (resolve) { setTimeout(resolve, CUPO.ventanaMs) })
-              .then(function () { return loadProviderSettings(retriesLeft - 1) })
-          }
-          fillProviderSettings(stored(result))
+        return readStrictRetrying('decisionProvider', retriesLeft).then(function (result) {
+          if (!result.ok) { showProviderUnread('failed'); return }
+          fillProviderSettings(result.value)
           setProviderGroupsEnabled(true)
           providerSettingsLoaded = true
           providerReadingEl.style.display = 'none'
@@ -4369,6 +4489,10 @@
         lastClaudeIntegrationStatus = status
         renderModules(status, measurements)
         claudeIntegrationStatusEl.innerHTML = ''
+        if (status === null && integrationReadFailed) {
+          claudeIntegrationStatusEl.appendChild(li(t('integration.statusUnavailable')))
+          return
+        }
         if (status === null) {
           claudeIntegrationStatusEl.appendChild(li(
             (heartbeat === undefined || isHeartbeatFresh(heartbeat, Date.now(), WORKER_HEARTBEAT_STALE_MS))
@@ -4469,15 +4593,40 @@
 
       var MEASUREMENTS_STATUS_KEY = 'measurementsSummary'
 
-      function loadClaudeIntegrationStatus () {
+      // 0.13.3: a status read the host refused used to paint as "no state" and
+      // leave every module without a pressed button. It is retried on the next
+      // windows (a newer call supersedes the pending retries) and says so if it
+      // never arrives. The first attempt settles with the first batch; retries
+      // run behind it.
+      var INTEGRATION_READ_RETRIES = 3
+      var integrationReadGeneration = 0
+      var integrationReadFailed = false
+
+      function loadClaudeIntegrationStatus (retriesLeft) {
+        var generation = ++integrationReadGeneration
+        var retries = typeof retriesLeft === 'number' ? retriesLeft : INTEGRATION_READ_RETRIES
         return Promise.all([
-          read(CLAUDE_INTEGRATION_STATUS_KEY, false),
+          readStrict(CLAUDE_INTEGRATION_STATUS_KEY),
           read(WORKER_HEARTBEAT_KEY, false),
           read(MEASUREMENTS_STATUS_KEY, false),
           read(MOD_SKILLS_STATUS_KEY, false)
         ]).then(function (results) {
-          renderClaudeIntegrationStatus(results[0], results[1], results[2], results[3])
+          if (generation !== integrationReadGeneration) return
+          if (results[0].ok) {
+            integrationReadFailed = false
+            setSectionHint('modules', 'ready')
+            renderClaudeIntegrationStatus(results[0].value, results[1], results[2], results[3])
+            renderModSkillsReadiness(results[2])
+            return
+          }
+          integrationReadFailed = retries <= 0
+          renderClaudeIntegrationStatus(null, undefined, results[2], results[3])
           renderModSkillsReadiness(results[2])
+          setSectionHint('modules', integrationReadFailed ? 'failed' : 'reading')
+          if (retries <= 0) return
+          pause(CUPO.ventanaMs).then(function () {
+            if (generation === integrationReadGeneration) return loadClaudeIntegrationStatus(retries - 1)
+          }).catch(function () {})
         })
       }
 
@@ -4759,7 +4908,7 @@
           moduleQuery('cost', row.id).textContent = moduleCostText(row)
           if (row.id === 'ci-watch') moduleQuery('weekly', row.id).textContent = ciWatchWeeklyText(measurements)
           moduleQuery('background', row.id).textContent = moduleBackgroundText(row)
-          moduleQuery('install', row.id).textContent = status === null ? t('modules.install.reading') : moduleInstallText(row.id, info, status)
+          moduleQuery('install', row.id).textContent = status === null ? t(integrationReadFailed ? 'modules.install.readFailed' : 'modules.install.reading') : moduleInstallText(row.id, info, status)
           var group = moduleQuery('states', row.id)
           group.setAttribute('aria-label', t('modules.stateGroup', { module: t('modules.name.' + row.id) }))
           Array.from(group.querySelectorAll('button')).forEach(function (btn) {
@@ -4825,6 +4974,68 @@
         }).then(function () { setModuleButtonsDisabled(false) })
       }
 
+      // ---------- stored sections the page writes back (0.13.3) ------------------
+
+      var lastGateDefaults = null
+      // The sections load() reads (the models sections are read by their own script).
+      var MAIN_PANEL_SECTIONS = ['config', 'catalog', 'policies', 'teamOwners', 'queueMode', 'explicitModels', 'modSkills', 'denyTier']
+
+      function groupButtons (id) { return Array.from(el(id).querySelectorAll('button')) }
+      function listControls (listEl) { return Array.from(listEl.querySelectorAll('input, select, textarea, button')) }
+      defineSection('config', 'config', 'save.whichConfig',
+        function () { return el('thresholds-section').querySelector('.row') },
+        function (value) { currentConfig = value; fillThresholds(value, lastGateDefaults) },
+        function () { return [el('logMaxEntries')] })
+      defineSection('catalog', 'catalog', 'save.whichCatalog', function () { return catalogListEl }, function (value) {
+        var rows = (value && value.destinations) || []
+        catalogListEl.innerHTML = ''
+        rows.forEach(addCatalogRow)
+        sections.catalog.count = rows.length
+        sections.catalog.removed = false
+      }, function () { return [el('add-catalog-row')].concat(listControls(catalogListEl)) })
+      defineSection('policies', 'policies', 'save.whichPolicies', function () { return policiesListEl }, function (value) {
+        var rows = Array.isArray(value) ? value : []
+        policiesListEl.innerHTML = ''
+        rows.forEach(addPolicyRow)
+        sections.policies.count = rows.length
+        sections.policies.removed = false
+      }, function () { return [el('add-policy-row'), el('import-policy-seeds')].concat(listControls(policiesListEl)) })
+      defineSection('teamOwners', 'teamOwners', 'save.whichTeamOwners', function () { return el('team-owners').previousElementSibling }, fillTeamOwners, function () { return [el('team-owners')] })
+      defineSection('queueMode', 'queueMode', 'save.whichQueueMode', function () { return el('queue-mode-label') }, fillQueueMode, function () { return groupButtons('queue-mode') })
+      defineSection('explicitModels', 'explicitModels', 'save.whichExplicitModels', function () { return el('explicit-models-label') }, fillExplicitModels, function () { return groupButtons('explicit-models') })
+      defineSection('modSkills', MOD_SKILLS_STATUS_KEY, 'modSkills.heading', function () { return el('save-mod-skills').parentNode }, fillModSkillsStatus, function () { return [el('mod-skills-active'), el('mod-skills-active-tools')] })
+      defineSection('denyTier', DENY_TIER_STATUS_KEY, 'denyTier.heading', function () { return el('deny-tier-rows') }, fillDenyTierStatus, function () { return Array.from(el('deny-tier-rows').querySelectorAll('input')) })
+      // Not written from the page, only shown: the hint says when the state could not be read.
+      defineSection('modules', CLAUDE_INTEGRATION_STATUS_KEY, null, function () { return el('modules-rows') }, function () {})
+      sections.modules.failedKey = 'modules.readFailed'
+      sections.modules.quietReading = true
+
+      /**
+       * Queues one section's write, or leaves it out: a section that was not
+       * read is never written (it is named to the person), and a list that
+       * reads empty over stored rows is not written unless the person
+       * removed rows in this panel session.
+       */
+      function planSectionWrite (id, valueOf, namedWrites, notLoaded, emptyRefused) {
+        var section = sections[id]
+        var label = t(section.whichKey)
+        if (!section.loaded) { notLoaded.push(label); return }
+        var value = valueOf()
+        var length = id === 'policies' ? value.length : id === 'catalog' ? value.destinations.length : -1
+        if (length === 0 && section.count > 0 && !section.removed) { emptyRefused.push(label); return }
+        namedWrites.push({
+          label: label,
+          promise: write(section.key, value).then(function (result) {
+            // A read that started before this write must not put an older value back.
+            if (result && result.ok) section.generation += 1
+            return result
+          }),
+          afterSaved: function () {
+            if (length >= 0) { section.count = length; section.removed = false }
+          }
+        })
+      }
+
       // ---------- guardar / cargar ------------------------------------------
 
       var saveSaidEl = el('save-said')
@@ -4852,38 +5063,49 @@
         // the message did not say what" shape this whole release is fixing
         // elsewhere. Each write keeps its own label so a refusal can name
         // the actual write(s) that failed, not a single generic sentence.
-        var namedWrites = [
-          { label: t('save.whichConfig'), promise: write('config', config) },
-          { label: t('save.whichCatalog'), promise: write('catalog', readCatalog()) },
-          { label: t('save.whichPolicies'), promise: write('policies', readPolicies()) },
-          { label: t('save.whichTeamOwners'), promise: write('teamOwners', readTeamOwners()) },
-          { label: t('save.whichQueueMode'), promise: write('queueMode', readQueueMode()) },
-          { label: t('save.whichExplicitModels'), promise: write('explicitModels', readExplicitModels()) }
-        ]
+        var namedWrites = []
+        var notLoaded = []
+        var emptyRefused = []
+        planSectionWrite('config', function () { return config }, namedWrites, notLoaded, emptyRefused)
+        planSectionWrite('catalog', readCatalog, namedWrites, notLoaded, emptyRefused)
+        planSectionWrite('policies', readPolicies, namedWrites, notLoaded, emptyRefused)
+        planSectionWrite('teamOwners', readTeamOwners, namedWrites, notLoaded, emptyRefused)
+        planSectionWrite('queueMode', readQueueMode, namedWrites, notLoaded, emptyRefused)
+        planSectionWrite('explicitModels', readExplicitModels, namedWrites, notLoaded, emptyRefused)
         // The provider choice is read after the first paint; until it has
-        // arrived, the buttons show the default, and saving them would
-        // overwrite the stored choice with it.
+        // arrived, the buttons show nothing, and saving them would
+        // overwrite the stored choice with a default.
         if (providerSettingsLoaded) namedWrites.push({ label: t('save.whichProvider'), promise: write('decisionProvider', readProviderSettings()) })
+        else notLoaded.push(t('save.whichProvider'))
+        if (namedWrites.length === 0) { said(saveSaidEl, t('save.nothingLoaded'), true); return }
         Promise.all(namedWrites.map(function (w) { return w.promise })).then(function (results) {
           var failedLabels = []
           results.forEach(function (result, index) {
             if (!result || !result.ok) failedLabels.push(namedWrites[index].label)
           })
           if (failedLabels.length > 0) throw shownError(t('save.rejectedWhich', { which: failedLabels.join(', ') }))
-          writeBackground(CATALOG_POLICY_MIRROR_REQUEST_KEY, new Date().toISOString())
-          currentConfig = config
-          said(saveSaidEl, t('save.saved'))
+          if (namedWrites.length > 0) writeBackground(CATALOG_POLICY_MIRROR_REQUEST_KEY, new Date().toISOString())
+          if (sections.config.loaded) currentConfig = config
+          namedWrites.forEach(function (w) { if (w.afterSaved) w.afterSaved() })
+          var notes = []
+          if (notLoaded.length > 0) notes.push(t('save.notLoaded', { which: notLoaded.join(', ') }))
+          if (emptyRefused.length > 0) notes.push(t('save.emptyRefused', { which: emptyRefused.join(', ') }))
+          if (notes.length > 0) said(saveSaidEl, notes.join(' '), true)
+          else said(saveSaidEl, t('save.saved'))
         }).catch(function (error) {
           said(saveSaidEl, errorText(error), true)
         })
       })
 
       function load () {
+        var generations = {}
         fillThresholds({})
         showProviderUnread('loading')
         fillModSkillsStatus(null)
         renderModelRouterRows(null)
         fillDenyTierStatus(null)
+        // Nothing is loaded yet: the controls stay locked until each section's stored value arrives.
+        Object.keys(sections).forEach(function (id) { lockSection(sections[id]) })
         renderPolicySeedNoticeAndDiffs(null)
         renderCatalogProposals(null)
         // Orca's own language decides, not a preference stored here: the
@@ -4898,21 +5120,23 @@
           applyStaticI18n()
           renderSecretStatus(null)
           renderClaudeIntegrationStatus(null)
+          // Each section's generation is taken before its read is issued (see beginSectionRead).
+          MAIN_PANEL_SECTIONS.forEach(function (id) { generations[id] = beginSectionRead(id) })
           var firstBatch = Promise.all([
-            read('config', false),
-            read('catalog', false),
-            read('policies', false),
+            readStrict('config'),
+            readStrict('catalog'),
+            readStrict('policies'),
             read(GATE_DEFAULTS_KEY, false),
-            read(MOD_SKILLS_STATUS_KEY, false),
-            read(DENY_TIER_STATUS_KEY, false),
+            readStrict(MOD_SKILLS_STATUS_KEY),
+            readStrict(DENY_TIER_STATUS_KEY),
             read(POLICY_SEED_NOTICE_STATUS_KEY, false),
             read(CATALOG_PROPOSALS_STATUS_KEY, false),
             loadSecretStatus(),
             loadClaudeIntegrationStatus(),
             read(MODEL_ROUTER_STATUS_KEY, false),
-            read('teamOwners', false),
-            read('queueMode', false),
-            read('explicitModels', false)
+            readStrict('teamOwners'),
+            readStrict('queueMode'),
+            readStrict('explicitModels')
           ])
           // 0.13.2: the provider read is queued right behind the first batch
           // (it used to wait for that batch and two more reads, three throttle
@@ -4921,20 +5145,19 @@
           loadProviderSettings(PROVIDER_READ_RETRIES).catch(function () { showProviderUnread('failed') })
           return firstBatch
         }).then(function (results) {
-          currentConfig = results[0]
-          fillThresholds(currentConfig, results[3])
-          catalogListEl.innerHTML = ''
-          ;((results[1] && results[1].destinations) || []).forEach(addCatalogRow)
-          policiesListEl.innerHTML = ''
-          ;(results[2] || []).forEach(addPolicyRow)
-          fillModSkillsStatus(results[4])
-          fillDenyTierStatus(results[5])
+          lastGateDefaults = results[3]
+          // A section the host refused stays unloaded and is read again on later windows (see settleSection).
+          settleSection('config', results[0], generations.config)
+          settleSection('catalog', results[1], generations.catalog)
+          settleSection('policies', results[2], generations.policies)
+          settleSection('modSkills', results[4], generations.modSkills)
+          settleSection('denyTier', results[5], generations.denyTier)
           renderPolicySeedNoticeAndDiffs(results[6])
           renderCatalogProposals(results[7])
           renderModelRouterRows(results[10])
-          fillTeamOwners(results[11])
-          fillQueueMode(results[12])
-          fillExplicitModels(results[13])
+          settleSection('teamOwners', results[11], generations.teamOwners)
+          settleSection('queueMode', results[12], generations.queueMode)
+          settleSection('explicitModels', results[13], generations.explicitModels)
           // 0.6.2 E7: what storage holds may predate a mode set from a
           // terminal; ask the worker for a fresh read and redraw with it.
           refreshModelRouterStatus().then(function (fresh) { if (!modelRouterEdited) renderModelRouterRows(fresh) }).catch(function () {})
@@ -5329,9 +5552,11 @@
 
       el('models-save-ladder').addEventListener('click', function () {
         var saidEl = el('models-ladder-said')
+        if (refuseUnreadSection('modelsLadder', saidEl)) return
         said(saidEl, t('models.savingLadder'))
         write(MODELS_KEY, modelsLadder.map(modelsBuildRow)).then(function (result) {
           if (!result || !result.ok) throw shownError(t('common.hostRejectedWrite'))
+          sections.modelsLadder.generation += 1
           writeBackground(MODELS_MIRROR_REQUEST_KEY, new Date().toISOString())
           modelsDirty = false
           said(saidEl, t('models.savedLadder'))
@@ -5382,9 +5607,11 @@
 
       el('models-save-config').addEventListener('click', function () {
         var saidEl = el('models-config-said')
+        if (refuseUnreadSection('modelsConfig', saidEl)) return
         said(saidEl, t('models.savingConfig'))
         write(MODELS_CONFIG_KEY, { active: el('models-active').checked, readyOverride: el('models-ready-override').checked }).then(function (result) {
           if (!result || !result.ok) throw shownError(t('common.hostRejectedWrite'))
+          sections.modelsConfig.generation += 1
           writeBackground(MODELS_MIRROR_REQUEST_KEY, new Date().toISOString())
           said(saidEl, t('models.savedConfig'))
         }).catch(function (error) {
@@ -5493,11 +5720,10 @@
         modelsSetSeedNoticeButtonsDisabled(true)
         modelsSendSeedRequest('apply', accepted).then(function (result) {
           said(saidEl, t('models.seedNoticeApplied', { replaced: String(result.replaced || 0), added: String(result.added || 0) }))
-          return Promise.all([read(MODELS_KEY, false), modelsLoadSeedNoticeStatus()])
+          var generation = beginSectionRead('modelsLadder')
+          return Promise.all([readStrict(MODELS_KEY), modelsLoadSeedNoticeStatus()]).then(function (results) { return [results[0], generation] })
         }).then(function (results) {
-          modelsLadder = modelsSplitLadder(modelsParseCatalog(results[0]))
-          modelsDirty = false
-          modelsRenderLadder()
+          settleSection('modelsLadder', results[0], results[1])
         }).catch(function (error) {
           said(saidEl, errorText(error), true)
         }).then(function () {
@@ -5525,11 +5751,10 @@
         // clears the flag Apply was refusing on.
         var saidEl = el('models-ladder-said')
         modelsSetSeedNoticeDirtyVisible(false)
-        read(MODELS_KEY, false).then(function (stored) {
-          modelsLadder = modelsSplitLadder(modelsParseCatalog(stored))
-          modelsDirty = false
-          modelsRenderLadder()
-          said(saidEl, t('models.seedNoticeEditsDiscarded'))
+        var generation = beginSectionRead('modelsLadder')
+        readStrict(MODELS_KEY).then(function (result) {
+          settleSection('modelsLadder', result, generation)
+          if (result.ok) said(saidEl, t('models.seedNoticeEditsDiscarded'))
         }).catch(function (error) {
           said(saidEl, errorText(error), true)
         })
@@ -5571,13 +5796,28 @@
 
       // ---------- load ------------------------------------------------------
 
+      // A catalog or switch set the host refused is never written back from the empty page (0.13.3).
+      defineSection('modelsLadder', MODELS_KEY, 'models.heading', function () { return modelsLadderListEl }, function (value) {
+        modelsLadder = modelsSplitLadder(modelsParseCatalog(value))
+        modelsDirty = false
+        modelsRenderLadder()
+      }, function () { return [el('models-add-row')].concat(listControls(modelsLadderListEl)) })
+      defineSection('modelsConfig', MODELS_CONFIG_KEY, 'section.whichModelsConfig', function () { return el('models-save-config').parentNode }, function (value) {
+        el('models-active').checked = !!(value && value.active === true)
+        el('models-ready-override').checked = !!(value && value.readyOverride === true)
+        modelsRenderReadyOverrideHint()
+      }, function () { return [el('models-active'), el('models-ready-override')] })
+
       function modelsLoad () {
         modelsRenderSeedNotice(null)
         modelsRenderMeasurements(null)
         modelsSetSeedNoticeDirtyVisible(false)
+        var generations = { modelsLadder: beginSectionRead('modelsLadder'), modelsConfig: beginSectionRead('modelsConfig') }
+        lockSection(sections.modelsLadder)
+        lockSection(sections.modelsConfig)
         return Promise.all([
-          read(MODELS_KEY, false),
-          read(MODELS_CONFIG_KEY, false),
+          readStrict(MODELS_KEY),
+          readStrict(MODELS_CONFIG_KEY),
           read(MODELS_SEED_NOTICE_KEY, false),
           read(MODEL_MEASUREMENTS_KEY, false),
           read(MODEL_SEED_MARKER_KEY, false)
@@ -5586,11 +5826,8 @@
           // A never-seeded or freshly-emptied catalog reads as [], same as
           // FRESH: every subagent call passes through unchanged, which
           // modelsRenderLadder's own empty-state hint says in words.
-          modelsLadder = modelsSplitLadder(modelsParseCatalog(results[0]))
-          modelsDirty = false
-          modelsRenderLadder()
-          el('models-active').checked = !!(results[1] && results[1].active === true)
-          el('models-ready-override').checked = !!(results[1] && results[1].readyOverride === true)
+          settleSection('modelsLadder', results[0], generations.modelsLadder)
+          settleSection('modelsConfig', results[1], generations.modelsConfig)
           modelsRenderSeedNotice(results[2])
           modelsRenderMeasurements(results[3])
           modelsRenderActiveHint(results[3])

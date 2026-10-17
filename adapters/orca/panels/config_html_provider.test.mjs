@@ -64,7 +64,7 @@ test('Save writes decisionProvider from the two groups, Jev and clef by default'
   const read = extractFunction(configHtml, 'readProviderSettings')
   assert.match(read, /pressedValue\(providerModeEl, 'jev'\)/)
   assert.match(read, /pressedValue\(clefModelEl, 'clef'\)/)
-  assert.match(extractFunction(configHtml, 'loadProviderSettings'), /call\('storage\.get', \{ key: 'decisionProvider' \}, false\)/)
+  assert.match(extractFunction(configHtml, 'loadProviderSettings'), /readStrictRetrying\('decisionProvider', retriesLeft\)/)
 })
 
 // 0.13.2: the first paint showed Jev before the stored choice was read, and a
@@ -75,7 +75,7 @@ test('the first paint shows no provider choice, and a failed read retries instea
   assert.match(load, /showProviderUnread\('loading'\)/)
   assert.match(load, /loadProviderSettings\(PROVIDER_READ_RETRIES\)/)
   const loader = extractFunction(configHtml, 'loadProviderSettings')
-  assert.match(loader, /retriesLeft - 1/)
+  assert.match(extractFunction(configHtml, 'readStrictRetrying'), /retriesLeft - 1/)
   assert.match(loader, /showProviderUnread\('failed'\)/)
   assert.doesNotMatch(loader, /fillProviderSettings\(null\)/)
 })
