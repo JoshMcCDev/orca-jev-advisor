@@ -156,6 +156,17 @@ test('the ready fixture uses the secret-status field the worker writes, not the 
   assert.equal(READY.secretStatus.isConfigured, undefined, 'isConfigured is the old wrong name')
 })
 
+// Multi-provider P6: the masked Cloudflare status publishSecretStatus writes, and a provider choice the worker would keep.
+test('the ready fixture carries the Cloudflare status and the provider choice in the shapes the worker writes', SKIP_NO_PLAYWRIGHT, async () => {
+  const { normalizeProviderSettings } = await import('../src/core/provider_settings.ts')
+  for (const part of ['accountId', 'token']) {
+    assert.deepEqual(Object.keys(READY.secretStatus.cloudflare[part]).sort(), ['configured', 'endsWith'])
+    assert.ok(READY.secretStatus.cloudflare[part].endsWith.length <= 4)
+  }
+  assert.deepEqual(READY.decisionProvider, normalizeProviderSettings(READY.decisionProvider))
+  assert.notEqual(READY.decisionProvider.mode, 'jev', 'the ready shot shows the section in use')
+})
+
 test('the heartbeat is resolved per page, never pinned at module load', SKIP_NO_PLAYWRIGHT, () => {
   assert.equal(READY.workerHeartbeat.at, 'now',
     "a literal timestamp goes stale mid-run; hostBridge resolves the sentinel 'now' when the page asks")

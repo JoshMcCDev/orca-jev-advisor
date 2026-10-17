@@ -16,6 +16,14 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.13.0
+
+- **Choose who judges your commands: Jev, Clef or both.** Clef is Cloudflare's model on Workers AI, with a free daily allowance. In Both, Clef answers first and Jev answers whenever Clef is unsure, fails or has spent the day's free allowance. Set it in Configuration → Decision provider with your Cloudflare account id and a Workers AI token. Nothing changes until you choose it: after updating, Jev still judges everything.
+- **The board shows who decided,** how often Jev was asked instead, and how much of today's free Clef allowance is used. Clef stops before the free allowance ends, so it never bills your Cloudflare account.
+- **"Solo medir"** replaces "Sombra" as the Spanish name for a module that only measures.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.12.2
 
 - **Memory costs less, saves the same.** When your agent already saved a memory itself in a turn, the Memory module no longer re-reads the whole session to draft one it would throw away, and it no longer asks Haiku about messages a plugin posted (such as the CI watcher's "CI … success" notes).
@@ -137,7 +145,7 @@ Every feature is now a module you can switch off, so a part you do not use costs
 
 - **Five modules.** Gate (Bash and file-edit checks, deny tier, policies), Model router (model and effort per prompt and per subagent, the subagent band, turn usage), Context steward (compaction and `/clear` suggestions), Skill and tool selection, and Board. The API key, the Claude Code integration, the catalog and the commands are the base and always run.
 - **Three states.** Off, Shadow and Active. Shadow measures and logs what the module would do without changing your turns: it caps the module's own controls at measurement. Gate and Board have no measurement mode, so they offer Off and Active only. Each card shows what the module costs, from a week of measured real use.
-- **Nothing changes until you choose.** With no choice saved every module is Active: the same features and decisions as 0.6.29, with a lighter background refresh (below). Since 0.8.0 one module is the exception: Verify done is new and starts in Shadow (see 0.8.0 above).
+- **Nothing changes until you choose.** With no choice saved every module is Active: the same features and decisions as 0.6.29, with a lighter background refresh (below). Verify done is the exception: it was added in 0.8.0 starting in Shadow, and since 0.13.0 it starts Off, because 11 of the 12 turns it flagged in five days were false positives. A saved choice is kept.
 - **Router and steward Off moved.** The per-account Off of the model router and of the context steward is no longer offered in the Models tab; the module's Off replaces it, for every account at once. An account that already had Off stored keeps it, and the control stays visible there so you can change it.
 - **No reload.** Turning a module off removes its hooks from every `settings.json` the plugin manages and stops its worker jobs at once; turning it on puts them back. The skills mod reads the choice on every hook call, so a running session follows it too. A session that was already open before the plugin updated keeps its old mod until you restart it.
 - **The agent cannot switch the gate off.** The module file (`~/.config/orca-supervisor/feature-modules.json`) is one of the gate's own files: an Edit, a Write, a heredoc, `sed -i`, `cp`, `mv` or `rm` on it is refused, like the policies.

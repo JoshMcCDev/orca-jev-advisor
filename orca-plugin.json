@@ -3,7 +3,7 @@
   "id": "orca-jev-advisor",
   "publisher": "ab2web",
   "name": "Jev Advisor",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "Jev (TypeSafe)-backed decision layer for judging proposed actions and keeping a status board across Orca worktrees.",
   "author": {
     "name": "Ab2Web"
@@ -92,7 +92,8 @@
       "kind": "net:fetch",
       "hosts": [
         "api.typesafe.ai",
-        "platform.claude.com"
+        "platform.claude.com",
+        "api.cloudflare.com"
       ]
     }
   ]

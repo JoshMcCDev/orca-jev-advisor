@@ -84,6 +84,10 @@
       label { display: block; font-size: 12px; margin: 10px 0 4px;
               color: var(--muted-foreground, var(--fb-muted-foreground)); }
       label:first-of-type { margin-top: 0; }
+      /* Multi-provider: the section's own labels follow a hint, not a heading, so none of them sits flush. */
+      #provider-section > label { margin-top: 12px; }
+      /* A label-looking heading over the credentials: a <label> must name a control. */
+      #provider-section .field-heading { font-size: 12px; margin: 14px 0 4px; color: var(--muted-foreground, var(--fb-muted-foreground)); }
       input, select, textarea {
         font: inherit; width: 100%; padding: 7px 9px; border-radius: var(--radius-md);
         border: 1px solid var(--input, var(--fb-input)); background: transparent;
@@ -274,7 +278,8 @@
       .module-row:first-child { margin-top: 0; }
       .module-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
       .module-name { font-size: 12px; font-weight: 600; flex: 1 1 10em; min-width: 0; overflow-wrap: anywhere; }
-      .module-states { flex: 0 1 18em; }
+      .module-states { flex: 0 1 21em; }
+      .module-states button { white-space: nowrap; }
       .module-row .hint { margin-top: 4px; overflow-wrap: anywhere; }
       .module-row .said:not(:empty) { margin-top: 6px; }
       .mode-buttons button[hidden] { display: none; }
@@ -363,6 +368,47 @@
           <button id="cancel-key" class="link" type="button" data-i18n="secret.cancel"></button>
           <button id="clear-key" class="link" type="button" data-i18n="secret.clear"></button>
           <span class="said" id="key-said"></span>
+        </div>
+      </section>
+
+      <!--
+        Multi-provider (odd/tasks/multi-provider.md, P6): who the gate asks.
+        Jev only is the default and changes nothing. The mode and the model
+        are saved by the Save button to `decisionProvider`; the worker mirrors
+        them to decision-provider.json for the gate. The Cloudflare account id
+        and token go only through the secret request channel, like the Jev
+        key, and come back only masked (`secretStatus.cloudflare`).
+      -->
+      <section id="provider-section">
+        <h2 data-i18n="provider.heading"></h2>
+        <p class="hint" data-i18n="provider.intro"></p>
+        <label id="provider-mode-label" data-i18n="provider.modeLabel"></label>
+        <div id="provider-mode" class="mode-buttons" role="group" aria-labelledby="provider-mode-label">
+          <button type="button" data-value="jev" data-i18n="provider.modeJev"></button>
+          <button type="button" data-value="both" data-i18n="provider.modeBoth"></button>
+          <button type="button" data-value="clef" data-i18n="provider.modeClef"></button>
+        </div>
+        <label id="clef-model-label" data-i18n="provider.modelLabel"></label>
+        <div id="clef-model" class="mode-buttons" role="group" aria-labelledby="clef-model-label">
+          <button type="button" data-value="clef">clef</button>
+          <button type="button" data-value="clef-flash">clef-flash</button>
+          <button type="button" data-value="clef-omni">clef-omni</button>
+        </div>
+        <p class="hint" data-i18n="provider.allowance"></p>
+        <p class="hint" data-i18n="provider.receives"></p>
+        <p id="cloudflare-heading" class="field-heading" data-i18n="provider.cloudflareHeading"></p>
+        <div class="sub" id="cloudflare-status" style="padding:0 0 6px"></div>
+        <div class="row two">
+          <div><label for="cloudflare-account-id" data-i18n="provider.accountLabel"></label>
+            <input id="cloudflare-account-id" type="password" autocomplete="off" /></div>
+          <div><label for="cloudflare-token" data-i18n="provider.tokenLabel"></label>
+            <input id="cloudflare-token" type="password" autocomplete="off" /></div>
+        </div>
+        <div class="actions">
+          <button id="save-cloudflare" class="primary" type="button" data-i18n="provider.save"></button>
+          <button id="test-clef" type="button" data-i18n="provider.test"></button>
+          <button id="clear-cloudflare" class="link" type="button" data-i18n="provider.clear"></button>
+          <span class="said" id="cloudflare-said"></span>
         </div>
       </section>
 
@@ -697,10 +743,10 @@
           'tabs.modSkills': 'Mod de skills',
           'tabs.rules': 'Reglas',
           'modules.heading': 'Módulos',
-          'modules.intro': 'Cada función se puede apagar para que no cueste nada: sin proceso de hook, sin llamadas a Jev y sin trabajo en segundo plano. «Sombra» la deja medir y registrar lo que haría, sin cambiar tus turnos. Lo que elijas vale al instante, sin recargar Claude Code. Una sesión que ya estaba abierta antes de actualizar el plugin conserva su mod anterior hasta que la reinicies.',
+          'modules.intro': 'Cada función se puede apagar para que no cueste nada: sin proceso de hook, sin llamadas a Jev y sin trabajo en segundo plano. «Solo medir» registra lo que haría, sin cambiar tus turnos. Lo que elijas vale al instante, sin recargar Claude Code. Una sesión que ya estaba abierta antes de actualizar el plugin conserva su mod anterior hasta que la reinicies.',
           'modules.costNote': 'Las cifras salen de una semana de uso real medido (odd/tasks/feature-modules.md); las tuyas dependen de cómo trabajes. El trabajo en segundo plano cuenta solo lo que el módulo hace por sí solo: los resúmenes que comparten varios módulos siguen mientras alguno esté encendido. Con todos los módulos encendidos son unos 730 procesos de node por hora con un panel abierto y unos 240 sin ninguno abierto.',
           'modules.state.off': 'Apagado',
-          'modules.state.shadow': 'Sombra',
+          'modules.state.shadow': 'Solo medir',
           'modules.state.active': 'Activo',
           'modules.stateGroup': 'Estado de {{module}}',
           'modules.name.gate': 'Gate',
@@ -716,7 +762,7 @@
           'modules.desc.skill-selection': 'Deja que Jev elija la skill y la herramienta de un turno, en vez de que el modelo vea la lista completa.',
           'modules.desc.board': 'Mantiene el tablero: el estado en vivo de tus agentes, por proyecto y rama.',
           'modules.desc.verify-done': 'En los turnos que editaron archivos sin un test que pasara, pregunta a Jev si el mensaje final dice que el trabajo está hecho, y lo registra. Solo mide: no bloquea nada ni cambia ninguna respuesta. A Jev le envía el mensaje final, redactado y recortado, y los conteos del turno; nunca contenidos de archivos ni los comandos o rutas que usó el turno.',
-          'modules.desc.ci-watch': 'Después de un push, de abrir un pull request o de fusionarlo, vigila con gh la ejecución de CI y te avisa aquí cuando termina, con una línea sobre el prompt y un mensaje. En Sombra no le envía nada al agente: solo cuenta las consultas de CI y las esperas largas que el agente hizo mientras tanto. En Activo, además, le avisa al agente una vez, cuando está libre, para que no tenga que consultar.',
+          'modules.desc.ci-watch': 'Después de un push, de abrir un pull request o de fusionarlo, vigila con gh la ejecución de CI y te avisa aquí cuando termina, con una línea sobre el prompt y un mensaje. En «Solo medir» no le envía nada al agente: solo cuenta las consultas de CI y las esperas largas que el agente hizo mientras tanto. En Activo, además, le avisa al agente una vez, cuando está libre, para que no tenga que consultar.',
           'modules.cost.gate': 'En uso: unas {{jev}} llamadas a Jev por prompt y {{hooks}} procesos de hook por cada comando de Bash o edición de archivos (unos {{seconds}} s cada uno).',
           'modules.cost.model-router': 'En uso: unas {{jev}} llamadas a Jev por prompt y, por cada subagente que arranca, {{agentJev}} llamadas a Jev y {{agentHooks}} procesos de hook.',
           'modules.cost.steward': 'En uso: unas {{jev}} llamadas a Jev por prompt.',
@@ -729,8 +775,8 @@
           'modules.weekly.ci-watch': 'Últimos 7 días: vigilancias {{watches}}, consultas de CI del agente mientras tanto {{polls}}, esperas largas {{sleeps}}{{notes}} (lo que un aviso habría reemplazado).',
           'modules.weekly.ci-watch.notes': ', avisos enviados {{injected}}',
           'modules.name.memory': 'Memoria',
-          'modules.desc.memory': 'Al final de cada turno respondido decide si hay algo que valga la pena recordar y dónde iría: con Engram, Engram lo guarda todo y tu auto-memoria solo los avisos sobre cómo trabajar (feedback) y los datos sobre ti (user); sin Engram, la auto-memoria lo guarda todo. En sombra solo mide: no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria. En activo guarda en Engram cuando Engram está en marcha, y refleja en tu carpeta de auto-memoria las reglas sobre cómo trabajar y los datos sobre ti; sin Engram, o con Engram configurado pero sin responder, escribe en tu carpeta de auto-memoria: cada memoria nueva es un archivo con una línea en MEMORY.md, y antes de reescribir o quitar un archivo lo copia byte a byte en .memory-backup. En este release nunca borra una memoria: una copia de reserva solo se quita cuando Engram ya la tiene. Tu hilo principal sigue guardando como hoy. Cuando tu hilo principal guarda en Engram en un turno, el estado Activo no guarda nada propio en ese turno.',
-          'modules.cost.memory': 'En uso: una llamada a Haiku por turno respondido. En sombra, en 1 de cada {{every}} turnos que Haiku marca para actualizar, un fork de la sesión redacta la memoria; en activo, cada uno de esos turnos tiene su fork. Las llamadas a Haiku y los forks cuentan contra la cuota de tu plan Max. En sombra, la única llamada a Engram es una comprobación de solo lectura, una vez por sesión; en activo con Engram, cada memoria es un mem_save, y cada conflicto una lectura, una llamada a Haiku y un mem_judge.',
+          'modules.desc.memory': 'Al final de cada turno respondido decide si hay algo que valga la pena recordar y dónde iría: con Engram, Engram lo guarda todo y tu auto-memoria solo los avisos sobre cómo trabajar (feedback) y los datos sobre ti (user); sin Engram, la auto-memoria lo guarda todo. En «Solo medir» no guarda nada en Engram, no juzga conflictos y no escribe archivos de memoria. En activo guarda en Engram cuando Engram está en marcha, y refleja en tu carpeta de auto-memoria las reglas sobre cómo trabajar y los datos sobre ti; sin Engram, o con Engram configurado pero sin responder, escribe en tu carpeta de auto-memoria: cada memoria nueva es un archivo con una línea en MEMORY.md, y antes de reescribir o quitar un archivo lo copia byte a byte en .memory-backup. En este release nunca borra una memoria: una copia de reserva solo se quita cuando Engram ya la tiene. Tu hilo principal sigue guardando como hoy. Cuando tu hilo principal guarda en Engram en un turno, el estado Activo no guarda nada propio en ese turno.',
+          'modules.cost.memory': 'En uso: una llamada a Haiku por turno respondido. En «Solo medir», en 1 de cada {{every}} turnos que Haiku marca para actualizar, un fork de la sesión redacta la memoria; en activo, cada uno de esos turnos tiene su fork. Las llamadas a Haiku y los forks cuentan contra la cuota de tu plan Max. En «Solo medir», la única llamada a Engram es una comprobación de solo lectura, una vez por sesión; en activo con Engram, cada memoria es un mem_save, y cada conflicto una lectura, una llamada a Haiku y un mem_judge.',
           'modules.memory.sees': 'Haiku ve tu MEMORY.md (hasta 8.000 caracteres) y el último intercambio (hasta 12.000 caracteres, con los secretos redactados y solo el nombre de cada herramienta, nunca su entrada ni su salida). El fork ve la transcripción de esta sesión y las claves de tema de tu memoria, o tus archivos de memoria si no hay Engram. En activo, lo que el fork redacta se guarda en Engram, o en tu carpeta de auto-memoria cuando Engram no está en uso. Para juzgar un conflicto, Haiku ve solo el texto de las dos memorias. El registro guarda conteos y tipos, nunca lo que se guarda.',
           'modules.memory.active.unknown': 'Dónde guarda: todavía no se ha detectado. Lo decide el primer turno respondido.',
           'modules.memory.active.live': 'Dónde guarda: en Engram, que está en marcha ({{signal}}). Cada memoria va a Engram; las reglas sobre cómo trabajar y los datos sobre ti también se reflejan como archivos en tu carpeta de auto-memoria, para que cada sesión los lea. Cuando Engram avisa de un conflicto, Haiku juzga los claros y deja pendientes los demás.',
@@ -777,10 +823,39 @@
           'modules.invalidShape': 'El plugin rechazó esa elección porque no era válida. Vuelve a abrir este panel e inténtalo otra vez.',
           'modules.gateOffWarn': 'Con el gate apagado nada revisa los comandos de Bash ni las ediciones de archivos antes de que se ejecuten.',
           'modules.noteOff': 'El módulo {{module}} está apagado, así que sus ajustes están ocultos. Enciéndelo en General, en Módulos.',
-          'modules.noteShadow': 'El módulo {{module}} está en sombra: mide y registra lo que haría, y no cambia tus turnos. Un ajuste «Activo» de aquí queda limitado a medir hasta que el módulo esté Activo.',
+          'modules.noteShadow': 'El módulo {{module}} está en «Solo medir»: registra lo que haría, y no cambia tus turnos. Un ajuste «Activo» de aquí queda limitado a medir hasta que el módulo esté Activo.',
           'integration.hookModuleOff': 'Hook de Bash: quitado a propósito (el módulo Gate está apagado).',
           'integration.agentModelHookModuleOff': 'Hooks de modelo del Agent: quitados a propósito (el módulo Enrutador de modelo está apagado).',
           'integration.fileGuardModuleOff': 'Guarda de ediciones (reglas del propio gate): quitada a propósito (el módulo Gate está apagado).',
+          'provider.heading': 'Quién decide',
+          'provider.intro': 'Jev (TypeSafe) juzga cada comando hoy. Clef (Cloudflare Workers AI) habla el mismo contrato y tiene una cuota gratis diaria. En «Ambos», Clef responde primero y Jev responde cuando Clef duda, falla o se acaba la cuota del día.',
+          'provider.modeLabel': 'Proveedor del gate',
+          'provider.modeJev': 'Solo Jev',
+          'provider.modeBoth': 'Ambos',
+          'provider.modeClef': 'Solo Clef',
+          'provider.modelLabel': 'Modelo de Clef',
+          'provider.allowance': 'La cuota gratis de 10.000 neuronas al día alcanza para unas 950 llamadas del gate con clef, 1.500 con clef-omni y 6.000 con clef-flash. Clef se detiene en 9.000 neuronas para no facturar nunca, y vuelve a las 00:00 UTC; en «Ambos» Jev responde mientras tanto.',
+          'provider.receives': 'Clef recibe lo mismo que Jev recibe del gate: el comando, con los secretos redactados, y el contexto del repositorio. El enrutador, las skills, las herramientas, la memoria y verify-done siguen siempre con Jev.',
+          'provider.cloudflareHeading': 'Credenciales de Cloudflare',
+          'provider.accountLabel': 'ID de cuenta',
+          'provider.tokenLabel': 'Token de API (Workers AI)',
+          'provider.save': 'Guardar credenciales',
+          'provider.clear': 'Eliminar credenciales',
+          'provider.test': 'Probar conexión',
+          'provider.testing': 'Probando…',
+          'provider.status': 'Cuenta {{account}} · token {{token}}',
+          'provider.notConfigured': 'Sin credenciales de Cloudflare.',
+          'provider.saved': 'Credenciales guardadas.',
+          'provider.cleared': 'Credenciales eliminadas.',
+          'provider.needBoth': 'Escribe el ID de cuenta, el token o ambos.',
+          'provider.test.ok': 'Conectado: {{model}} respondió en {{ms}} ms.',
+          'provider.test.rejected': 'Cloudflare rechazó las credenciales ({{status}}).',
+          'provider.test.no-credentials': 'Faltan el ID de cuenta o el token.',
+          'provider.test.allowance': 'Las neuronas gratis de hoy se acabaron; Clef vuelve a las 00:00 UTC.',
+          'provider.test.unreachable': 'No se pudo contactar a Cloudflare.',
+          'provider.test.failed': 'Clef respondió con un error ({{status}}).',
+          'provider.test.expired': 'La prueba no se atendió a tiempo.',
+          'provider.test.timeout': 'El worker no respondió a la prueba.',
           'secret.heading': 'Clave de TypeSafe',
           'secret.checking': 'Comprobando…',
           'secret.label': 'Nueva clave (se guarda cifrada; nunca se vuelve a mostrar completa)',
@@ -1035,6 +1110,7 @@
           'save.whichTeamOwners': 'Los repositorios del equipo',
           'save.whichQueueMode': 'Qué hacer cuando una persona debe aprobar',
           'save.whichExplicitModels': 'Los modelos fijados por un agente',
+          'save.whichProvider': 'El proveedor de decisiones',
           'save.rejectedWhich': 'El host rechazó esto: {{which}}.',
           'save.invalidField': 'Hay un campo con un valor no válido; se cambió a su pestaña y quedó enfocado.',
           'common.timeout': 'Tiempo de espera agotado.',
@@ -1224,6 +1300,35 @@
           'integration.hookModuleOff': 'Bash hook: removed on purpose (the Gate module is off).',
           'integration.agentModelHookModuleOff': 'Agent model hooks: removed on purpose (the Model router module is off).',
           'integration.fileGuardModuleOff': "Edit guard (the gate's own rules): removed on purpose (the Gate module is off).",
+          'provider.heading': 'Decision provider',
+          'provider.intro': 'Jev (TypeSafe) judges every command today. Clef (Cloudflare Workers AI) speaks the same contract and has a free daily allowance. In Both, Clef answers first and Jev answers when Clef is in doubt, fails, or the day\u2019s allowance is spent.',
+          'provider.modeLabel': 'Gate provider',
+          'provider.modeJev': 'Jev only',
+          'provider.modeBoth': 'Both',
+          'provider.modeClef': 'Clef only',
+          'provider.modelLabel': 'Clef model',
+          'provider.allowance': 'The free 10,000 neurons a day cover about 950 gate calls with clef, 1,500 with clef-omni and 6,000 with clef-flash. Clef stops at 9,000 neurons so it never bills, and comes back at 00:00 UTC; in Both, Jev answers meanwhile.',
+          'provider.receives': 'Clef receives what Jev receives from the gate: the command, with secrets redacted, and the repository context. The router, skills, tools, memory and verify-done always stay on Jev.',
+          'provider.cloudflareHeading': 'Cloudflare credentials',
+          'provider.accountLabel': 'Account ID',
+          'provider.tokenLabel': 'API token (Workers AI)',
+          'provider.save': 'Save credentials',
+          'provider.clear': 'Remove credentials',
+          'provider.test': 'Test connection',
+          'provider.testing': 'Testing…',
+          'provider.status': 'Account {{account}} · token {{token}}',
+          'provider.notConfigured': 'No Cloudflare credentials.',
+          'provider.saved': 'Credentials saved.',
+          'provider.cleared': 'Credentials removed.',
+          'provider.needBoth': 'Type the account ID, the token, or both.',
+          'provider.test.ok': 'Connected: {{model}} answered in {{ms}} ms.',
+          'provider.test.rejected': 'Cloudflare rejected the credentials ({{status}}).',
+          'provider.test.no-credentials': 'The account ID or the token is missing.',
+          'provider.test.allowance': 'Today\u2019s free neurons are spent; Clef comes back at 00:00 UTC.',
+          'provider.test.unreachable': 'Could not reach Cloudflare.',
+          'provider.test.failed': 'Clef answered with an error ({{status}}).',
+          'provider.test.expired': 'The test was not attended in time.',
+          'provider.test.timeout': 'The worker did not answer the test.',
           'secret.heading': 'TypeSafe key',
           'secret.checking': 'Checking…',
           'secret.label': 'New key (saved encrypted; never shown in full again)',
@@ -1478,6 +1583,7 @@
           'save.whichTeamOwners': "Your team's repositories",
           'save.whichQueueMode': 'What to do when a person must approve',
           'save.whichExplicitModels': 'Models fixed by an agent',
+          'save.whichProvider': 'The decision provider',
           'save.rejectedWhich': 'The host rejected this: {{which}}.',
           'save.invalidField': 'A field has an invalid value; switched to its tab and focused it.',
           'common.timeout': 'Timed out.',
@@ -1912,7 +2018,7 @@
         return writeBackground(SECRET_REQUEST_KEY, buildSecretTombstone(requestId, new Date().toISOString()))
       }
 
-      function sendSecretRequest (intent, value) {
+      function sendSecretRequest (intent, value, secret) {
         var requestId = 'secret-' + Date.now() + '-' + Math.random().toString(36).slice(2)
         // The key-carrying path: refuses to write anything at all when no
         // worker is provably alive right now, rather than let the request
@@ -1925,6 +2031,8 @@
           }
           var request = { id: requestId, at: new Date().toISOString(), intent: intent }
           if (value !== undefined) request.value = value
+          // Multi-provider: which secret; none names the Jev key, as before.
+          if (secret !== undefined) request.secret = secret
           // Nudges the worker into its fast poll before waiting for the result.
           signalPanelOpen()
           return write(SECRET_REQUEST_KEY, request).then(function (r) {
@@ -3940,6 +4048,8 @@
       // odd/tasks/panel-worker-wakeup.md).
       function renderSecretStatus (status, heartbeat) {
         lastSecretStatus = status
+        // Multi-provider: the Cloudflare credentials ride the same published status.
+        renderCloudflareStatus(status)
         if (status === null) {
           secretStatusEl.textContent = (heartbeat === undefined || isHeartbeatFresh(heartbeat, Date.now(), WORKER_HEARTBEAT_STALE_MS))
             ? t('secret.checking')
@@ -4002,6 +4112,110 @@
           return loadSecretStatus()
         }).catch(function (error) {
           said(keySaidEl, errorText(error), true)
+        })
+      })
+
+
+      // ---------- decision provider (multi-provider P6) ----------------------
+      // The mode and the Clef model are two button groups saved by Save; a
+      // stored value the panel does not know shows the default (Jev, clef),
+      // the same fallback src/core/provider_settings.ts applies.
+      var providerModeEl = el('provider-mode')
+      var clefModelEl = el('clef-model')
+      var cloudflareStatusEl = el('cloudflare-status')
+      var cloudflareSaidEl = el('cloudflare-said')
+      var PROVIDER_MODES = ['jev', 'both', 'clef']
+      var CLEF_MODELS = ['clef', 'clef-flash', 'clef-omni']
+      var CLEF_TEST_REQUEST_KEY = 'clefTestRequest'
+      var CLEF_TEST_RESULT_KEY = 'clefTestResult'
+      var providerSettingsLoaded = false
+      wireButtonGroup(providerModeEl)
+      wireButtonGroup(clefModelEl)
+
+      function fillProviderSettings (stored) {
+        var mode = stored !== null && typeof stored === 'object' && PROVIDER_MODES.indexOf(stored.mode) >= 0 ? stored.mode : 'jev'
+        var model = stored !== null && typeof stored === 'object' && CLEF_MODELS.indexOf(stored.clefModel) >= 0 ? stored.clefModel : 'clef'
+        setPressedValue(providerModeEl, mode)
+        setPressedValue(clefModelEl, model)
+      }
+
+      function readProviderSettings () {
+        return { mode: pressedValue(providerModeEl, 'jev'), clefModel: pressedValue(clefModelEl, 'clef') }
+      }
+
+      /** Paints only what the worker published: configured or not, and at most the last four characters. */
+      function renderCloudflareStatus (status) {
+        var cloudflare = status && status.cloudflare
+        var account = cloudflare && cloudflare.accountId
+        var token = cloudflare && cloudflare.token
+        if (!account || !token || (!account.configured && !token.configured)) {
+          cloudflareStatusEl.textContent = t('provider.notConfigured')
+          return
+        }
+        var masked = function (part) { return part.configured ? '\u2026' + (part.endsWith || '????') : '\u2014' }
+        cloudflareStatusEl.textContent = t('provider.status', { account: masked(account), token: masked(token) })
+      }
+
+      function loadCloudflareStatus () {
+        return read(SECRET_STATUS_KEY, false).then(renderCloudflareStatus)
+      }
+
+      el('save-cloudflare').addEventListener('click', function () {
+        var accountInput = el('cloudflare-account-id')
+        var tokenInput = el('cloudflare-token')
+        var accountId = accountInput.value.trim()
+        var token = tokenInput.value.trim()
+        if (accountId.length === 0 && token.length === 0) {
+          said(cloudflareSaidEl, t('provider.needBoth'), true)
+          return
+        }
+        said(cloudflareSaidEl, t('secret.saving'))
+        var saveAccount = accountId.length > 0 ? sendSecretRequest('save', accountId, 'cloudflareAccountId') : Promise.resolve()
+        saveAccount.then(function () {
+          accountInput.value = ''
+          return token.length > 0 ? sendSecretRequest('save', token, 'cloudflareApiToken') : null
+        }).then(function () {
+          tokenInput.value = ''
+          said(cloudflareSaidEl, t('provider.saved'))
+          return loadCloudflareStatus()
+        }).catch(function (error) {
+          said(cloudflareSaidEl, errorText(error), true)
+        })
+      })
+
+      el('clear-cloudflare').addEventListener('click', function () {
+        said(cloudflareSaidEl, t('secret.clearing'))
+        sendSecretRequest('clear', undefined, 'cloudflareAccountId').then(function () {
+          return sendSecretRequest('clear', undefined, 'cloudflareApiToken')
+        }).then(function () {
+          said(cloudflareSaidEl, t('provider.cleared'))
+          return loadCloudflareStatus()
+        }).catch(function (error) {
+          said(cloudflareSaidEl, errorText(error), true)
+        })
+      })
+
+      function waitForClefTestResult (requestId, deadline) {
+        return read(CLEF_TEST_RESULT_KEY, false).then(function (result) {
+          if (result && result.id === requestId) return result
+          if (Date.now() > deadline) return { ok: false, reason: 'timeout' }
+          return new Promise(function (resolve) { setTimeout(resolve, 500) }).then(function () {
+            return waitForClefTestResult(requestId, deadline)
+          })
+        })
+      }
+
+      el('test-clef').addEventListener('click', function () {
+        var requestId = 'clef-test-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+        said(cloudflareSaidEl, t('provider.testing'))
+        signalPanelOpen()
+        writeBackground(CLEF_TEST_REQUEST_KEY, { id: requestId, at: new Date().toISOString(), model: pressedValue(clefModelEl, 'clef') }).then(function () {
+          return waitForClefTestResult(requestId, Date.now() + 20000)
+        }).then(function (result) {
+          var reason = typeof result.reason === 'string' ? result.reason : 'failed'
+          said(cloudflareSaidEl, t('provider.test.' + reason, { model: String(result.model || ''), ms: String(result.latencyMs), status: String(result.status != null ? result.status : '?') }), !result.ok)
+        }).catch(function (error) {
+          said(cloudflareSaidEl, errorText(error), true)
         })
       })
 
@@ -4580,6 +4794,10 @@
           { label: t('save.whichQueueMode'), promise: write('queueMode', readQueueMode()) },
           { label: t('save.whichExplicitModels'), promise: write('explicitModels', readExplicitModels()) }
         ]
+        // The provider choice is read after the first paint; until it has
+        // arrived, the buttons show the default, and saving them would
+        // overwrite the stored choice with it.
+        if (providerSettingsLoaded) namedWrites.push({ label: t('save.whichProvider'), promise: write('decisionProvider', readProviderSettings()) })
         Promise.all(namedWrites.map(function (w) { return w.promise })).then(function (results) {
           var failedLabels = []
           results.forEach(function (result, index) {
@@ -4596,6 +4814,7 @@
 
       function load () {
         fillThresholds({})
+        fillProviderSettings(null)
         fillModSkillsStatus(null)
         renderModelRouterRows(null)
         fillDenyTierStatus(null)
@@ -4660,6 +4879,13 @@
         }).then(function () {
           // 0.6.28 T7: read on its own after the authorizations, for the same reason.
           return read(TRUSTED_STATUS_KEY, false).then(renderTrustedPrograms).catch(function () { renderTrustedPrograms({ programs: [] }) })
+        }).then(function () {
+          // Multi-provider: read on its own after the first paint, for the same quota reason.
+          return read('decisionProvider', false).then(function (stored) {
+            fillProviderSettings(stored)
+            providerSettingsLoaded = true
+            el('provider-section').setAttribute('data-state', 'ready')
+          }).catch(function () { fillProviderSettings(null) })
         })
       }
 

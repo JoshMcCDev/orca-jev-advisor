@@ -297,3 +297,31 @@ test("T1: latencies are kept as counted values, not one entry per sample", () =>
   const tally = tallyGateDecisions(emptyGateTally(), mixedRecords());
   assert.deepEqual(tally.jevLatencies, [[75.5, 1], [120, 1], [300, 2], [4000, 1]]);
 });
+
+// Multi-provider P7: who answered, why Jev did, and Clef's confident errors.
+test("provider-tagged decisions are counted by who answered, why Jev did, failovers and shadow agreement", () => {
+  const summary = foldGateDecisions([
+    record({ source: "jev", verdict: "allow" }),
+    record({ source: "jev", verdict: "allow", provider: "clef" }),
+    record({ source: "jev", verdict: "allow", provider: "clef", shadowAgrees: true }),
+    record({ source: "jev", verdict: "allow", provider: "clef", shadowAgrees: false }),
+    record({ source: "jev", verdict: "allow", provider: "jev", escalation: "doubt" }),
+    record({ source: "jev", verdict: "advise", provider: "jev", escalation: "budget" }),
+    record({ source: "jev", verdict: "allow", provider: "jev", escalation: "failure" }),
+    record({ source: "none", verdict: "allow", provider: "clef", failureClass: "timeout" }),
+    record({ source: "cache", verdict: "allow" }),
+  ]);
+  assert.deepEqual(summary.providers, {
+    tagged: 7,
+    answeredBy: { jev: 3, clef: 3 },
+    escalations: { doubt: 1, failure: 1, "rate-limit": 0, budget: 1, unsupported: 0, policy: 0, unconfigured: 0 },
+    clefUnanswered: 1,
+    shadow: { agree: 1, disagree: 1 },
+  });
+});
+
+test("a Jev-only log has no provider-tagged decision", () => {
+  const summary = foldGateDecisions([record({ source: "jev", verdict: "allow" }), record({ source: "none", verdict: "allow" })]);
+  assert.equal(summary.providers.tagged, 0);
+  assert.deepEqual(summary.providers.answeredBy, { jev: 0, clef: 0 });
+});

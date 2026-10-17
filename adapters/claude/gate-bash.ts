@@ -112,8 +112,13 @@ import { AUTHORIZATIONS_FILE, EMPTY_AUTHORIZATIONS, isAuthorized, parseAuthoriza
 import type { AuthorizationStore } from '../../src/core/gate_authorizations.ts'
 import type { LocalGitAllowResult } from '../../src/core/push_own_branch.ts'
 import { fitJevState } from '../../src/core/jev_state_cap.ts'
-import { callJev, jevFailureOf, JevRequestError, type JevFailure } from '../../src/core/jev.ts'
-import { resolveApiKey } from '../../src/core/secrets.ts'
+import { jevFailureOf, JevRequestError, type Answer } from '../../src/core/jev.ts'
+import { resolveApiKey, resolveClefCredentials } from '../../src/core/secrets.ts'
+import { createJevProvider, type DecisionProvider, type ProviderId } from '../../src/core/decision_provider.ts'
+import { ClefError, clefFailureOf, createClefProvider, type ClefProvider } from '../../src/core/clef.ts'
+import { CascadeBudgetError, gateConsequenceDoubt, runCascade, type CascadeBudget, type Escalation } from '../../src/core/provider_cascade.ts'
+import { appendNeuronLedger, budgetOpen, readNeuronBudget } from '../../src/core/neuron_budget.ts'
+import { PROVIDER_SETTINGS_MIRROR_FILE, parseProviderSettings, type ProviderSettings } from '../../src/core/provider_settings.ts'
 import { DEFAULT_LOCALE, parseLocaleFile, translate, translateReason } from '../../src/core/i18n.ts'
 import type { Locale } from '../../src/core/i18n.ts'
 import { GATE_CATALOG } from '../../src/core/i18n_gate.ts'
@@ -224,6 +229,8 @@ const TRUSTED_PROGRAMS_MIRROR_PATH = join(CONFIG_DIR, TRUSTED_PROGRAMS_MIRROR_FI
 // 0.6.8 T4: queue mode -- "when a person must approve: ask now | queue and
 // continue". Defaults to false (ask now). See readQueueModeMirror below.
 const QUEUE_MODE_MIRROR_PATH = join(CONFIG_DIR, QUEUE_MODE_MIRROR_FILE)
+// Multi-provider (odd/tasks/multi-provider.md): Jev, Clef or both, mirrored by the worker.
+const PROVIDER_SETTINGS_PATH = join(CONFIG_DIR, PROVIDER_SETTINGS_MIRROR_FILE)
 // 0.6.8 T4/T5: the actions queued for a person -- see src/core/human_queue.ts.
 const HUMAN_QUEUE_PATH = join(CACHE_DIR, HUMAN_QUEUE_FILE)
 // Written by adapters/orca/write-secret-mirror.mjs's deny-tier-config-save,
@@ -242,6 +249,14 @@ const AB_BENCHMARK_CONFIG_PATH = join(CONFIG_DIR, 'ab-benchmark-config.json')
 // call and no added latency; drained later by adapters/cli/ab_benchmark_cli.ts.
 const AB_BENCHMARK_QUEUE_PATH = join(CACHE_DIR, 'ab-benchmark-queue.jsonl')
 const BUDGET_MS = 1800
+/**
+ * Multi-provider, review note 5: Clef's share of BUDGET_MS in both mode. The
+ * other 600 ms always fit a whole Jev call (Jev's p95 was 231 ms over the
+ * 51-command probe), so a Clef timeout escalates instead of failing open.
+ */
+const CLEF_BUDGET_MS = 1200
+/** Review note 12: the share of confident Clef answers also put to Jev, in parallel, to measure Clef's confident errors. */
+const GATE_SHADOW_SHARE = 0.05
 
 /**
  * The config panel's language choice, mirrored to plain text next to (not
@@ -824,7 +839,7 @@ type CacheEntry = GateCacheEntry
  * Spanish spelling to English) fingerprint identically, so this never
  * costs a hit it didn't have to.
  */
-function cacheKey(command: string, context: string, cwd: string, destinationId: string | null, treeRoot: string | null, policies: readonly Policy[], consequenceCeiling: number | undefined, localAllowKind: LocalAllowKind | null = null): string | null {
+function cacheKey(command: string, context: string, cwd: string, destinationId: string | null, treeRoot: string | null, policies: readonly Policy[], consequenceCeiling: number | undefined, localAllowKind: LocalAllowKind | null = null, providerSettings: ProviderSettings | null = null): string | null {
   const shape = commandShape(command, { cwd, home: HOME_PATHS.home, destinationId, treeRoot: treeRoot ?? undefined, repoContext: context })
   if (shape === null) return null
   const fingerprint = gatePolicyFingerprint({ policies, seedScopeById: SEED_SCOPE_BY_ID, consequenceCeiling })
@@ -833,7 +848,11 @@ function cacheKey(command: string, context: string, cwd: string, destinationId: 
   // are its own: a command of the same shape that does not qualify must
   // never replay them, nor they its. Every other key is byte-identical.
   const qualified = localAllowKind === null ? '' : `:local-allow=${localAllowKind}`
-  return createHash('sha256').update(`v${GATE_DECISION_RULES_VERSION}:${shape}:${fingerprint}${qualified}`).digest('hex').slice(0, 24)
+  // Multi-provider, review note 13: verdicts are keyed by who may answer them,
+  // so changing the mode or the Clef model never replays another provider's
+  // verdict. Jev-only keys are byte-identical to before.
+  const providers = providerSettings === null || providerSettings.mode === 'jev' ? '' : `:providers=${providerSettings.mode}/${providerSettings.clefModel}`
+  return createHash('sha256').update(`v${GATE_DECISION_RULES_VERSION}:${shape}:${fingerprint}${qualified}${providers}`).digest('hex').slice(0, 24)
 }
 
 /**
@@ -1388,6 +1407,34 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
+/** The owner's provider choice; a missing or malformed mirror is Jev only, as before it existed. */
+function readProviderSettings(): ProviderSettings {
+  try {
+    return parseProviderSettings(readFileSync(PROVIDER_SETTINGS_PATH, 'utf8'))
+  } catch {
+    return parseProviderSettings(null)
+  }
+}
+
+/** Clef's daily neuron budget, over the append-only ledger in the cache dir (src/core/neuron_budget.ts). A ledger that cannot be written never blocks a verdict. */
+const CLEF_BUDGET: CascadeBudget = {
+  isOpen: () => budgetOpen(readNeuronBudget(CACHE_DIR)),
+  spend: (neurons, model) => {
+    try {
+      appendNeuronLedger(CACHE_DIR, { type: 'neurons', at: new Date().toISOString(), model, neurons })
+    } catch {
+      // Best-effort, like every other record this hook writes.
+    }
+  },
+  markExhausted: () => {
+    try {
+      appendNeuronLedger(CACHE_DIR, { type: 'allowance-exhausted', at: new Date().toISOString() })
+    } catch {
+      // Same: the verdict never waits on a log line.
+    }
+  },
+}
+
 function readQueueModeMirror(): boolean {
   try {
     return parseQueueMode(JSON.parse(readFileSync(QUEUE_MODE_MIRROR_PATH, 'utf8')))
@@ -1631,6 +1678,7 @@ function appendGateRecord(cwd: string, command: string, source: GateSource, verd
       ...(policyId !== null ? { policyId } : {}),
       ...(failure !== null ? { failure } : {}),
       ...(source === 'jev' && stateCondensed ? { stateCondensed: true } : {}),
+      ...((source === 'jev' || source === 'none') && providerStamp !== null ? { provider: providerStamp.provider, escalation: providerStamp.escalation, shadowAgrees: providerStamp.shadowAgrees } : {}),
       // 0.6.8 T3: the requires_human policies were set aside for this
       // command -- see main()'s own note where that is decided.
       teamInternal,
@@ -1790,11 +1838,24 @@ type JevOutcome =
       readonly deployPublishKind: 'deploy' | 'publish' | null
     }
   | { readonly kind: 'auth-rejected'; readonly status: number }
-  | { readonly kind: 'none'; readonly failure: JevFailure | null }
+  | { readonly kind: 'none'; readonly failure: GateFailure | null }
   | { readonly kind: 'oversized' }
 
 /** Whether the state Jev judged was the condensed one -- stamped on every `jev` row this process writes. One hook process judges one command. */
 let stateCondensed = false
+/**
+ * Multi-provider: who answered (or failed to) and why Jev did -- stamped on
+ * the `jev` or `none` row this process writes. Null in Jev-only mode, so
+ * those rows stay byte-for-byte what they were.
+ */
+let providerStamp: { readonly provider: ProviderId; readonly escalation: Escalation | null; readonly shadowAgrees: boolean | null } | null = null
+
+/** The providers one gate decision may ask, resolved once in main(). */
+interface GateProviders {
+  readonly settings: ProviderSettings
+  readonly jev: DecisionProvider | null
+  readonly clef: ClefProvider | null
+}
 
 /**
  * Calls Jev (src/core) and translates the verdict into the hook's decision.
@@ -1838,7 +1899,7 @@ let stateCondensed = false
  * team-internal command (0.6.8 T3) -- the cache key and this question must
  * judge the very same policy set.
  */
-async function askJev(apiKey: string, command: string, jevContext: string, jevNames: JevNames, localAllow: LocalAllow, matched: MirroredDestination | null, commandScopedPolicies: readonly Policy[], cwd: string): Promise<JevOutcome> {
+async function askJev(providers: GateProviders, command: string, jevContext: string, jevNames: JevNames, localAllow: LocalAllow, matched: MirroredDestination | null, commandScopedPolicies: readonly Policy[], cwd: string): Promise<JevOutcome> {
   try {
     const questions = {
       ...buildActionGateQuestions(),
@@ -1864,15 +1925,36 @@ async function askJev(apiKey: string, command: string, jevContext: string, jevNa
     const fit = fitJevState((condense) => buildActionGateState(command, jevContext, destination, deployPublish?.description, jevNames, { condense, branchEffect }))
     if (fit === null) return { kind: 'oversized' }
     stateCondensed = fit.condensed
-    const response = await callJev(apiKey, fit.state, questions, { budgetMs: BUDGET_MS })
-    const gate = decideGateAction({
+    const consequenceCeiling = matched?.autonomy?.consequenceCeiling
+    const gateInput = (answers: Record<string, Answer>) => ({
       action: command,
       policies: commandScopedPolicies,
-      answers: response.answers,
-      consequenceCeiling: matched?.autonomy?.consequenceCeiling,
+      answers,
+      consequenceCeiling,
       noDestinationMatched: matched === null,
       localAllowQualifies: localAllow.qualifies,
     })
+    // Multi-provider: in Jev-only mode this is callJev with BUDGET_MS, exactly
+    // as before. In both mode, a command-scoped policy question always goes
+    // to Jev (review note 7), and Clef's answer escalates when its consequence
+    // sits near this destination's own line.
+    const multiProvider = providers.settings.mode !== 'jev'
+    const cascade = await runCascade({
+      mode: providers.settings.mode,
+      jev: providers.jev,
+      clef: providers.clef,
+      budget: CLEF_BUDGET,
+      state: fit.state,
+      questions,
+      doubt: (answers) => gateConsequenceDoubt(answers, consequenceCeiling),
+      totalBudgetMs: BUDGET_MS,
+      clefBudgetMs: CLEF_BUDGET_MS,
+      skipClef: commandScopedPolicies.length > 0 ? 'policy' : null,
+      shadow: multiProvider ? { sampled: Math.random() < GATE_SHADOW_SHARE, verdictOf: (answers) => decideGateAction(gateInput(answers)).verdict } : null,
+    })
+    if (multiProvider) providerStamp = { provider: cascade.provider, escalation: cascade.escalation, shadowAgrees: cascade.shadowAgrees }
+    const response = cascade.response
+    const gate = decideGateAction(gateInput(response.answers))
     // Option D: no policy stopped it (policyId null) and the command
     // already structurally qualified -- decideGateAction's own verdict is
     // unconditionally 'allow' here, and gate-bash.ts's own local reason
@@ -1927,7 +2009,11 @@ async function askJev(apiKey: string, command: string, jevContext: string, jevNa
     if (error instanceof JevRequestError && (error.status === 401 || error.status === 403)) {
       return { kind: 'auth-rejected', status: error.status }
     }
-    return { kind: 'none', failure: jevFailureOf(error) }
+    const clefFailure = clefFailureOf(error)
+    if (clefFailure?.kind === 'auth') return { kind: 'auth-rejected', status: clefFailure.status }
+    const clefSide = error instanceof ClefError || error instanceof CascadeBudgetError
+    if (providers.settings.mode !== 'jev') providerStamp = { provider: clefSide ? 'clef' : 'jev', escalation: null, shadowAgrees: null }
+    return { kind: 'none', failure: error instanceof CascadeBudgetError ? { kind: 'budget' } : clefFailure ?? jevFailureOf(error) }
   }
 }
 
@@ -2460,16 +2546,27 @@ async function main(): Promise<void> {
   // as a cacheable one.
   if (secretFinding === null && tryAdviceRetryPass(command, cwd, actingCwd, sessionId, 'jev', null, teamInternal)) return
 
-  const apiKey = await resolveApiKey()
+  // Multi-provider, review note 2: "a provider is available", not "a Jev key
+  // exists". Jev-only mode reads exactly what it always has; Clef mode needs
+  // the Cloudflare credentials; both mode needs either.
+  const providerSettings = readProviderSettings()
+  const apiKey = providerSettings.mode === 'clef' ? null : await resolveApiKey()
+  const clefCredentials = providerSettings.mode === 'jev' ? null : await resolveClefCredentials()
+  const providers: GateProviders = {
+    settings: providerSettings,
+    jev: apiKey !== null ? createJevProvider(apiKey) : null,
+    clef: clefCredentials !== null ? createClefProvider({ ...clefCredentials, model: providerSettings.clefModel }) : null,
+  }
+  const hasProvider = providers.jev !== null || providers.clef !== null
   const previouslyWarnedNoKey = readNoKeyWarned()
-  const noKeyNotice = decideNoKeyNotice(apiKey !== null, previouslyWarnedNoKey)
+  const noKeyNotice = decideNoKeyNotice(hasProvider, previouslyWarnedNoKey)
   if (noKeyNotice.nextWarned !== previouslyWarnedNoKey) writeNoKeyWarned(noKeyNotice.nextWarned)
-  if (apiKey === null) {
+  if (!hasProvider) {
     if (secretFinding !== null) {
       emitSecretPublishAsk(secretFinding, command, actingCwd, toolUseId, teamInternal)
       return
     }
-    if (noKeyNotice.shouldWarn) passThroughWithNotice(t('noApiKey'))
+    if (noKeyNotice.shouldWarn) passThroughWithNotice(t(providerSettings.mode === 'clef' ? 'noProviderKey' : 'noApiKey'))
     passThrough()
   }
 
@@ -2521,7 +2618,7 @@ async function main(): Promise<void> {
   // filtering askJev's own path applies) and the matched destination's own
   // ceiling override are what JEVADV-48 folds into the key -- see cacheKey's
   // own doc.
-  const key = cacheKey(command, context, cwd, matchedDestination?.id ?? null, catalogMatch?.treeRoot ?? null, commandScopedPolicies, matchedDestination?.autonomy?.consequenceCeiling, localAllow.qualifies ? localAllow.kind : null)
+  const key = cacheKey(command, context, cwd, matchedDestination?.id ?? null, catalogMatch?.treeRoot ?? null, commandScopedPolicies, matchedDestination?.autonomy?.consequenceCeiling, localAllow.qualifies ? localAllow.kind : null, providerSettings)
   const cache = key === null ? {} : readCache()
   const hit = key === null ? undefined : cache[key]
   // Secret guard: only a cached policy deny is replayed over a secret.
@@ -2598,7 +2695,7 @@ async function main(): Promise<void> {
   }
 
   const jevStartedAt = Date.now()
-  const outcome = await askJev(apiKey, command, jevContext, jevNames, localAllow, matchedDestination, commandScopedPolicies, cwd)
+  const outcome = await askJev(providers, command, jevContext, jevNames, localAllow, matchedDestination, commandScopedPolicies, cwd)
   const jevLatencyMs = Date.now() - jevStartedAt
 
   // Secret guard: only a policy deny from Jev is stronger than the ask; no
@@ -2619,7 +2716,7 @@ async function main(): Promise<void> {
     const unreachableNotice = decideUnreachableNotice(false, previousUnreachableFailures, UNREACHABLE_WARN_THRESHOLD)
     if (unreachableNotice.nextConsecutiveFailures !== previousUnreachableFailures) writeUnreachableFailures(unreachableNotice.nextConsecutiveFailures)
     // G8: a 402 is the key's account without credit, said as such; the row above keeps it countable, with the 402 in its failure.
-    if (unreachableNotice.shouldWarn) passThroughWithNotice(t(unreachableNoticeKey(outcome.failure)))
+    if (unreachableNotice.shouldWarn) passThroughWithNotice(t(unreachableNoticeKey(outcome.failure, providerStamp?.provider ?? 'jev')))
     passThrough()
   }
 

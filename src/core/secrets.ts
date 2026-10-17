@@ -64,8 +64,8 @@ function stripMatchingQuotes(value: string): string {
   return isDoubleQuoted || isSingleQuoted ? value.slice(1, -1) : value;
 }
 
-/** Parses a minimal `KEY=value` line format; ignores blank lines and `#` comments. */
-function parseEnvFile(content: string): string | null {
+/** Reads `name` from a minimal `KEY=value` line format; ignores blank lines and `#` comments. */
+export function parseEnvFileValue(content: string, name: string): string | null {
   for (const rawLine of content.split("\n")) {
     const line = rawLine.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
@@ -74,7 +74,7 @@ function parseEnvFile(content: string): string | null {
     if (separatorIndex === -1) continue;
 
     const key = line.slice(0, separatorIndex).trim();
-    if (key !== ENV_VAR_NAME) continue;
+    if (key !== name) continue;
 
     const value = stripMatchingQuotes(line.slice(separatorIndex + 1).trim());
     return value.length > 0 ? value : null;
@@ -82,7 +82,11 @@ function parseEnvFile(content: string): string | null {
   return null;
 }
 
-async function fromFallbackFile(): Promise<string | null> {
+function parseEnvFile(content: string): string | null {
+  return parseEnvFileValue(content, ENV_VAR_NAME);
+}
+
+async function fromFallbackFile(name: string = ENV_VAR_NAME): Promise<string | null> {
   // First candidate that both exists and holds a key wins. A file that is
   // there but empty does not shadow a legacy one that still has the key.
   for (const path of fallbackPaths()) {
@@ -92,7 +96,7 @@ async function fromFallbackFile(): Promise<string | null> {
     } catch {
       continue;
     }
-    const value = parseEnvFile(fileContent);
+    const value = name === ENV_VAR_NAME ? parseEnvFile(fileContent) : parseEnvFileValue(fileContent, name);
     if (value !== null) return value;
   }
   return null;
@@ -124,4 +128,49 @@ export async function resolveApiKey(secretsHost?: SecretsHost): Promise<string |
   }
 
   return fromFallbackFile();
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare credentials (multi-provider P5)
+// ---------------------------------------------------------------------------
+//
+// The account id and API token for Cloudflare's Clef travel exactly the way
+// the Jev key does: typed once in the config panel, kept in the worker's
+// `secrets` store, mirrored by the worker to the same env file (0600) as
+// CLOUDFLARE_ACCOUNT_ID= and CLOUDFLARE_API_TOKEN= lines, and read here by
+// the gate hook and the CLIs -- environment first, then that file.
+
+export const CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID";
+export const CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
+/** The key names inside Orca's `secrets` store. */
+export const CLOUDFLARE_ACCOUNT_ID_SECRET = "cloudflareAccountId";
+export const CLOUDFLARE_API_TOKEN_SECRET = "cloudflareApiToken";
+
+export interface ClefCredentialsResolved {
+  readonly accountId: string;
+  readonly token: string;
+}
+
+async function resolveNamed(name: string, secretsHost: SecretsHost | undefined, secretName: string): Promise<string | null> {
+  if (secretsHost !== undefined) {
+    try {
+      const fromSecrets = await secretsHost.get(secretName);
+      if (fromSecrets !== null && fromSecrets.trim().length > 0) return fromSecrets.trim();
+    } catch {
+      // Fall through to the environment and the file, as resolveApiKey does.
+    }
+  }
+  const fromEnv = process.env[name];
+  if (fromEnv !== undefined && fromEnv.trim().length > 0) return fromEnv.trim();
+  return fromFallbackFile(name);
+}
+
+/**
+ * Both halves of the Cloudflare credentials, or null when either is missing.
+ * Same precedence as resolveApiKey; never logs or throws a value.
+ */
+export async function resolveClefCredentials(secretsHost?: SecretsHost): Promise<ClefCredentialsResolved | null> {
+  const accountId = await resolveNamed(CLOUDFLARE_ACCOUNT_ID_ENV, secretsHost, CLOUDFLARE_ACCOUNT_ID_SECRET);
+  const token = await resolveNamed(CLOUDFLARE_API_TOKEN_ENV, secretsHost, CLOUDFLARE_API_TOKEN_SECRET);
+  return accountId !== null && token !== null ? { accountId, token } : null;
 }

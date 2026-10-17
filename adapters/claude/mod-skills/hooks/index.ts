@@ -305,7 +305,7 @@ export async function resolveModSkillsSwitches($: EngineInterface): Promise<ModS
 // is there, one `$.fs.read` of a few dozen bytes. Best-effort like the other
 // config reads: a missing, unreachable or malformed file is each module's
 // default -- `active` for every module that predates the file, which is
-// exactly the behaviour before it existed, and `shadow` for verify-done.
+// exactly the behaviour before it existed, `shadow` for ci-watch and memory, and `off` for verify-done.
 // ---------------------------------------------------------------------------
 
 /** The module file's path, worked out on the first read of a `register` call: undefined until then, null when no home directory is known. */

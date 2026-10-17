@@ -27,8 +27,9 @@
 //
 // Pure: no I/O, no clock.
 import type { GateDecisionRecord, GateSource, GateVerdict } from "./gate_measurement.ts";
-import { emptyGateTally, tallyGateDecisions } from "./gate_stats.ts";
-import type { GateFamilyTally, GateTally, GateVerdictCounts } from "./gate_stats.ts";
+import { emptyGateTally, emptyProviderCounts, tallyGateDecisions } from "./gate_stats.ts";
+import type { GateFamilyTally, GateProviderCounts, GateTally, GateVerdictCounts } from "./gate_stats.ts";
+import { ESCALATIONS } from "./provider_cascade.ts";
 
 export const GATE_DECISION_TOTALS_FILE = "gate-decisions-totals.json";
 /** Held while a fold runs, so two folds never write the totals from the same starting point. */
@@ -334,6 +335,29 @@ function parseFamily(raw: unknown): GateFamilyTally | null {
   return byVerdict === null ? null : { total: raw.total, byVerdict };
 }
 
+/**
+ * Multi-provider: tolerant on purpose. A totals file written before these
+ * counts existed has none, and one with a malformed block keeps every other
+ * count it holds -- these restart from zero rather than taking the whole
+ * history down with them.
+ */
+function parseProviderCounts(raw: unknown): GateProviderCounts {
+  const empty = emptyProviderCounts();
+  if (!isObject(raw) || !isCount(raw.tagged) || !isCount(raw.clefUnanswered)) return empty;
+  const { answeredBy, escalations, shadow } = raw;
+  if (!isObject(answeredBy) || !isCount(answeredBy.jev) || !isCount(answeredBy.clef)) return empty;
+  if (!isObject(shadow) || !isCount(shadow.agree) || !isCount(shadow.disagree)) return empty;
+  if (!isObject(escalations)) return empty;
+  const parsedEscalations = { ...empty.escalations };
+  for (const reason of ESCALATIONS) {
+    const count = escalations[reason];
+    if (count === undefined) continue;
+    if (!isCount(count)) return empty;
+    parsedEscalations[reason] = count;
+  }
+  return { tagged: raw.tagged, answeredBy: { jev: answeredBy.jev, clef: answeredBy.clef }, escalations: parsedEscalations, clefUnanswered: raw.clefUnanswered, shadow: { agree: shadow.agree, disagree: shadow.disagree } };
+}
+
 function parseTally(raw: unknown): GateTally | null {
   if (!isObject(raw)) return null;
   const byVerdict = parseVerdictCounts(raw.byVerdict);
@@ -356,6 +380,7 @@ function parseTally(raw: unknown): GateTally | null {
   }
   return {
     totalDecisions: raw.totalDecisions,
+    providers: parseProviderCounts(raw.providers),
     byVerdict,
     bySource: { "local-rule": localRule, cache, jev, none },
     families,

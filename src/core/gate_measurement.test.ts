@@ -592,3 +592,43 @@ test("a decision judged on a condensed state says so, and one that was not carri
   assert.deepEqual(parseGateDecisionRecords(serializeGateRecord(condensed)), [condensed]);
   assert.equal("stateCondensed" in buildGateDecisionRecord({ ...base, id: "d", stateCondensed: false }), false);
 });
+
+// Multi-provider P4: who answered and why Jev did, written only outside Jev-only mode.
+test("a decision records its provider, why it escalated and the shadow agreement, and round-trips", () => {
+  const base = { id: "p-1", at: "2026-10-16T00:00:00.000Z", project: null, command: "git status", source: "jev" as const, verdict: "allow" as const, latencyMs: 400, pluginVersion: undefined, stopReason: "risk" as const };
+  const clef = buildGateDecisionRecord({ ...base, provider: "clef", shadowAgrees: false });
+  assert.equal(clef.provider, "clef");
+  assert.equal(clef.shadowAgrees, false);
+  assert.equal("escalation" in clef, false);
+  const jev = buildGateDecisionRecord({ ...base, id: "p-2", provider: "jev", escalation: "doubt" });
+  assert.equal(jev.escalation, "doubt");
+  const parsed = parseGateDecisionRecords(serializeGateRecord(clef) + serializeGateRecord(jev));
+  assert.deepEqual(parsed, [clef, jev]);
+});
+
+test("Jev-only mode writes no provider keys at all", () => {
+  const plain = buildGateDecisionRecord({ id: "p-3", at: "2026-10-16T00:00:00.000Z", project: null, command: "git status", source: "jev", verdict: "allow", latencyMs: 1, pluginVersion: undefined, stopReason: "risk" });
+  assert.equal("provider" in plain, false);
+  assert.equal("escalation" in plain, false);
+  assert.equal("shadowAgrees" in plain, false);
+});
+
+test("a provider or escalation the reader does not know is malformed", () => {
+  const plain = buildGateDecisionRecord({ id: "p-4", at: "2026-10-16T00:00:00.000Z", project: null, command: "git status", source: "jev", verdict: "allow", latencyMs: 1, pluginVersion: undefined, stopReason: "risk" });
+  assert.equal(parseGateDecisionRecords(JSON.stringify({ ...plain, provider: "gpt" }) + "\n").length, 0);
+  assert.equal(parseGateDecisionRecords(JSON.stringify({ ...plain, escalation: "whim" }) + "\n").length, 0);
+  assert.equal(parseGateDecisionRecords(JSON.stringify({ ...plain, shadowAgrees: "yes" }) + "\n").length, 0);
+});
+
+test("an unjudged Clef decision records Clef's own failure classes, the spent budget included", () => {
+  const base = { at: "2026-10-16T00:00:00.000Z", project: null, command: "git status", source: "none" as const, verdict: "allow" as const, latencyMs: null, pluginVersion: undefined, stopReason: "unreachable" as const, provider: "clef" as const };
+  const records = [
+    buildGateDecisionRecord({ ...base, id: "c-1", failure: { kind: "budget" } }),
+    buildGateDecisionRecord({ ...base, id: "c-2", failure: { kind: "daily-allowance" } }),
+    buildGateDecisionRecord({ ...base, id: "c-3", failure: { kind: "rate-limit", status: 429 } }),
+    buildGateDecisionRecord({ ...base, id: "c-4", failure: { kind: "auth", status: 401 } }),
+  ];
+  assert.deepEqual(records.map((r) => r.failureClass), ["budget", "daily-allowance", "rate-limit", "auth"]);
+  assert.equal(records[2]?.failureStatus, 429);
+  assert.deepEqual(parseGateDecisionRecords(records.map(serializeGateRecord).join("")), records);
+});

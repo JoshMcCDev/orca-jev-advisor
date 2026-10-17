@@ -1908,8 +1908,8 @@ test('modules T3: with no module file every module is on, all eight hooks are in
   const result = run('install', home)
   assert.equal(result.ok, true)
   assert.deepEqual(ownHookKeys(readSettings(home)), ALL_EIGHT)
-  // verify-done (0.8.0), ci-watch (0.9.0) and memory start in shadow: they have no hooks, so their lines read as matching.
-  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'shadow', 'ci-watch': 'shadow', memory: 'shadow' })
+  // ci-watch (0.9.0) and memory start in shadow and verify-done (0.8.0) starts off (0.13.0): they have no hooks, so their lines read as matching.
+  assert.deepEqual(result.modules, { gate: 'active', 'model-router': 'active', steward: 'active', 'skill-selection': 'active', board: 'active', 'verify-done': 'off', 'ci-watch': 'shadow', memory: 'shadow' })
   assert.equal(result.modCopyNeeded, true)
 
   const status = run('status', home)
@@ -1920,7 +1920,7 @@ test('modules T3: with no module file every module is on, all eight hooks are in
   assert.deepEqual(status.modules.gate, { state: 'active', hookCount: 5, installed: true, removed: false, matchesState: true })
   assert.deepEqual(status.modules['model-router'], { state: 'active', hookCount: 3, installed: true, removed: false, matchesState: true })
   assert.deepEqual(status.modules.board, { state: 'active', hookCount: 0, installed: true, removed: true, matchesState: true })
-  assert.deepEqual(status.modules['verify-done'], { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
+  assert.deepEqual(status.modules['verify-done'], { state: 'off', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.modules['ci-watch'], { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.modules.memory, { state: 'shadow', hookCount: 0, installed: true, removed: true, matchesState: true })
   assert.deepEqual(status.targets[0].modules.gate, { state: 'active', present: 5, total: 5 })

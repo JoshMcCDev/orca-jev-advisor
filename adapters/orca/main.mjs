@@ -54,8 +54,9 @@ import { resolveLinkedWorktreeMainCheckout } from '../../src/core/linked_worktre
 import { POLICY_SEED_MARKER_KEY, parseSeedPolicies, parseSeedVersion, shouldSeedPolicies } from '../../src/core/policy_seed.ts'
 import { mergePolicySeeds, resolvePolicySeedImport } from '../../src/core/policy_seed_import.ts'
 import { decidePolicySeedNotice, parseOfferedVersion } from '../../src/core/policy_seed_notice.ts'
-import { resolveApiKey, SECRET_KEY_NAME } from '../../src/core/secrets.ts'
-import { getBoard, getCatalog, getConfig, getExplicitModels, getPolicies, getQueueMode, getTeamOwners, getTrustedPrograms, setBoard, setCatalog, setPolicies, setTrustedPrograms } from '../../src/core/store.ts'
+import { CLOUDFLARE_ACCOUNT_ID_ENV, CLOUDFLARE_ACCOUNT_ID_SECRET, CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_API_TOKEN_SECRET, resolveApiKey, resolveClefCredentials, SECRET_KEY_NAME } from '../../src/core/secrets.ts'
+import { clefFailureOf, createClefProvider, DEFAULT_CLEF_MODEL, isClefModel } from '../../src/core/clef.ts'
+import { getBoard, getCatalog, getConfig, getExplicitModels, getPolicies, getProviderSettings, getQueueMode, getTeamOwners, getTrustedPrograms, setBoard, setCatalog, setPolicies, setTrustedPrograms } from '../../src/core/store.ts'
 import { addTrustedProgram, removeTrustedProgram } from '../../src/core/trusted_programs.ts'
 import { DEFAULT_DERIVED_AUTONOMY, deriveDestinations, parseWorktreeList } from '../../src/core/worktree_catalog.ts'
 import { recordDecision } from '../../src/core/log.ts'
@@ -221,15 +222,42 @@ function runSecretMirrorScript (mode, stdin, extraArgs = []) {
   )
 }
 
+/**
+ * Multi-provider P5: every secret this plugin keeps, by its name in Orca's
+ * `secrets` store, and the env-file line the mirror writes it as. The
+ * Cloudflare credentials take exactly the Jev key's path (review note 3):
+ * `secrets` -> this worker's mirror (at activation and on every panel save)
+ * -> the 0600 env file in the config dir -> src/core/secrets.ts in the gate
+ * hook and the CLIs.
+ */
+const MIRRORED_SECRETS = Object.freeze({
+  [SECRET_KEY_NAME]: 'TYPESAFE_API_KEY',
+  [CLOUDFLARE_ACCOUNT_ID_SECRET]: CLOUDFLARE_ACCOUNT_ID_ENV,
+  [CLOUDFLARE_API_TOKEN_SECRET]: CLOUDFLARE_API_TOKEN_ENV
+})
+
 /** Mirrors the current key (or its absence) to the fallback file. Logs a
  *  failure by reason/detail only -- the key itself never reaches `orca.log`. */
-async function mirrorSecretToEnvFile (orca, key) {
+async function mirrorSecretToEnvFile (orca, key, envName = 'TYPESAFE_API_KEY', run = runSecretMirrorScript) {
   const mode = key === null ? 'clear' : 'save'
-  const result = await runSecretMirrorScript(mode, mode === 'save' ? key : undefined)
+  const result = await run(mode, mode === 'save' ? key : undefined, [envName])
   if (!result.ok) {
-    orca.log(`secret mirror (${mode}) failed: ${String(result.reason ?? 'unknown')} -- ${String(result.detail ?? '').slice(0, 160)}`)
+    orca.log(`secret mirror (${mode} ${envName}) failed: ${String(result.reason ?? 'unknown')} -- ${String(result.detail ?? '').slice(0, 160)}`)
   }
   return result
+}
+
+/** Mirrors every secret in `secrets` (a missing one as a clear), so a restarted worker converges without anyone retyping. `options.run` is test-only. */
+async function mirrorAllSecrets (orca, secretsHost, options = {}) {
+  for (const [secretName, envName] of Object.entries(MIRRORED_SECRETS)) {
+    let value = null
+    try {
+      value = await secretsHost.get(secretName)
+    } catch {
+      value = null
+    }
+    await mirrorSecretToEnvFile(orca, typeof value === 'string' && value.trim().length > 0 ? value.trim() : null, envName, options.run)
+  }
 }
 
 /** Reads the mirror's current key, for the doctor's consistency check. Never logs the value. */
@@ -291,6 +319,11 @@ async function mirrorCatalogAndPolicies (orca, storageHost, options = {}) {
   const trustedResult = await run('trusted-programs-save', JSON.stringify(trustedPrograms))
   if (!trustedResult.ok) {
     orca.log(`trusted programs mirror failed: ${String(trustedResult.reason ?? 'unknown')} -- ${String(trustedResult.detail ?? '').slice(0, 160)}`)
+  }
+  // Multi-provider: Jev, Clef or both, always written, Jev only included.
+  const providerResult = await run('provider-settings-save', JSON.stringify(await getProviderSettings(storageHost)))
+  if (!providerResult.ok) {
+    orca.log(`provider settings mirror failed: ${String(providerResult.reason ?? 'unknown')} -- ${String(providerResult.detail ?? '').slice(0, 160)}`)
   }
 }
 
@@ -1691,12 +1724,22 @@ function isWorktreeLifecyclePayload (value) {
 // key is never written to storage.
 // ---------------------------------------------------------------------------
 
-async function publishSecretStatus (orca, storageHost, secretsHost) {
-  const value = await secretsHost.get(SECRET_KEY_NAME)
+async function maskedSecret (secretsHost, name) {
+  const value = await secretsHost.get(name)
   const configured = typeof value === 'string' && value.trim().length > 0
+  return { configured, endsWith: configured ? value.trim().slice(-4) : null }
+}
+
+async function publishSecretStatus (orca, storageHost, secretsHost) {
+  const jev = await maskedSecret(secretsHost, SECRET_KEY_NAME)
   const status = {
-    configured,
-    endsWith: configured ? value.trim().slice(-4) : null,
+    configured: jev.configured,
+    endsWith: jev.endsWith,
+    // Multi-provider: the same mask, at most the last 4 characters, never more.
+    cloudflare: {
+      accountId: await maskedSecret(secretsHost, CLOUDFLARE_ACCOUNT_ID_SECRET),
+      token: await maskedSecret(secretsHost, CLOUDFLARE_API_TOKEN_SECRET)
+    },
     checkedAt: new Date().toISOString()
   }
   await storageHost.set(SECRET_STATUS_KEY, status).catch((error) =>
@@ -1742,25 +1785,31 @@ async function attendSecretRequest (orca, storageHost, secretsHost) {
   let ok = false
   let reason = null
   let detail = null
+  // Multi-provider: which secret; the Jev key when the request names none (every panel before this one).
+  const secretName = typeof request.secret === 'string' ? request.secret : SECRET_KEY_NAME
+  const envName = Object.prototype.hasOwnProperty.call(MIRRORED_SECRETS, secretName) ? MIRRORED_SECRETS[secretName] : null
   try {
-    if (request.intent === 'save') {
+    if (envName === null) {
+      reason = 'unknown-secret'
+      detail = `not a secret this plugin keeps: ${secretName.slice(0, 40)}`
+    } else if (request.intent === 'save') {
       if (typeof request.value !== 'string' || request.value.trim().length === 0) {
         reason = 'empty-key'
         detail = 'the key cannot be empty.'
       } else {
         const value = request.value.trim()
-        await secretsHost.set(SECRET_KEY_NAME, value)
+        await secretsHost.set(secretName, value)
         ok = true
         // Best-effort: the panel's save already succeeded against `secrets`,
         // which is the source of truth. A mirror failure is logged, not
         // reported -- it must never turn a successful save into a reported
         // failure the user would try to "fix" by retyping the same key.
-        await mirrorSecretToEnvFile(orca, value)
+        await mirrorSecretToEnvFile(orca, value, envName)
       }
     } else if (request.intent === 'clear') {
-      await secretsHost.delete(SECRET_KEY_NAME)
+      await secretsHost.delete(secretName)
       ok = true
-      await mirrorSecretToEnvFile(orca, null)
+      await mirrorSecretToEnvFile(orca, null, envName)
     } else {
       reason = 'unknown-intent'
       detail = `unrecognized secret request intent: ${String(request.intent).slice(0, 60)}`
@@ -1771,7 +1820,7 @@ async function attendSecretRequest (orca, storageHost, secretsHost) {
   }
 
   await storageHost.set(SECRET_RESULT_KEY, {
-    id: request.id, at: new Date().toISOString(), ok, reason, detail
+    id: request.id, at: new Date().toISOString(), ok, reason, detail, secret: secretName
   }).catch((err) => orca.log(`secret result publish failed: ${err.message}`))
 
   await publishSecretStatus(orca, storageHost, secretsHost)
@@ -2838,7 +2887,7 @@ const DOCTOR_PING_BUDGET_MS = 6000
 /** A trivial, harmless Jev round-trip: the doctor's job is to prove the key
  *  authenticates, not to judge anything, so the question asks nothing about
  *  the user's work and its answer is never read. */
-async function pingJev (apiKey) {
+async function pingJev (apiKey, options = {}) {
   await callJev(
     apiKey,
     { proposito: 'Verificacion de configuracion de orca-jev-advisor (advisor.doctor). No es una decision real.' },
@@ -2849,21 +2898,102 @@ async function pingJev (apiKey) {
         criteria: { chequeo: 'Confirma unicamente que la clave autentica; el valor de la respuesta no se usa.' }
       }
     },
-    { budgetMs: DOCTOR_PING_BUDGET_MS }
+    { budgetMs: DOCTOR_PING_BUDGET_MS, ...options }
   )
+}
+
+/** The Clef counterpart of pingJev: one noul question, a few dozen input tokens (well under one neuron). */
+async function pingClef (credentials, model, options = {}) {
+  const startedAt = Date.now()
+  const response = await createClefProvider({ ...credentials, model }).ask(
+    { purpose: 'Configuration check of orca-jev-advisor. Not a real decision.' },
+    { check: { type: 'noul', instructions: 'This is a connectivity check, not a real decision. Answer anything.' } },
+    { budgetMs: DOCTOR_PING_BUDGET_MS, ...options }
+  )
+  return { latencyMs: Date.now() - startedAt, inputTokens: response.usage.input_tokens }
+}
+
+/**
+ * Whether Cloudflare accepts the stored credentials right now, as a stable
+ * reason code (the panel translates it) plus an English detail (the doctor
+ * shows it). Never names the token or the account id.
+ * `options.resolveCredentials` and `options.fetchImpl` are test-only.
+ */
+async function probeClef (secretsHost, model, options = {}) {
+  const credentials = await (options.resolveCredentials ?? resolveClefCredentials)(secretsHost)
+  if (credentials === null) return { ok: false, reason: 'no-credentials', status: null, latencyMs: null, detail: 'No Cloudflare credentials: the account id and the API token are both needed.' }
+  try {
+    const ping = await pingClef(credentials, model, { fetchImpl: options.fetchImpl })
+    return { ok: true, reason: 'ok', status: null, latencyMs: ping.latencyMs, detail: `Cloudflare accepted the credentials: ${model} answered in ${ping.latencyMs} ms.` }
+  } catch (error) {
+    const failure = clefFailureOf(error)
+    const status = failure !== null && 'status' in failure ? failure.status : null
+    if (failure?.kind === 'auth') return { ok: false, reason: 'rejected', status, latencyMs: null, detail: `Cloudflare credentials rejected (${status}).` }
+    if (failure?.kind === 'daily-allowance') return { ok: false, reason: 'allowance', status, latencyMs: null, detail: "Today's free Workers AI neurons are spent; Clef answers again after 00:00 UTC." }
+    if (failure?.kind === 'timeout' || failure?.kind === 'network') return { ok: false, reason: 'unreachable', status, latencyMs: null, detail: "No network: Clef didn't respond within the budget." }
+    return { ok: false, reason: 'failed', status, latencyMs: null, detail: `Clef failed${status !== null ? ` (${status})` : ''}: ${failure?.kind ?? 'unknown'}.` }
+  }
+}
+
+async function checkClef (secretsHost, settings, options = {}) {
+  const probe = await probeClef(secretsHost, settings.clefModel, options)
+  return { id: 'clef', ok: probe.ok, detail: probe.detail }
+}
+
+// ---------------------------------------------------------------------------
+// Clef connection test (multi-provider P6) -- the config panel's "Test
+// connection" button, same request/result shape as the secret channel.
+// Costs one tiny Clef call (a few dozen input tokens, under one neuron).
+// ---------------------------------------------------------------------------
+
+const CLEF_TEST_REQUEST_KEY = 'clefTestRequest'
+const CLEF_TEST_RESULT_KEY = 'clefTestResult'
+
+async function attendClefTestRequest (orca, storageHost, secretsHost, options = {}) {
+  const request = await storageHost.get(CLEF_TEST_REQUEST_KEY)
+  if (!isRecord(request) || typeof request.id !== 'string' || typeof request.at !== 'string') return
+  await storageHost.delete(CLEF_TEST_REQUEST_KEY).catch((error) =>
+    orca.log(`clef test request cleanup failed: ${error.message}`))
+  const model = isClefModel(request.model) ? request.model : DEFAULT_CLEF_MODEL
+  const age = Date.now() - Date.parse(request.at)
+  const probe = !(age >= 0) || age > SECRET_REQUEST_TTL_MS
+    ? { ok: false, reason: 'expired', status: null, latencyMs: null }
+    : await probeClef(secretsHost, model, options)
+  await storageHost.set(CLEF_TEST_RESULT_KEY, {
+    id: request.id, at: new Date().toISOString(), model, ok: probe.ok, reason: probe.reason, status: probe.status, latencyMs: probe.latencyMs
+  }).catch((error) => orca.log(`clef test result publish failed: ${error.message}`))
+}
+
+/**
+ * Multi-provider, review note 2: the doctor checks the providers the chosen
+ * mode uses. Jev only is exactly the old key check. In Clef mode a missing
+ * Jev key is not a failure (the gate never asks Jev; the router and the
+ * skills stay on Jev and keep their own no-key path). `options.fetchImpl` is
+ * test-only.
+ */
+async function checkDecisionProviders (secretsHost, storageHost, options = {}) {
+  const settings = await getProviderSettings(storageHost)
+  const checks = []
+  if (settings.mode === 'clef' && (await resolveApiKey(secretsHost)) === null) {
+    checks.push({ id: 'api-key', ok: true, detail: 'No Jev key, and none is needed for the gate in Clef mode; the router and the skills stay off without one.' })
+  } else {
+    checks.push(await checkApiKey(secretsHost, options))
+  }
+  if (settings.mode !== 'jev') checks.push(await checkClef(secretsHost, settings, options))
+  return checks
 }
 
 /** Checks the key past "is one configured": whether Jev actually accepts it
  *  right now, distinguishing a dead key (401/403) from no network at all --
  *  a key that "is configured" and a key that works are different facts,
  *  and only one of them is what "advisor.doctor" is for. */
-async function checkApiKey (secretsHost) {
+async function checkApiKey (secretsHost, options = {}) {
   const apiKey = await resolveApiKey(secretsHost)
   if (apiKey === null) {
     return { id: 'api-key', ok: false, detail: 'No key: TYPESAFE_API_KEY is not set in secrets, the environment, or the fallback file.' }
   }
   try {
-    await pingJev(apiKey)
+    await pingJev(apiKey, options)
     return { id: 'api-key', ok: true, detail: 'Key valid: Jev responded.' }
   } catch (error) {
     if (error instanceof JevRequestError && (error.status === 401 || error.status === 403)) {
@@ -2948,7 +3078,7 @@ async function checkClaudeIntegration () {
 async function cmdDoctor (orca, storageHost, secretsHost) {
   const checks = []
 
-  checks.push(await checkApiKey(secretsHost))
+  checks.push(...(await checkDecisionProviders(secretsHost, storageHost)))
   checks.push(await checkSecretMirror(secretsHost))
   checks.push(await checkClaudeIntegration())
 
@@ -3114,6 +3244,8 @@ export default function activate (orca) {
       .catch((error) => orca.log(`secret request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRequest(orca, storageHost))
       .catch((error) => orca.log(`claude integration request handling failed: ${error.message}`))
+      .then(() => attendClefTestRequest(orca, storageHost, secretsHost))
+      .catch((error) => orca.log(`clef test request handling failed: ${error.message}`))
       // Base work, outside the scheduler: the module switch must work with every module off.
       .then(() => attendFeatureModulesSaveRequest(orca, storageHost, scheduler))
       .catch((error) => orca.log(`feature modules request handling failed: ${error.message}`))
@@ -3174,8 +3306,7 @@ export default function activate (orca) {
   // restarted after the mirror file was lost, edited by hand, or never
   // written by an older version of this plugin converges without the user
   // having to retype the key.
-  secretsHost.get(SECRET_KEY_NAME)
-    .then((value) => mirrorSecretToEnvFile(orca, typeof value === 'string' && value.trim().length > 0 ? value.trim() : null))
+  mirrorAllSecrets(orca, secretsHost)
     .catch((error) => orca.log(`initial secret mirror failed: ${error.message}`))
   // Bootstraps the catalog from Orca's own worktrees when it is still
   // empty (never otherwise -- see deriveInitialCatalogIfEmpty), chained
@@ -3306,7 +3437,12 @@ export {
   attendPolicySeedDismissRequest,
   attendPolicySeedImportRequest,
   attendPolicySeedNoticeRefresh,
+  attendClefTestRequest,
   attendSecretRequest,
+  CLEF_TEST_RESULT_KEY,
+  checkDecisionProviders,
+  mirrorAllSecrets,
+  publishSecretStatus,
   boardProjectName,
   buildModuleRunners,
   MODULE_PERIODS,

@@ -27,7 +27,8 @@
 // instead of the marker going stale forever.
 
 import { isJevPaymentFailure } from "./jev.ts";
-import type { JevFailure } from "./jev.ts";
+import type { GateFailure } from "./gate_measurement.ts";
+import type { ProviderId } from "./decision_provider.ts";
 
 export interface UnreachableNoticeDecision {
   /** True when gate-bash.ts should emit the one-time-per-run "Jev is unreachable" notice this call. */
@@ -64,6 +65,7 @@ export function decideUnreachableNotice(
  * The command still passes and its row stays `unreachable`, with the 402 in
  * its failure detail.
  */
-export function unreachableNoticeKey(failure: JevFailure | null): "jevNoCredit" | "jevUnreachable" {
-  return isJevPaymentFailure(failure) ? "jevNoCredit" : "jevUnreachable";
+export function unreachableNoticeKey(failure: GateFailure | null, provider: ProviderId = "jev"): "jevNoCredit" | "jevUnreachable" | "clefUnreachable" | "clefBudgetSpent" {
+  if (provider === "clef") return failure?.kind === "budget" || failure?.kind === "daily-allowance" ? "clefBudgetSpent" : "clefUnreachable";
+  return failure !== null && failure.kind === "http4xx" && isJevPaymentFailure(failure) ? "jevNoCredit" : "jevUnreachable";
 }

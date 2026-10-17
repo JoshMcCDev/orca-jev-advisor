@@ -21,6 +21,7 @@ import { parseQueueMode } from "./queue_mode.ts";
 import { TRUSTED_PROGRAMS_STORAGE_KEY, parseTrustedPrograms } from "./trusted_programs.ts";
 import { parseExplicitModels } from "./explicit_models.ts";
 import type { ExplicitModelsMode } from "./explicit_models.ts";
+import { DEFAULT_PROVIDER_SETTINGS, normalizeProviderSettings, type ProviderSettings } from "./provider_settings.ts";
 
 /** The subset of the host's `storage` capability this module needs. */
 export interface StorageHost {
@@ -40,6 +41,7 @@ const STORAGE_KEY = {
   queueMode: "queueMode",
   explicitModels: "explicitModels",
   trustedPrograms: TRUSTED_PROGRAMS_STORAGE_KEY,
+  decisionProvider: "decisionProvider",
 } as const;
 
 async function readKey<T>(host: StorageHost, key: string, guard: (value: unknown) => value is T, fallback: T): Promise<T> {
@@ -278,6 +280,19 @@ export async function getQueueMode(host: StorageHost): Promise<boolean> {
     return parseQueueMode(await host.get(STORAGE_KEY.queueMode));
   } catch {
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// decisionProvider (multi-provider): Jev, Clef or both, and the Clef model.
+// Saved by the config panel; anything missing or malformed is Jev only.
+// ---------------------------------------------------------------------------
+
+export async function getProviderSettings(host: StorageHost): Promise<ProviderSettings> {
+  try {
+    return normalizeProviderSettings(await host.get(STORAGE_KEY.decisionProvider));
+  } catch {
+    return DEFAULT_PROVIDER_SETTINGS;
   }
 }
 

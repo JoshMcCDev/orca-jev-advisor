@@ -52,6 +52,7 @@ import { DEFAULT_MOD_SKILLS_READINESS_THRESHOLDS, evaluateModSkillsReadiness } f
 import { modSkillsProjectName } from '../../src/core/project_name.ts'
 import { boardWindowsOfGateLog, guardGateDecisionRows, perBoardWindow, readGateAppendFailures, readGateDecisionLog } from './log-files.mjs'
 import { boardWindows, isInWindow, versionStartOf } from '../../src/core/board_windows.ts'
+import { NEURON_DAILY_ALLOWANCE, NEURON_DAILY_STOP, neuronLedgerFileName, parseNeuronLedger, parseNeuronLedgerEntries } from '../../src/core/neuron_budget.ts'
 import { HUMAN_QUEUE_FILE, parseHumanQueue, waitingItems } from '../../src/core/human_queue.ts'
 import { measurementFilesToRead } from '../../src/core/measurement_files.ts'
 import { CI_WATCH_DECISIONS_FILE_PATTERN, summarizeCiWatchRows } from '../../src/core/ci_watch.ts'
@@ -128,10 +129,13 @@ async function aggregateGate (gateLog, now) {
   // kept readable (project/family/source/verdict/latency), never the raw `id`.
   const summary = summarizeGateTally(combined.all)
   const { pending, outcomes } = await readApprovalRecords()
+  const ledger = await readNeuronLedger(now)
 
   return {
     ...summary,
-    windows: buildGateWindows(combined, summary, decisions, pending, outcomes, now),
+    windows: buildGateWindows(combined, summary, decisions, pending, outcomes, now, ledger.entries),
+    // Multi-provider P7: today's (UTC) Clef spend against the free allowance and the stop below it.
+    clefBudget: { today: ledger.today, allowance: NEURON_DAILY_ALLOWANCE, stop: NEURON_DAILY_STOP },
     // 0.6.17 T4: records the gate could not write, so a log that stopped
     // growing is never read as a quiet gate.
     health: { ...gateHealthOf(combined), appendFailures: await readGateAppendFailures(CACHE_DIR) },
@@ -229,13 +233,57 @@ function approvalsSummary (pending, outcomes, now) {
   }
 }
 
-function gateWindow (fields, summary, pending, outcomes, now) {
+/**
+ * Multi-provider P7: every Clef neuron ledger in the cache dir (one small
+ * file per UTC day, src/core/neuron_budget.ts), its entries for the windows
+ * and today's total. A missing or unreadable file is no spend.
+ */
+async function readNeuronLedger (now) {
+  let names = []
+  try {
+    names = (await readdir(CACHE_DIR)).filter((name) => /^clef-neurons-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort()
+  } catch {
+    names = []
+  }
+  const todayName = neuronLedgerFileName(new Date(now))
+  const entries = []
+  let today = { spent: 0, calls: 0, exhausted: false }
+  for (const name of names) {
+    let raw = ''
+    try {
+      raw = await readFile(join(CACHE_DIR, name), 'utf8')
+    } catch {
+      continue
+    }
+    entries.push(...parseNeuronLedgerEntries(raw))
+    if (name === todayName) today = parseNeuronLedger(raw)
+  }
+  return { entries, today }
+}
+
+/** The neurons the ledger holds inside one window. */
+function neuronsIn (entries, inWindow) {
+  let spent = 0
+  let calls = 0
+  for (const entry of entries) {
+    if (entry.type !== 'neurons') continue
+    const ms = atMs(entry.at)
+    if (ms === null || !inWindow(ms)) continue
+    spent += entry.neurons
+    calls += 1
+  }
+  return { spent: Math.round(spent * 10) / 10, calls }
+}
+
+function gateWindow (fields, summary, pending, outcomes, now, neurons = { spent: 0, calls: 0 }) {
   return {
     ...fields,
     totalDecisions: summary.totalDecisions,
     byVerdict: summary.byVerdict,
     bySource: summary.bySource,
     jevLatency: summary.jevLatency,
+    providers: summary.providers,
+    neurons,
     interventions: interventionsTable(summary, pending, outcomes, now),
     approvals: approvalsSummary(pending, outcomes, now),
   }
@@ -258,7 +306,7 @@ function gateWindow (fields, summary, pending, outcomes, now) {
  * and week windows read only the live decisions, because a folded file is
  * more than 8 days old.
  */
-function buildGateWindows (combined, allSummary, decisions, pending, outcomes, now) {
+function buildGateWindows (combined, allSummary, decisions, pending, outcomes, now, ledgerEntries = []) {
   // odd/tasks/board-global-window.md W1: the same four windows every other
   // reader uses (src/core/board_windows.ts). Every gate window covers all it
   // asks for: day and week read the live files (8 days), and "all" and
@@ -269,7 +317,8 @@ function buildGateWindows (combined, allSummary, decisions, pending, outcomes, n
     { key: window.key, available: true, pluginVersion: null, since: new Date(window.sinceMs).toISOString(), ...bounds(window) },
     foldGateDecisions(decisions.filter((d) => { const ms = atMs(d.at); return ms !== null && isInWindow(ms, window, now) })),
     pending.filter((p) => isAtOrAfter(p.at, window.sinceMs)),
-    outcomes, now)
+    outcomes, now,
+    neuronsIn(ledgerEntries, (ms) => isInWindow(ms, window, now)))
 
   const version = windows.version
   const ofVersion = version.available ? combined.byVersion.find(([name]) => name === version.pluginVersion)?.[1] : undefined
@@ -279,13 +328,14 @@ function buildGateWindows (combined, allSummary, decisions, pending, outcomes, n
       { key: 'version', available: true, pluginVersion: version.pluginVersion, since: new Date(version.sinceMs).toISOString(), ...bounds(version) },
       summarizeGateTally(ofVersion.tally),
       pending.filter((p) => isAtOrAfter(p.at, version.sinceMs)),
-      outcomes, now)
+      outcomes, now,
+      neuronsIn(ledgerEntries, (ms) => ms >= version.sinceMs))
 
   return {
     version: versionWindow,
     day: timeWindow(windows.day),
     week: timeWindow(windows.week),
-    all: gateWindow({ key: 'all', available: true, pluginVersion: null, since: null, sinceMs: null, coverageSinceMs: null }, allSummary, pending, outcomes, now),
+    all: gateWindow({ key: 'all', available: true, pluginVersion: null, since: null, sinceMs: null, coverageSinceMs: null }, allSummary, pending, outcomes, now, neuronsIn(ledgerEntries, () => true)),
   }
 }
 

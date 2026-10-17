@@ -292,9 +292,11 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     // odd/tasks/verify-done-module.md: only measures. turn.complete can only
     // observe, so a blocking state would need a Stop hook this repo does not
     // install; until the measurement decides one, there is no active.
+    // 0.13.0: five days of shadow flagged 12 turns and 11 were false (tests
+    // run by subagents went uncounted; edits were notes), so it starts off.
     id: "verify-done",
     states: ["off", "shadow"],
-    defaultState: "shadow",
+    defaultState: "off",
     hooks: [],
     modFeatures: [{ id: "verify-done", hooks: ["turn.complete"], jev: true }],
     workerJobs: [],
@@ -350,7 +352,7 @@ export const DEFAULT_FEATURE_MODULES: FeatureModules = {
   steward: "active",
   "skill-selection": "active",
   board: "active",
-  "verify-done": "shadow",
+  "verify-done": "off",
   "ci-watch": "shadow",
   memory: "shadow",
 };

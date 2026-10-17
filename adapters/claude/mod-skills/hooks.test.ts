@@ -4060,8 +4060,9 @@ function claimCalls(host: FakeHost): { url: string; body?: string }[] {
   return host.fetchCalls.filter((call) => (call.body ?? "").includes('"claim"'));
 }
 
-test("V3 verify-done shadow (the default, no module file): a candidate turn asks Jev exactly once and writes one row; the turn's result is unchanged", async () => {
+test("V3 verify-done shadow (set explicitly, it is not the default): a candidate turn asks Jev exactly once and writes one row; the turn's result is unchanged", async () => {
   const host = makeFakeHost();
+  setModules(host, { "verify-done": "shadow" });
   host.messages = EDIT_ONLY;
   host.fetchQueue.push(claimAnswer("claimed-done", 0.9));
   const { handlers, engine } = loadHooks(host);
@@ -4094,6 +4095,7 @@ test("V3 verify-done shadow (the default, no module file): a candidate turn asks
 
 test("V3 verify-done shadow: a failing test still makes the turn a candidate", async () => {
   const host = makeFakeHost();
+  setModules(host, { "verify-done": "shadow" });
   host.messages = EDIT_AND_RED;
   host.fetchQueue.push(claimAnswer("not-claimed", 0.8));
   const { handlers, engine } = loadHooks(host);
@@ -4107,6 +4109,7 @@ test("V3 verify-done shadow: a failing test still makes the turn a candidate", a
 test("V3 verify-done shadow: a turn with no edit, or with its tests passing, makes no Jev call and writes no row", async () => {
   for (const messages of [NO_EDIT, EDIT_AND_GREEN]) {
     const host = makeFakeHost();
+    setModules(host, { "verify-done": "shadow" });
     host.messages = messages;
     // Queued so that a wrong call is counted instead of failing on an empty queue.
     host.fetchQueue.push(claimAnswer("claimed-done", 0.9));
@@ -4117,6 +4120,21 @@ test("V3 verify-done shadow: a turn with no edit, or with its tests passing, mak
     assert.equal(host.fetchCalls.length, 0, "no Jev call");
     assert.equal(host.files.has(VERIFY_DONE_PATH), false, "no row");
   }
+});
+
+test("V3 verify-done default: with no module file it is off, so a candidate turn makes no Jev call and writes nothing", async () => {
+  const host = makeFakeHost();
+  host.messages = EDIT_ONLY;
+  host.fetchQueue.push(claimAnswer("claimed-done", 0.9));
+  const seeded = new Set(host.files.keys());
+  const { handlers, engine } = loadHooks(host);
+
+  const result = await completeTurn(handlers, engine);
+  await runTimers(host);
+
+  assert.equal(result, TURN_RESULT);
+  assert.equal(host.fetchCalls.length, 0, "no Jev call");
+  assert.deepEqual(leftBehind(host, seeded).filter((entry) => entry.includes("verify-done")), [], "no row");
 });
 
 test("V3 verify-done off: a candidate turn makes no Jev call and writes nothing; the turn's result is unchanged", async () => {
@@ -4137,6 +4155,7 @@ test("V3 verify-done off: a candidate turn makes no Jev call and writes nothing;
 
 test("V3 verify-done: a timer already scheduled asks nothing once the module went off", async () => {
   const host = makeFakeHost();
+  setModules(host, { "verify-done": "shadow" });
   host.messages = EDIT_ONLY;
   host.fetchQueue.push(claimAnswer("claimed-done", 0.9));
   const { handlers, engine } = loadHooks(host);
@@ -4152,6 +4171,7 @@ test("V3 verify-done: a timer already scheduled asks nothing once the module wen
 test("V3 verify-done: a subagent's turn and a turn that did not end with an answer do nothing", async () => {
   for (const extra of [{ agentId: "a-1" }, { reason: "aborted", isAborted: true }, { reason: "error" }, { reason: "refusal", refusal: { category: null, explanation: null } }]) {
     const host = makeFakeHost();
+    setModules(host, { "verify-done": "shadow" });
     host.messages = EDIT_ONLY;
     host.fetchQueue.push(claimAnswer("claimed-done", 0.9));
     const { handlers, engine } = loadHooks(host);
@@ -4165,6 +4185,7 @@ test("V3 verify-done: a subagent's turn and a turn that did not end with an answ
 
 test("V3 verify-done: a Jev failure writes a jev-failed row and the turn ends as it would have", async () => {
   const host = makeFakeHost();
+  setModules(host, { "verify-done": "shadow" });
   host.messages = EDIT_ONLY;
   // A body that is not a Jev response: a failure, never a guess.
   host.fetchQueue.push("not a jev response");
@@ -4183,6 +4204,7 @@ test("V3 verify-done: a Jev failure writes a jev-failed row and the turn ends as
 
 test("V3 verify-done: what Jev reads is the redacted final message and counts; a secret, a path or file contents never reach the call", async () => {
   const host = makeFakeHost();
+  setModules(host, { "verify-done": "shadow" });
   const secret = "sk-ant-api03-" + "b".repeat(40);
   host.messages = [
     { role: "user", text: "fix the parser", toolUses: [] },

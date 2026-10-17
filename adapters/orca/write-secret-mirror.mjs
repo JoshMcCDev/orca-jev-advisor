@@ -25,6 +25,13 @@
  *          lines already in the file are kept.
  *   clear  removes the TYPESAFE_API_KEY= line; deletes the file entirely
  *          if nothing else is left in it.
+ *   save/clear <NAME>  the same for CLOUDFLARE_ACCOUNT_ID or
+ *          CLOUDFLARE_API_TOKEN (multi-provider P5): same file, same 0600,
+ *          one line each; any other name is refused (`unknown-secret`).
+ *   provider-settings-save  reads `{mode, clefModel}` as JSON from stdin
+ *          and atomically writes it, normalized through
+ *          src/core/provider_settings.ts (anything malformed is Jev only),
+ *          to decision-provider.json, which the gate hook reads. Not secret.
  *   read   reports the mirror's current TYPESAFE_API_KEY value (or null),
  *          for main.mjs's doctor check that it still matches `secrets`.
  *   catalog-save   reads the destination catalog as JSON from stdin and
@@ -143,6 +150,7 @@ import { TRUSTED_PROGRAMS_MIRROR_FILE, parseTrustedPrograms } from '../../src/co
 import { EXPLICIT_MODELS_MIRROR_FILE, parseExplicitModels } from '../../src/core/explicit_models.ts'
 import { MODELS_MIRROR_FILE } from '../../src/core/model_mirror.ts'
 import { parseOrcaUiLanguage } from '../../src/core/orca_ui_language.ts'
+import { PROVIDER_SETTINGS_MIRROR_FILE, normalizeProviderSettings } from '../../src/core/provider_settings.ts'
 // Guarded stand-ins for the mutating fs/promises calls this file makes --
 // see guarded_fs.ts's module doc for why every write in this script goes
 // through them instead of node:fs/promises's own mkdir/writeFile/rename/rm/chmod.
@@ -183,6 +191,7 @@ let FEATURE_MODULES_PATH = ''
 let DENY_TIER_CONFIG_PATH = ''
 let MODELS_PATH = ''
 let QUOTA_PATH = ''
+let PROVIDER_SETTINGS_PATH = ''
 let CONFIG_DIR_RESOLUTION_ERROR = null
 try {
   CONFIG_DIR = resolveConfigDir(normalizePlatform(process.platform), { home: homedir(), appDataDir: process.env.APPDATA, localAppDataDir: process.env.LOCALAPPDATA, xdgConfigHome: process.env.XDG_CONFIG_HOME })
@@ -230,10 +239,16 @@ try {
   // no auth token): ordinary file permissions, same as catalog.json/
   // policies.json/models-catalog.json above.
   QUOTA_PATH = join(CONFIG_DIR, 'quota.json')
+  // Multi-provider: Jev, Clef or both, and the Clef model. Not secret.
+  PROVIDER_SETTINGS_PATH = join(CONFIG_DIR, PROVIDER_SETTINGS_MIRROR_FILE)
 } catch (error) {
   CONFIG_DIR_RESOLUTION_ERROR = error
 }
 const ENV_VAR_NAME = 'TYPESAFE_API_KEY'
+// Multi-provider P5: the Cloudflare credentials share the key's env file and
+// its 0600, one line each, written and cleared by name. `save`/`clear` take
+// the name as their next argv (never the value) and refuse any other name.
+const SECRET_ENV_NAMES = new Set([ENV_VAR_NAME, 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN'])
 
 async function readStdin () {
   const chunks = []
@@ -241,12 +256,16 @@ async function readStdin () {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-function isKeyLine (line) {
+function isKeyLine (line, name = ENV_VAR_NAME) {
   const trimmed = line.trim()
   if (trimmed.length === 0 || trimmed.startsWith('#')) return false
   const separator = trimmed.indexOf('=')
   if (separator === -1) return false
-  return trimmed.slice(0, separator).trim() === ENV_VAR_NAME
+  return trimmed.slice(0, separator).trim() === name
+}
+
+function unknownSecret (name) {
+  return { ok: false, reason: 'unknown-secret', detail: `not a secret this mirror writes: ${String(name).slice(0, 40)}` }
 }
 
 function stripMatchingQuotes (value) {
@@ -309,30 +328,32 @@ async function writeAtomic (content, path, mode = 0o600) {
   await rename(tempPath, path)
 }
 
-async function save (key) {
+async function save (key, name = ENV_VAR_NAME) {
+  if (!SECRET_ENV_NAMES.has(name)) return unknownSecret(name)
   if (key.length === 0) return { ok: false, reason: 'empty-key', detail: 'stdin carried no key.' }
 
   const existing = await readExisting()
   const lines = existing !== null ? existing.split('\n') : []
   let replaced = false
   const next = lines.map((line) => {
-    if (!isKeyLine(line)) return line
+    if (!isKeyLine(line, name)) return line
     replaced = true
-    return `${ENV_VAR_NAME}=${key}`
+    return `${name}=${key}`
   })
-  if (!replaced) {
-    while (next.length > 0 && next[next.length - 1].trim() === '') next.pop()
-    next.push(`${ENV_VAR_NAME}=${key}`)
-  }
+  // Trailing blank lines go either way: a replace used to keep the file's
+  // final newline as an empty line and add another on every save.
+  while (next.length > 0 && next[next.length - 1].trim() === '') next.pop()
+  if (!replaced) next.push(`${name}=${key}`)
   await writeAtomic(`${next.join('\n')}\n`, MIRROR_PATH)
   return { ok: true }
 }
 
-async function clear () {
+async function clear (name = ENV_VAR_NAME) {
+  if (!SECRET_ENV_NAMES.has(name)) return unknownSecret(name)
   const existing = await readExisting()
   if (existing === null) return { ok: true }
 
-  const remaining = existing.split('\n').filter((line) => !isKeyLine(line))
+  const remaining = existing.split('\n').filter((line) => !isKeyLine(line, name))
   const hasOtherContent = remaining.some((line) => line.trim().length > 0)
   if (!hasOtherContent) {
     await rm(MIRROR_PATH, { force: true })
@@ -362,6 +383,14 @@ async function statMirror () {
     if (error?.code === 'ENOENT') return { ok: true, exists: false, mode: null, platform: process.platform, path: MIRROR_PATH }
     throw error
   }
+}
+
+/** Multi-provider: the owner's provider choice, normalized through the parser the gate reads it back with (anything malformed is Jev only). Not secret. */
+async function providerSettingsSave (raw) {
+  const parsed = parseJsonPayload(raw)
+  const settings = normalizeProviderSettings(parsed.ok ? parsed.value : null)
+  await writeAtomic(`${JSON.stringify(settings, null, 2)}\n`, PROVIDER_SETTINGS_PATH, null)
+  return { ok: true }
 }
 
 async function localeSave (value) {
@@ -602,13 +631,15 @@ async function main () {
   try {
     if (CONFIG_DIR_RESOLUTION_ERROR) throw CONFIG_DIR_RESOLUTION_ERROR
     if (mode === 'save') {
-      result = await save((await readStdin()).trim())
+      result = await save((await readStdin()).trim(), process.argv[3] ?? ENV_VAR_NAME)
     } else if (mode === 'locale-save') {
       result = await localeSave(process.argv[3])
     } else if (mode === 'locale-read') {
       result = await localeRead()
     } else if (mode === 'clear') {
-      result = await clear()
+      result = await clear(process.argv[3] ?? ENV_VAR_NAME)
+    } else if (mode === 'provider-settings-save') {
+      result = await providerSettingsSave(await readStdin())
     } else if (mode === 'read') {
       result = await read()
     } else if (mode === 'stat') {

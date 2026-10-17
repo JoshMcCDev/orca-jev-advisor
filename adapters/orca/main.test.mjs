@@ -2302,7 +2302,7 @@ test('mirrorCatalogAndPolicies also mirrors the team owners, normalized, through
   const calls = []
   const run = async (mode, stdin) => { calls.push({ mode, stdin }); return { ok: true } }
   await mirrorCatalogAndPolicies(orca, storageHost, { run })
-  assert.deepEqual(calls.map((call) => call.mode), ['catalog-save', 'policies-save', 'team-owners-save', 'queue-mode-save', 'explicit-models-save', 'trusted-programs-save'])
+  assert.deepEqual(calls.map((call) => call.mode), ['catalog-save', 'policies-save', 'team-owners-save', 'queue-mode-save', 'explicit-models-save', 'trusted-programs-save', 'provider-settings-save'])
   assert.deepEqual(JSON.parse(calls[2].stdin), ['acme-team', 'acme-tools'])
 })
 
