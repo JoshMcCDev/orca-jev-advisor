@@ -256,7 +256,8 @@ export interface RowTokens {
 }
 
 /** The fork's outcome on an UPDATE turn: not in the sample, sampled but a new turn had started, a parsed draft, an answer that is not one, or no answer. */
-export type ForkOutcome = "not-sampled" | "turn-moved-on" | "drafted" | "unparsable" | "no-answer";
+/** `main-saved`: Active with Engram usable, and the main thread already called mem_save this turn, so every save of a draft would be dropped; none is made. */
+export type ForkOutcome = "not-sampled" | "turn-moved-on" | "main-saved" | "drafted" | "unparsable" | "no-answer";
 
 /** The module's switch, and what ran: Active runs as Shadow while Engram is live (memory_active.ts effectiveMemoryMode). */
 export type MemoryMode = "shadow" | "active";
@@ -441,7 +442,7 @@ export function memoryShadowRecord(input: MemoryShadowRecordInput): MemoryShadow
     gate: input.gate,
     gateMs: input.gateMs,
     gateTokens: rowTokens(input.gateUsage),
-    forkSampled: input.fork !== null && input.fork !== "not-sampled",
+    forkSampled: input.fork !== null && input.fork !== "not-sampled" && input.fork !== "main-saved",
     fork: input.fork,
     forkMs: input.forkMs,
     forkTokens: rowTokens(input.forkUsage),

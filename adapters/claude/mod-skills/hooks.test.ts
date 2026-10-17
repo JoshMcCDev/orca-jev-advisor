@@ -6006,10 +6006,9 @@ test("E2 memory active, Engram live: a rejected, failed or timed-out mem_save wr
   }
 });
 
-test("E2 memory active, Engram live: when the main thread saved to Engram in the same turn, the fork's saves are dropped and nothing is written", async () => {
+test("E2 memory active, Engram live: when the main thread saved to Engram in the same turn, no fork is made and nothing is written", async () => {
   const { host } = engramActiveHost();
   host.modelQueue.push(GATE_UPDATE);
-  host.forkQueue.push(draftReply({ saves: [SPANISH_SAVE, PROJECT_SAVE] }));
   const before = memoryFolder(host);
   const { handlers, engine } = loadHooks(host);
   await startSessionWith(handlers, engine);
@@ -6018,12 +6017,14 @@ test("E2 memory active, Engram live: when the main thread saved to Engram in the
   await mainToolCall(handlers, engine, "mcp__engram__mem_save", { title: "Spanish with tú", type: "policy", content: "x" }, answer);
   await completeTurn(handlers, engine, { turnId: turnIdWhere(false) });
   await runTimers(host);
-  assert.equal(host.forkCalls.length, 1, "the draft is still made, so the drop is measured");
+  // 2026-10-13..16, owner's machine: 21 of 21 such forks wrote nothing (their saves dropped), ~4M cached tokens read for no memory.
+  assert.equal(host.forkCalls.length, 0, "a draft whose saves would be dropped is not made");
   assert.deepEqual(engramSaveCalls(host), [], "the module saves nothing to Engram");
   assert.deepEqual(spoolFiles(host), [], "nothing spooled");
   assert.deepEqual(memoryFolder(host), before, "nothing written");
   const row = memoryRows(host)[0];
-  assert.deepEqual(engramCounts(row), { ...NO_ENGRAM_COUNTS, droppedMainSaved: 2 });
+  assert.deepEqual([row?.gate, row?.fork, row?.forkSampled], ["update", "main-saved", false]);
+  assert.deepEqual(engramCounts(row), NO_ENGRAM_COUNTS);
   assert.deepEqual([row?.mainEngramSaves, row?.spooled, row?.written], [1, 0, 0]);
 });
 

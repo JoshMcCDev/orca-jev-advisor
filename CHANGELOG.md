@@ -2,6 +2,11 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.12.2
+
+- **Memory: no fork whose saves would all be dropped** (`adapters/claude/mod-skills/hooks/index.ts`, `memoryAfterTurn`). In Active with Engram usable, a turn whose main thread already called `mem_save` has every save of the fork's draft dropped (no double save, 0.10.0), but the fork still ran over the whole session to measure the drop. On the owner's machine (2026-10-13 to 16) 21 of 21 such forks wrote nothing, for about 4.1 M cached input tokens read. The fork is now not made; the row says `fork: main-saved` (`forkSampled: false`). The Haiku gate still runs, so the turn stays measured.
+- **Memory: a prompt a plugin submitted is not judged** (`src/core/memory_decide.ts`, `freeChecks`). Claude Code stores a prompt a plugin submits between turns as `The <plugin> plugin sent a message:` followed by its text (the CI watcher's notes are one). Those turns are a plugin's words, not the person's, and every one cost a Haiku gate call (67 CI notes in four days). They are now a free-check skip (`plugin-prompt`), with no Haiku call.
+
 ## 0.12.1
 
 - **Game mode: a game with its HUD off is no game for Jev** (`src/core/advisor_state.ts`, `parseOrcaGameMode`). Orca launches a game pane with `ORCA_GAME_HUD=0` when the person hid the game's band; orca-game then draws no band and passes every other plugin's `$.ui.status` through (its `isAbsorbing` is false). 0.12.0 still went silent there, so Jev showed nowhere. With `ORCA_GAME_HUD` `0` or `false`, Jev now draws its line and band as without the game and does not write `advisor`.

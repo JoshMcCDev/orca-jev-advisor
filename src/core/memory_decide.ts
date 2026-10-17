@@ -74,7 +74,7 @@ export function lastExchange(messages: readonly ExchangeMessage[]): string {
 // The free checks
 // ---------------------------------------------------------------------------
 
-export type MemorySkip = "subagent" | "not-answer" | "no-prompt" | "slash-command" | "own-marker";
+export type MemorySkip = "subagent" | "not-answer" | "no-prompt" | "slash-command" | "own-marker" | "plugin-prompt";
 
 export type FreeCheck = { readonly pass: true } | { readonly pass: false; readonly skip: MemorySkip };
 
@@ -89,6 +89,8 @@ export interface FreeCheckInput {
 const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(\s|$)/;
 const COMMAND_PLUMBING = /^<(command-name|command-message|local-command)/;
 const SYSTEM_TEXT = /^<(system-reminder|task-notification)/;
+/** How Claude Code stores a prompt a plugin submitted between turns (`$.prompt.submit`): a plugin's words, never the person's. */
+const PLUGIN_PROMPT = /^The [a-z0-9][a-z0-9._-]* plugin sent a message:\n/;
 
 /** The checks that cost no model call. Every turn that fails one makes no Haiku call and leaves no memory. */
 export function freeChecks(input: FreeCheckInput): FreeCheck {
@@ -98,6 +100,7 @@ export function freeChecks(input: FreeCheckInput): FreeCheck {
   if (prompt === "" || SYSTEM_TEXT.test(prompt)) return { pass: false, skip: "no-prompt" };
   if (SLASH_COMMAND.test(prompt) || COMMAND_PLUMBING.test(prompt)) return { pass: false, skip: "slash-command" };
   if (prompt.startsWith(MEMORY_MARKER)) return { pass: false, skip: "own-marker" };
+  if (PLUGIN_PROMPT.test(prompt)) return { pass: false, skip: "plugin-prompt" };
   return { pass: true };
 }
 

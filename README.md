@@ -16,6 +16,12 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.12.2
+
+- **Memory costs less, saves the same.** When your agent already saved a memory itself in a turn, the Memory module no longer re-reads the whole session to draft one it would throw away, and it no longer asks Haiku about messages a plugin posted (such as the CI watcher's "CI … success" notes).
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.12.1
 
 - **Jev shows again in a game pane with the game's band hidden.** When Orca's agent game runs with its band (HUD) turned off, Jev now draws its own status line and agents band, as it does everywhere else.
