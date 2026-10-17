@@ -503,12 +503,14 @@ test('Save never writes an empty policies list over stored ones unless the perso
   ]
   const { browser, page, errors } = await openPanel({ policies: stored })
   try {
+    await page.waitForFunction(() => document.getElementById('provider-section').getAttribute('data-state') === 'ready' && Object.keys(sections).filter((id) => id !== 'modules').every((id) => sections[id].loaded), null, { timeout: 40000 })
     await page.evaluate(() => document.querySelectorAll('#policies-list .entry input').forEach((input) => { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })) }))
     await page.click('#save-all')
     await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'config'), null, { timeout: 30000 })
     await page.waitForTimeout(500)
     assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies')), false, 'blanked rows are not a removal')
-    assert.match(await page.textContent('#save-said'), /left alone/)
+    assert.match(await page.textContent('#save-said'), /An empty list was not saved for: The policies/)
+    assert.doesNotMatch(await page.textContent('#save-said'), /had not been read yet/)
     await page.evaluate(() => document.querySelectorAll('#policies-list .entry-actions button').forEach((button) => button.click()))
     await page.click('#save-all')
     await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies'), null, { timeout: 30000 })
@@ -523,11 +525,13 @@ test('Save never writes an empty destination catalog over a stored one unless th
   const destinations = [{ id: 'dest', label: 'Dest', kind: 'webhook', url: 'https://example.com/hook' }]
   const { browser, page, errors } = await openPanel({ catalog: { destinations } })
   try {
+    await page.waitForFunction(() => document.getElementById('provider-section').getAttribute('data-state') === 'ready' && Object.keys(sections).filter((id) => id !== 'modules').every((id) => sections[id].loaded), null, { timeout: 40000 })
     await page.evaluate(() => document.querySelectorAll('#catalog-list .entry input').forEach((input) => { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })) }))
     await page.click('#save-all')
     await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'config'), null, { timeout: 30000 })
     await page.waitForTimeout(500)
     assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'catalog')), false, 'blanked rows are not a removal')
+    assert.match(await page.textContent('#save-said'), /An empty list was not saved for: The destination catalog/)
     await page.evaluate(() => document.querySelectorAll('#catalog-list .entry-actions button').forEach((button) => button.click()))
     await page.click('#save-all')
     await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'catalog'), null, { timeout: 30000 })
@@ -562,6 +566,83 @@ test('the model ladder and its switches are not saved while the stored catalog i
     assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'models')), false)
     assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'modelsConfig')), false)
     assert.match(await page.textContent('#models-ladder-said'), /left alone/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// 0.13.3 verifier findings: a read that started before another read or a
+// successful Save must never re-apply its older value.
+test('a read that started before a Save is dropped when it lands, and the next Save writes what was saved', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const stored = [
+    { id: 'keep_me', rule: 'Anything that touches a client gets confirmed.', kind: 'requires_human' },
+    { id: 'drop_me', rule: 'Never write directly on main.', kind: 'prohibits' }
+  ]
+  const { browser, page, errors } = await openPanel({ policies: stored })
+  try {
+    await page.waitForFunction(() => Object.keys(sections).filter((id) => id !== 'modules').every((id) => sections[id].loaded), null, { timeout: 40000 })
+    await page.evaluate(() => { window.__olderRead = beginSectionRead('policies') })
+    await page.evaluate(() => document.querySelectorAll('#policies-list .entry-actions button')[1].click())
+    await page.click('#save-all')
+    await page.waitForFunction(() => Array.isArray(window.__written.policies) && window.__written.policies.length === 1, null, { timeout: 30000 })
+    await page.waitForFunction(() => document.getElementById('save-said').textContent.length > 0 && !/Saving/.test(document.getElementById('save-said').textContent), null, { timeout: 15000 })
+    await page.evaluate((old) => { settleSection('policies', { ok: true, value: old }, window.__olderRead) }, stored)
+    assert.equal(await page.evaluate(() => document.querySelectorAll('#policies-list .entry').length), 1, 'the older value must not be painted over what was saved')
+    await page.evaluate(() => { delete window.__written.policies })
+    await page.click('#save-all')
+    await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies'), null, { timeout: 30000 })
+    assert.deepEqual(await page.evaluate(() => window.__written.policies.map((row) => row.id)), ['keep_me'])
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('a newer read of a section supersedes a retry chain that started earlier', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const stored = [{ id: 'keep_me', rule: 'Anything that touches a client gets confirmed.', kind: 'requires_human' }]
+  const { browser, page, errors } = await openPanel({ policies: stored })
+  try {
+    await page.waitForFunction(() => Object.keys(sections).filter((id) => id !== 'modules').every((id) => sections[id].loaded), null, { timeout: 40000 })
+    const older = await page.evaluate(() => beginSectionRead('policies'))
+    const newer = await page.evaluate(() => beginSectionRead('policies'))
+    assert.ok(newer > older)
+    await page.evaluate((old) => { settleSection('policies', { ok: true, value: [] }, old) }, older)
+    assert.equal(await page.evaluate(() => document.querySelectorAll('#policies-list .entry').length), 1, 'a result from a stale generation changes nothing')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('while a section is unloaded its controls are disabled, and enable with the stored rows once it loads', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const stored = [{ id: 'keep_me', rule: 'Anything that touches a client gets confirmed.', kind: 'requires_human' }]
+  const { browser, page, errors } = await openPanel({ policies: stored, teamOwners: ['acme'], __failReadsOf: { policies: 1, teamOwners: 1 } })
+  try {
+    assert.equal(await page.isDisabled('#add-policy-row'), true)
+    assert.equal(await page.isDisabled('#team-owners'), true)
+    assert.equal(await page.isDisabled('#add-catalog-row'), false, 'a section that loaded stays editable')
+    await page.waitForFunction(() => document.querySelectorAll('#policies-list .entry').length === 1, null, { timeout: 30000 })
+    assert.equal(await page.isDisabled('#add-policy-row'), false)
+    assert.equal(await page.isDisabled('#team-owners'), false)
+    assert.equal(await page.inputValue('#team-owners'), 'acme')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Save with nothing loaded says nothing was saved instead of "the rest was saved"', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const failing = Object.fromEntries(['config', 'catalog', 'policies', 'teamOwners', 'queueMode', 'explicitModels', 'decisionProvider'].map((key) => [key, 99]))
+  const { browser, page, errors } = await openPanel({ __failReadsOf: failing })
+  try {
+    await page.click('#save-all')
+    await page.waitForTimeout(1500)
+    assert.match(await page.textContent('#save-said'), /Nothing was saved/)
+    assert.doesNotMatch(await page.textContent('#save-said'), /Saved the rest/)
+    for (const key of ['config', 'catalog', 'policies', 'teamOwners', 'queueMode', 'explicitModels', 'decisionProvider']) {
+      assert.equal(await page.evaluate((k) => Object.prototype.hasOwnProperty.call(window.__written, k), key), false, key)
+    }
     assert.deepEqual(errors, [])
   } finally {
     await browser.close()

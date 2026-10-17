@@ -63,7 +63,7 @@ test('config.html: load() reads queueMode and fills the select', () => {
   const body = functionBody(configHtml, 'load')
   assert.match(body, /readStrict\('queueMode'\)/)
   assert.match(body, /settleSection\('queueMode'/)
-  assert.match(configHtml, /defineSection\('queueMode', 'queueMode', 'save\.whichQueueMode', .*fillQueueMode\)/)
+  assert.match(configHtml, /defineSection\('queueMode', 'queueMode', 'save\.whichQueueMode', .*fillQueueMode,/)
 })
 
 test('config.html: Save writes queueMode from the select, under its own label', () => {

@@ -63,7 +63,7 @@ test('config.html: load() reads explicitModels and fills the select', () => {
   const body = functionBody(configHtml, 'load')
   assert.match(body, /readStrict\('explicitModels'\)/)
   assert.match(body, /settleSection\('explicitModels'/)
-  assert.match(configHtml, /defineSection\('explicitModels', 'explicitModels', 'save\.whichExplicitModels', .*fillExplicitModels\)/)
+  assert.match(configHtml, /defineSection\('explicitModels', 'explicitModels', 'save\.whichExplicitModels', .*fillExplicitModels,/)
 })
 
 test('config.html: Save writes explicitModels from the select, under its own label', () => {

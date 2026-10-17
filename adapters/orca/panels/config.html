@@ -1122,6 +1122,7 @@
           'section.readFailed': 'No se pudo leer lo guardado de «{{which}}». No se sobrescribirá; cierra el panel y vuelve a abrirlo.',
           'section.notSent': 'No se envió «{{which}}»: lo guardado todavía no se ha leído, así que no se tocó. Espera a que cargue e inténtalo de nuevo.',
           'section.whichModelsConfig': 'Los interruptores del catálogo de modelos',
+          'save.nothingLoaded': 'No se guardó nada: todavía no ha cargado nada de lo guardado. Espera a que cargue e inténtalo de nuevo.',
           'save.notLoaded': 'Se guardó el resto, pero no se tocó lo que aún no se había leído: {{which}}. Vuelve a guardar cuando cargue.',
           'save.emptyRefused': 'No se guardó una lista vacía de: {{which}}. Si querías vaciarla, quita las filas con «Quitar» y guarda de nuevo.',
           'save.rejectedWhich': 'El host rechazó esto: {{which}}.',
@@ -1606,6 +1607,7 @@
           'section.readFailed': 'Could not read what is saved for "{{which}}". It will not be overwritten; close the panel and open it again.',
           'section.notSent': '"{{which}}" was not sent: what is saved has not been read yet, so it was left alone. Wait for it to load and try again.',
           'section.whichModelsConfig': 'The model catalog switches',
+          'save.nothingLoaded': 'Nothing was saved: nothing that is saved has loaded yet. Wait for it to load and try again.',
           'save.notLoaded': 'Saved the rest, but left alone what had not been read yet: {{which}}. Save again once it has loaded.',
           'save.emptyRefused': 'An empty list was not saved for: {{which}}. If you meant to empty it, remove the rows with "Remove" and save again.',
           'save.rejectedWhich': 'The host rejected this: {{which}}.',
@@ -1953,8 +1955,27 @@
       // were stored and whether the person removed rows in this panel session.
       var SECTION_READ_RETRIES = 3
       var sections = {}
-      function defineSection (id, key, whichKey, anchor, apply) {
-        sections[id] = { id: id, key: key, whichKey: whichKey, anchor: anchor, apply: apply, loaded: false, hintEl: null, state: 'ready', failedKey: 'section.readFailed', quietReading: false, count: 0, removed: false }
+      // `generation` orders the reads and writes of one section: every new read
+      // and every successful write bumps it, and a read result that carries an
+      // older one is dropped, so a slow retry can never put an older value back
+      // over what was just read or saved. `controls()` lists what edits it.
+      function defineSection (id, key, whichKey, anchor, apply, controls) {
+        sections[id] = { id: id, key: key, whichKey: whichKey, anchor: anchor, apply: apply, controls: controls || null, loaded: false, generation: 0, hintEl: null, state: 'ready', failedKey: 'section.readFailed', quietReading: false, count: 0, removed: false }
+      }
+      /** Call right before issuing a read of the section; pass the result to settleSection with it. */
+      function beginSectionRead (id) { return ++sections[id].generation }
+      /** A section's controls are editable only while its stored value is loaded: a late read must not overwrite an edit. */
+      function lockSection (section) {
+        if (!section.controls) return
+        section.controls().forEach(function (control) {
+          if (!section.loaded) {
+            // A control that was already disabled (a row's own move-up, say) is not ours to re-enable.
+            if (!control.disabled) { control.disabled = true; control.setAttribute('data-section-locked', '') }
+          } else if (control.hasAttribute('data-section-locked')) {
+            control.disabled = false
+            control.removeAttribute('data-section-locked')
+          }
+        })
       }
       function paintSectionHint (section) {
         if (!section.hintEl) {
@@ -1978,6 +1999,7 @@
       function markSectionLoaded (section, value) {
         section.apply(value)
         section.loaded = true
+        lockSection(section)
         setSectionHint(section.id, 'ready')
       }
       /**
@@ -1986,17 +2008,21 @@
        * otherwise the section stays unloaded, says it is reading, and is read
        * again on the next windows, with a failed hint after the last one.
        */
-      function settleSection (id, result) {
+      function settleSection (id, result, generation) {
         var section = sections[id]
+        if (generation !== section.generation) return Promise.resolve()
         if (result.ok) { markSectionLoaded(section, result.value); return Promise.resolve() }
         section.loaded = false
+        lockSection(section)
         setSectionHint(id, 'reading')
         return pause(CUPO.ventanaMs).then(function () {
+          if (generation !== section.generation) return null
           return readStrictRetrying(section.key, SECTION_READ_RETRIES - 1)
         }).then(function (retry) {
+          if (retry === null || generation !== section.generation) return
           if (retry.ok) markSectionLoaded(section, retry.value)
           else setSectionHint(id, 'failed')
-        }).catch(function () { setSectionHint(id, 'failed') })
+        }).catch(function () { if (generation === section.generation) setSectionHint(id, 'failed') })
       }
       /** For the buttons that send one whole section: says so and returns true when it was not read. */
       function refuseUnreadSection (id, saidNode) {
@@ -2949,10 +2975,11 @@
           sendCatalogProposalAcceptRequest(accepted).then(function (result) {
             var added = (result && typeof result.added === 'number') ? result.added : 0
             said(proposalsSaidEl, t('catalog.proposalsAdded', { count: String(added) }))
-            return Promise.all([readStrict('catalog'), read(CATALOG_PROPOSALS_STATUS_KEY, false)])
+            var generation = beginSectionRead('catalog')
+            return Promise.all([readStrict('catalog'), read(CATALOG_PROPOSALS_STATUS_KEY, false)]).then(function (results) { return [results[0], results[1], generation] })
           }).then(function (results) {
             // A refused re-read leaves the rows as they were but no longer proves they match storage: unloaded until read again.
-            if (!results[0].ok || results[0].value) settleSection('catalog', results[0])
+            if (!results[0].ok || results[0].value) settleSection('catalog', results[0], results[2])
             renderCatalogProposals(results[1])
           }).catch(function (error) {
             said(proposalsSaidEl, errorText(error), true)
@@ -3325,9 +3352,10 @@
           if (replaced > 0) said(policyImportSaidEl, t('policies.importReplaced', { replaced: String(replaced), added: String(added) }))
           else said(policyImportSaidEl, added > 0 ? t('policies.importDone', { added: String(added), skipped: String(skipped) }) : t('policies.importNone'))
           renderPolicySeedDiffs(result && result.differing)
-          return readStrict('policies')
-        }).then(function (result) {
-          if (!result.ok || result.value) settleSection('policies', result)
+          var generation = beginSectionRead('policies')
+          return readStrict('policies').then(function (result) { return { result: result, generation: generation } })
+        }).then(function (outcome) {
+          if (!outcome.result.ok || outcome.result.value) settleSection('policies', outcome.result, outcome.generation)
         }).catch(function (error) {
           said(policyImportSaidEl, errorText(error), true)
         })
@@ -4949,28 +4977,34 @@
       // ---------- stored sections the page writes back (0.13.3) ------------------
 
       var lastGateDefaults = null
+      // The sections load() reads (the models sections are read by their own script).
+      var MAIN_PANEL_SECTIONS = ['config', 'catalog', 'policies', 'teamOwners', 'queueMode', 'explicitModels', 'modSkills', 'denyTier']
+
+      function groupButtons (id) { return Array.from(el(id).querySelectorAll('button')) }
+      function listControls (listEl) { return Array.from(listEl.querySelectorAll('input, select, textarea, button')) }
       defineSection('config', 'config', 'save.whichConfig',
         function () { return el('thresholds-section').querySelector('.row') },
-        function (value) { currentConfig = value; fillThresholds(value, lastGateDefaults) })
+        function (value) { currentConfig = value; fillThresholds(value, lastGateDefaults) },
+        function () { return [el('logMaxEntries')] })
       defineSection('catalog', 'catalog', 'save.whichCatalog', function () { return catalogListEl }, function (value) {
         var rows = (value && value.destinations) || []
         catalogListEl.innerHTML = ''
         rows.forEach(addCatalogRow)
         sections.catalog.count = rows.length
         sections.catalog.removed = false
-      })
+      }, function () { return [el('add-catalog-row')].concat(listControls(catalogListEl)) })
       defineSection('policies', 'policies', 'save.whichPolicies', function () { return policiesListEl }, function (value) {
         var rows = Array.isArray(value) ? value : []
         policiesListEl.innerHTML = ''
         rows.forEach(addPolicyRow)
         sections.policies.count = rows.length
         sections.policies.removed = false
-      })
-      defineSection('teamOwners', 'teamOwners', 'save.whichTeamOwners', function () { return el('team-owners').previousElementSibling }, fillTeamOwners)
-      defineSection('queueMode', 'queueMode', 'save.whichQueueMode', function () { return el('queue-mode-label') }, fillQueueMode)
-      defineSection('explicitModels', 'explicitModels', 'save.whichExplicitModels', function () { return el('explicit-models-label') }, fillExplicitModels)
-      defineSection('modSkills', MOD_SKILLS_STATUS_KEY, 'modSkills.heading', function () { return el('save-mod-skills').parentNode }, fillModSkillsStatus)
-      defineSection('denyTier', DENY_TIER_STATUS_KEY, 'denyTier.heading', function () { return el('deny-tier-rows') }, fillDenyTierStatus)
+      }, function () { return [el('add-policy-row'), el('import-policy-seeds')].concat(listControls(policiesListEl)) })
+      defineSection('teamOwners', 'teamOwners', 'save.whichTeamOwners', function () { return el('team-owners').previousElementSibling }, fillTeamOwners, function () { return [el('team-owners')] })
+      defineSection('queueMode', 'queueMode', 'save.whichQueueMode', function () { return el('queue-mode-label') }, fillQueueMode, function () { return groupButtons('queue-mode') })
+      defineSection('explicitModels', 'explicitModels', 'save.whichExplicitModels', function () { return el('explicit-models-label') }, fillExplicitModels, function () { return groupButtons('explicit-models') })
+      defineSection('modSkills', MOD_SKILLS_STATUS_KEY, 'modSkills.heading', function () { return el('save-mod-skills').parentNode }, fillModSkillsStatus, function () { return [el('mod-skills-active'), el('mod-skills-active-tools')] })
+      defineSection('denyTier', DENY_TIER_STATUS_KEY, 'denyTier.heading', function () { return el('deny-tier-rows') }, fillDenyTierStatus, function () { return Array.from(el('deny-tier-rows').querySelectorAll('input')) })
       // Not written from the page, only shown: the hint says when the state could not be read.
       defineSection('modules', CLAUDE_INTEGRATION_STATUS_KEY, null, function () { return el('modules-rows') }, function () {})
       sections.modules.failedKey = 'modules.readFailed'
@@ -4991,8 +5025,14 @@
         if (length === 0 && section.count > 0 && !section.removed) { emptyRefused.push(label); return }
         namedWrites.push({
           label: label,
-          promise: write(section.key, value),
-          afterSaved: length >= 0 ? function () { section.count = length; section.removed = false } : null
+          promise: write(section.key, value).then(function (result) {
+            // A read that started before this write must not put an older value back.
+            if (result && result.ok) section.generation += 1
+            return result
+          }),
+          afterSaved: function () {
+            if (length >= 0) { section.count = length; section.removed = false }
+          }
         })
       }
 
@@ -5037,6 +5077,7 @@
         // overwrite the stored choice with a default.
         if (providerSettingsLoaded) namedWrites.push({ label: t('save.whichProvider'), promise: write('decisionProvider', readProviderSettings()) })
         else notLoaded.push(t('save.whichProvider'))
+        if (namedWrites.length === 0) { said(saveSaidEl, t('save.nothingLoaded'), true); return }
         Promise.all(namedWrites.map(function (w) { return w.promise })).then(function (results) {
           var failedLabels = []
           results.forEach(function (result, index) {
@@ -5057,11 +5098,14 @@
       })
 
       function load () {
+        var generations = {}
         fillThresholds({})
         showProviderUnread('loading')
         fillModSkillsStatus(null)
         renderModelRouterRows(null)
         fillDenyTierStatus(null)
+        // Nothing is loaded yet: the controls stay locked until each section's stored value arrives.
+        Object.keys(sections).forEach(function (id) { lockSection(sections[id]) })
         renderPolicySeedNoticeAndDiffs(null)
         renderCatalogProposals(null)
         // Orca's own language decides, not a preference stored here: the
@@ -5076,6 +5120,8 @@
           applyStaticI18n()
           renderSecretStatus(null)
           renderClaudeIntegrationStatus(null)
+          // Each section's generation is taken before its read is issued (see beginSectionRead).
+          MAIN_PANEL_SECTIONS.forEach(function (id) { generations[id] = beginSectionRead(id) })
           var firstBatch = Promise.all([
             readStrict('config'),
             readStrict('catalog'),
@@ -5101,17 +5147,17 @@
         }).then(function (results) {
           lastGateDefaults = results[3]
           // A section the host refused stays unloaded and is read again on later windows (see settleSection).
-          settleSection('config', results[0])
-          settleSection('catalog', results[1])
-          settleSection('policies', results[2])
-          settleSection('modSkills', results[4])
-          settleSection('denyTier', results[5])
+          settleSection('config', results[0], generations.config)
+          settleSection('catalog', results[1], generations.catalog)
+          settleSection('policies', results[2], generations.policies)
+          settleSection('modSkills', results[4], generations.modSkills)
+          settleSection('denyTier', results[5], generations.denyTier)
           renderPolicySeedNoticeAndDiffs(results[6])
           renderCatalogProposals(results[7])
           renderModelRouterRows(results[10])
-          settleSection('teamOwners', results[11])
-          settleSection('queueMode', results[12])
-          settleSection('explicitModels', results[13])
+          settleSection('teamOwners', results[11], generations.teamOwners)
+          settleSection('queueMode', results[12], generations.queueMode)
+          settleSection('explicitModels', results[13], generations.explicitModels)
           // 0.6.2 E7: what storage holds may predate a mode set from a
           // terminal; ask the worker for a fresh read and redraw with it.
           refreshModelRouterStatus().then(function (fresh) { if (!modelRouterEdited) renderModelRouterRows(fresh) }).catch(function () {})
@@ -5510,6 +5556,7 @@
         said(saidEl, t('models.savingLadder'))
         write(MODELS_KEY, modelsLadder.map(modelsBuildRow)).then(function (result) {
           if (!result || !result.ok) throw shownError(t('common.hostRejectedWrite'))
+          sections.modelsLadder.generation += 1
           writeBackground(MODELS_MIRROR_REQUEST_KEY, new Date().toISOString())
           modelsDirty = false
           said(saidEl, t('models.savedLadder'))
@@ -5564,6 +5611,7 @@
         said(saidEl, t('models.savingConfig'))
         write(MODELS_CONFIG_KEY, { active: el('models-active').checked, readyOverride: el('models-ready-override').checked }).then(function (result) {
           if (!result || !result.ok) throw shownError(t('common.hostRejectedWrite'))
+          sections.modelsConfig.generation += 1
           writeBackground(MODELS_MIRROR_REQUEST_KEY, new Date().toISOString())
           said(saidEl, t('models.savedConfig'))
         }).catch(function (error) {
@@ -5672,9 +5720,10 @@
         modelsSetSeedNoticeButtonsDisabled(true)
         modelsSendSeedRequest('apply', accepted).then(function (result) {
           said(saidEl, t('models.seedNoticeApplied', { replaced: String(result.replaced || 0), added: String(result.added || 0) }))
-          return Promise.all([readStrict(MODELS_KEY), modelsLoadSeedNoticeStatus()])
+          var generation = beginSectionRead('modelsLadder')
+          return Promise.all([readStrict(MODELS_KEY), modelsLoadSeedNoticeStatus()]).then(function (results) { return [results[0], generation] })
         }).then(function (results) {
-          settleSection('modelsLadder', results[0])
+          settleSection('modelsLadder', results[0], results[1])
         }).catch(function (error) {
           said(saidEl, errorText(error), true)
         }).then(function () {
@@ -5702,8 +5751,9 @@
         // clears the flag Apply was refusing on.
         var saidEl = el('models-ladder-said')
         modelsSetSeedNoticeDirtyVisible(false)
+        var generation = beginSectionRead('modelsLadder')
         readStrict(MODELS_KEY).then(function (result) {
-          settleSection('modelsLadder', result)
+          settleSection('modelsLadder', result, generation)
           if (result.ok) said(saidEl, t('models.seedNoticeEditsDiscarded'))
         }).catch(function (error) {
           said(saidEl, errorText(error), true)
@@ -5751,17 +5801,20 @@
         modelsLadder = modelsSplitLadder(modelsParseCatalog(value))
         modelsDirty = false
         modelsRenderLadder()
-      })
+      }, function () { return [el('models-add-row')].concat(listControls(modelsLadderListEl)) })
       defineSection('modelsConfig', MODELS_CONFIG_KEY, 'section.whichModelsConfig', function () { return el('models-save-config').parentNode }, function (value) {
         el('models-active').checked = !!(value && value.active === true)
         el('models-ready-override').checked = !!(value && value.readyOverride === true)
         modelsRenderReadyOverrideHint()
-      })
+      }, function () { return [el('models-active'), el('models-ready-override')] })
 
       function modelsLoad () {
         modelsRenderSeedNotice(null)
         modelsRenderMeasurements(null)
         modelsSetSeedNoticeDirtyVisible(false)
+        var generations = { modelsLadder: beginSectionRead('modelsLadder'), modelsConfig: beginSectionRead('modelsConfig') }
+        lockSection(sections.modelsLadder)
+        lockSection(sections.modelsConfig)
         return Promise.all([
           readStrict(MODELS_KEY),
           readStrict(MODELS_CONFIG_KEY),
@@ -5773,8 +5826,8 @@
           // A never-seeded or freshly-emptied catalog reads as [], same as
           // FRESH: every subagent call passes through unchanged, which
           // modelsRenderLadder's own empty-state hint says in words.
-          settleSection('modelsLadder', results[0])
-          settleSection('modelsConfig', results[1])
+          settleSection('modelsLadder', results[0], generations.modelsLadder)
+          settleSection('modelsConfig', results[1], generations.modelsConfig)
           modelsRenderSeedNotice(results[2])
           modelsRenderMeasurements(results[3])
           modelsRenderActiveHint(results[3])

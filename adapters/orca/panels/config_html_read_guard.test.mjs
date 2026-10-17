@@ -57,7 +57,7 @@ test('the other whole-section senders check their section was read first', () =>
 })
 
 test('the unread-section strings exist in both languages, and Spanish uses tú', () => {
-  const keys = ['section.reading', 'section.readFailed', 'save.notLoaded', 'save.emptyRefused', 'section.notSent', 'modules.readFailed', 'modules.install.readFailed']
+  const keys = ['section.reading', 'section.readFailed', 'save.notLoaded', 'save.emptyRefused', 'section.notSent', 'save.nothingLoaded', 'modules.readFailed', 'modules.install.readFailed']
   for (const locale of ['en', 'es']) {
     const block = catalogBlock(locale)
     for (const key of keys) assert.ok(block.includes(`'${key}':`), `${locale} is missing ${key}`)
@@ -74,4 +74,17 @@ test('a status read that failed is retried and the modules keep saying they are 
   assert.match(loader, /readStrict\(CLAUDE_INTEGRATION_STATUS_KEY\)/)
   assert.match(loader, /retries - 1/)
   assert.match(loader, /integrationReadGeneration/)
+})
+
+test('a read result from an older generation is dropped, and a write or a newer read bumps the generation', () => {
+  const settle = extractFunction(configHtml, 'settleSection')
+  assert.match(settle, /generation !== section\.generation/)
+  assert.match(extractFunction(configHtml, 'beginSectionRead'), /\+\+sections\[id\]\.generation/)
+  assert.match(extractFunction(configHtml, 'planSectionWrite'), /section\.generation \+= 1/)
+})
+
+test('an unloaded section locks its controls, and Save with nothing loaded says so', () => {
+  assert.match(extractFunction(configHtml, 'lockSection'), /data-section-locked/)
+  assert.match(extractFunction(configHtml, 'markSectionLoaded'), /lockSection\(section\)/)
+  assert.match(configHtml, /namedWrites\.length === 0\) \{ said\(saveSaidEl, t\('save\.nothingLoaded'\), true\); return \}/)
 })
