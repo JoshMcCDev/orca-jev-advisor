@@ -55,6 +55,12 @@ test("find with a mutating action is never safe, only plain search/list is", () 
   assert.equal(isObviouslySafeCommand("find . -delete"), false);
   assert.equal(isObviouslySafeCommand("find . -name '*.tmp' -delete"), false);
   assert.equal(isObviouslySafeCommand("find . -exec rm {} \\;"), false);
+  // -fls writes its listing to the file it names, like -fprint.
+  assert.equal(isObviouslySafeCommand("find . -fls out.txt"), false);
+  // rg --pre runs the program it names on every file it searches.
+  assert.equal(isObviouslySafeCommand("rg --pre ./run.sh foo"), false);
+  assert.equal(isObviouslySafeCommand("rg --pre=./run.sh foo"), false);
+  assert.equal(isObviouslySafeCommand("rg foo src"), true);
   assert.equal(isObviouslySafeCommand("find . -type f"), true);
 });
 
@@ -403,4 +409,65 @@ test("0.6.28 T3: writing forms of the same tools stay unsafe", () => {
   ]) {
     assert.equal(isObviouslySafeCommand(command), false, command);
   }
+});
+
+// odd/tasks/branch-reach-places.md SF-2: find, sort, uniq and rg were
+// obviously safe in forms where the text does not say what they get: an
+// option spelled with quotes, a variable, a substitution, a brace, a GNU
+// long-option prefix, `sort -T`, or a uniq output operand.
+test("SF-2: find, sort, uniq and rg whose arguments cannot be read are never obviously safe", () => {
+  for (const command of [
+    "find . -de''lete",
+    "find . $ACT",
+    "find . $(printf -- -delete)",
+    "find . -{delete,print}",
+    "find . '-delete'",
+    "sort --o=src/x f",
+    "sort --out src/x f",
+    "sort --outp=src/x f",
+    "sort $OPTS f",
+    "sort -T src/tmp f",
+    "sort --temp=src/tmp f",
+    "sort --compress=gzip f",
+    "uniq - src/out",
+    "uniq -c in -",
+    "uniq in out",
+    "rg x '--pre' cat",
+    "rg --pr cat x",
+    "rg --pre-glob '*.gz' --pre cat x",
+    'rg "$PAT" src',
+  ]) {
+    assert.equal(isObviouslySafeCommand(command), false, command);
+  }
+});
+
+test("SF-2: the common forms stay obviously safe", () => {
+  for (const command of ["grep 'foo bar' file", "rg 'x' src", "rg --pretty x src", "find . -name '*.ts'", "sort -u f", "sort -k2 -t, f", "uniq f", "uniq -c f", "rg -n 'a$' src"]) {
+    assert.equal(isObviouslySafeCommand(command), true, command);
+  }
+});
+
+test("SF-2: an unquoted or double-quoted $ in a sed -n script is the shell's variable, never obviously safe", () => {
+  assert.equal(isObviouslySafeCommand("sed -n $p f"), false);
+  assert.equal(isObviouslySafeCommand('sed -n "$p" f'), false);
+  assert.equal(isObviouslySafeCommand("sed -n '$p' f"), true);
+  assert.equal(isObviouslySafeCommand("sed -n 1,5p f"), true);
+  assert.equal(isObviouslySafeCommand("sed -n 1p $F"), false);
+});
+
+test("N-1: a sed or awk operand that the shell may expand into an option is never obviously safe", () => {
+  // GNU sed reads a `-i` that reaches it after the script as an option and edits in place.
+  for (const command of [
+    "sed -n 1p f \\-i",
+    "sed -n 1p {-i,f}",
+    "sed -n 1p *",
+    "sed -n '1,5p' src/*.ts",
+    "sed -n 1p f?",
+    "sed -n 1p [-]i",
+    "awk '{print}' \\-i",
+  ]) {
+    assert.equal(isObviouslySafeCommand(command), false, command);
+  }
+  assert.equal(isObviouslySafeCommand("sed -n '1,40p' src/core/x.ts"), true);
+  assert.equal(isObviouslySafeCommand("awk '{print $1}' notes.md"), true);
 });
