@@ -92,6 +92,53 @@ test("T1: recent keeps the last ten decisions in log order, readable fields only
   assert.equal(totals.recent[0]?.at, "2026-09-02T11:00:00.000Z");
 });
 
+test("C3: a recent decision keeps who answered it, so the board can name Clef", () => {
+  const totals = addGateDecisions(emptyGateDecisionTotals(), batch([
+    record({ at: "2026-10-17T10:00:00.000Z", source: "jev", verdict: "advise", provider: "clef" }),
+    record({ at: "2026-10-17T10:01:00.000Z", source: "jev", verdict: "deny", provider: "jev", escalation: "policy" }),
+    record({ at: "2026-10-17T10:02:00.000Z", source: "jev", verdict: "allow" }),
+  ]));
+  assert.equal(totals.recent[0]?.provider, "clef");
+  assert.equal(totals.recent[1]?.provider, "jev");
+  // A Jev-only row carries no provider, and its recent entry carries none either.
+  assert.equal("provider" in (totals.recent[2] ?? {}), false);
+  assert.deepEqual(parseGateDecisionTotals(JSON.parse(JSON.stringify(totals))), totals);
+  const good = JSON.parse(JSON.stringify(totals));
+  assert.deepEqual(parseGateDecisionTotals({ ...good, recent: [{ ...good.recent[0], provider: "gpt" }] })?.recent, []);
+});
+
+test("SF2: Jev's last answer and its failure streak count only Jev's own rows", () => {
+  const totals = addGateDecisions(emptyGateDecisionTotals(), batch([
+    record({ at: "2026-10-17T10:00:00.000Z", source: "jev", verdict: "allow" }),
+    record({ at: "2026-10-17T10:05:00.000Z", source: "none", verdict: "allow", provider: "jev" }),
+    record({ at: "2026-10-17T10:10:00.000Z", source: "jev", verdict: "allow", provider: "clef" }),
+    record({ at: "2026-10-17T10:15:00.000Z", source: "none", verdict: "allow", provider: "clef" }),
+  ]));
+  assert.deepEqual(gateHealthOf(totals), { lastJevAt: "2026-10-17T10:00:00.000Z", consecutiveFailures: 1, lastFailureAt: "2026-10-17T10:05:00.000Z" });
+});
+
+test("SF1: totals carry Clef's latencies apart, and a totals file written before them still reads", () => {
+  const totals = addGateDecisions(emptyGateDecisionTotals(), batch([
+    record({ at: "2026-10-17T10:00:00.000Z", source: "jev", verdict: "allow", latencyMs: 900 }),
+    record({ at: "2026-10-17T10:01:00.000Z", source: "jev", verdict: "allow", latencyMs: 250, provider: "clef" }),
+  ]));
+  assert.deepEqual(totals.all.jevLatencies, [[900, 1]]);
+  assert.deepEqual(totals.all.clefLatencies, [[250, 1]]);
+  assert.deepEqual(parseGateDecisionTotals(JSON.parse(JSON.stringify(totals))), totals);
+  const older = JSON.parse(JSON.stringify(totals));
+  delete older.all.clefLatencies;
+  assert.deepEqual(parseGateDecisionTotals(older)?.all.clefLatencies, []);
+});
+
+test("nit: one recent row with an unknown provider is dropped, never the whole list", () => {
+  const good = JSON.parse(JSON.stringify(addGateDecisions(emptyGateDecisionTotals(), batch(history()))));
+  const recent = [...good.recent];
+  recent[0] = { ...recent[0], provider: "gpt" };
+  const parsed = parseGateDecisionTotals({ ...good, recent });
+  assert.ok(parsed !== null);
+  assert.equal(parsed.recent.length, good.recent.length - 1);
+});
+
 test("T1: totals survive a JSON round trip through the parser unchanged", () => {
   const totals: GateDecisionTotals = {
     ...addGateDecisions(emptyGateDecisionTotals(), batch(history(), { corruptLines: 2, malformedRows: 1, jevRecordsForAb: 3 })),
