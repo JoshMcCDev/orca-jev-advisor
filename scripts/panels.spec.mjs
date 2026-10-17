@@ -273,6 +273,14 @@ function hostBridge (storage) {
         // Multi-provider P6: the worker answers the connection test with the id
         // the panel minted; `storage.__clefTestResult` overrides ok/reason.
         value = { ok: true, reason: 'ok', status: null, latencyMs: 412, model: window.__written.clefTestRequest.model, ...storage.__clefTestResult, id: window.__written.clefTestRequest.id }
+      } else if (key === 'secretResult' && window.__written.secretRequest) {
+        // 0.13.2: the worker answers a secret request with the id the panel minted.
+        value = { ok: true, ...storage.__secretResult, id: window.__written.secretRequest.id }
+      } else if (key === 'secretStatus' && window.__written.secretRequest && Array.isArray(storage.__secretStatusAfterSave)) {
+        // 0.13.2: the nth read of the status after a save gets the nth entry (null: not republished yet).
+        window.__secretStatusReadsAfterSave = (window.__secretStatusReadsAfterSave ?? 0) + 1
+        const sequence = storage.__secretStatusAfterSave
+        value = sequence[Math.min(window.__secretStatusReadsAfterSave, sequence.length) - 1]
       } else if (key === 'modelsSeedResult' && window.__written.modelsSeedRequest) {
         // odd/tasks/model-reclassification.md T7: models-worker.mjs answers
         // one request/result channel for both apply and dismiss (unlike the
@@ -286,14 +294,36 @@ function hostBridge (storage) {
       }
     }
     if (msg.action === 'storage.set') window.__written[msg.params?.key] = msg.params?.value
+    const reply = { type: 'orca-panel-action-result', requestId: msg.requestId, ok: true, value: { value } }
+    if (msg.action === 'storage.get') {
+      const key = msg.params?.key
+      // 0.13.2: `storage.__failReadsOf` ({ key: n }) answers the first n reads
+      // of a key as a host failure; `storage.__holdReadsOf` ([key]) keeps the
+      // answers back until the test calls `window.__releaseHeld()` (a read
+      // still waiting on Orca's throttle window).
+      window.__failedReads = window.__failedReads ?? {}
+      const failFor = storage.__failReadsOf?.[key] ?? 0
+      if ((window.__failedReads[key] ?? 0) < failFor) {
+        window.__failedReads[key] = (window.__failedReads[key] ?? 0) + 1
+        window.postMessage({ type: 'orca-panel-action-result', requestId: msg.requestId, ok: false, errorCode: 'storage_failed' }, '*')
+        return
+      }
+      if (Array.isArray(storage.__holdReadsOf) && storage.__holdReadsOf.includes(key) && !window.__heldReleased) {
+        window.__held = window.__held ?? []
+        window.__held.push(reply)
+        window.__releaseHeld = () => {
+          window.__heldReleased = true
+          for (const held of window.__held) window.postMessage(held, '*')
+          window.__held = []
+        }
+        return
+      }
+    }
     if (msg.action === 'storage.set' && msg.params?.key === 'modelRouterStatusRefreshRequest') {
       window.__routerRefreshCount = (window.__routerRefreshCount ?? 0) + 1
       window.__routerRefreshAt = Date.now()
     }
-    window.postMessage(
-      { type: 'orca-panel-action-result', requestId: msg.requestId, ok: true, value: { value } },
-      '*'
-    )
+    window.postMessage(reply, '*')
   })
 }
 
@@ -882,11 +912,96 @@ test('the provider section shows the stored mode and model, masks the credential
 })
 
 test('an install that never chose a provider shows Jev only and clef, and no credentials', { skip: chromium ? false : 'playwright is not installed' }, async () => {
-  const { browser, page, errors } = await openPanel({})
+  const { browser, page, errors } = await openPanel({
+    secretStatus: { configured: false, endsWith: null, cloudflare: { accountId: { configured: false, endsWith: null }, token: { configured: false, endsWith: null } }, checkedAt: new Date().toISOString() }
+  })
   try {
+    await page.waitForFunction(() => document.getElementById('provider-section').getAttribute('data-state') === 'ready', null, { timeout: 15000 })
     assert.deepEqual(await pressedValues(page, '#provider-mode'), ['jev'])
     assert.deepEqual(await pressedValues(page, '#clef-model'), ['clef'])
     assert.equal((await page.textContent('#cloudflare-status')).trim(), 'No Cloudflare credentials.')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// 0.13.2: the stored choice arrives a throttle window or more after the first
+// paint. Until then the section shows no choice at all -- not Jev as if it
+// were stored -- and Save leaves decisionProvider alone.
+test('while the stored provider is unread no mode is pressed, the section says it is reading, and Save does not write it', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ decisionProvider: { mode: 'both', clefModel: 'clef' }, __holdReadsOf: ['decisionProvider'] })
+  try {
+    assert.deepEqual(await pressedValues(page, '#provider-mode'), [])
+    assert.deepEqual(await pressedValues(page, '#clef-model'), [])
+    assert.equal(await page.getAttribute('#provider-section', 'data-state'), 'loading')
+    assert.equal((await page.textContent('#provider-reading')).trim(), 'Reading the saved provider…')
+    await page.click('#save-all')
+    await page.waitForTimeout(SETTLE_MS)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'decisionProvider')), false)
+    await page.evaluate(() => window.__releaseHeld())
+    await page.waitForFunction(() => document.querySelector('#provider-mode button[aria-pressed="true"]')?.dataset.value === 'both', null, { timeout: 15000 })
+    assert.equal(await page.isVisible('#provider-reading'), false)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('a failed first read of the provider is retried and then shows the stored Both, never Jev', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ decisionProvider: { mode: 'both', clefModel: 'clef' }, __failReadsOf: { decisionProvider: 1 } })
+  try {
+    await page.waitForFunction(() => window.__failedReads?.decisionProvider === 1, null, { timeout: 15000 })
+    assert.deepEqual(await pressedValues(page, '#provider-mode'), [])
+    await page.waitForFunction(() => document.querySelector('#provider-mode button[aria-pressed="true"]')?.dataset.value === 'both', null, { timeout: 25000 })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('a provider that cannot be read at all says so and still shows no mode', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ decisionProvider: { mode: 'both', clefModel: 'clef' }, __failReadsOf: { decisionProvider: 99 } }, 'es')
+  try {
+    await page.waitForFunction(() => document.getElementById('provider-section').getAttribute('data-state') === 'failed', null, { timeout: 50000 })
+    assert.equal(await page.evaluate(() => window.__failedReads.decisionProvider), 4)
+    assert.deepEqual(await pressedValues(page, '#provider-mode'), [])
+    assert.match(await page.textContent('#provider-reading'), /^No se pudo leer/)
+    await page.click('#save-all')
+    await page.waitForTimeout(SETTLE_MS)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'decisionProvider')), false)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('the Cloudflare status says checking until the secret status is read, never "no credentials"', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ __holdReadsOf: ['secretStatus'] }, 'es')
+  try {
+    assert.equal((await page.textContent('#cloudflare-status')).trim(), 'Comprobando…')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('after Save credentials the inputs are cleared and the status shows the masked saved values, re-reading a null status once more', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const configured = { configured: true, endsWith: 'abcd', cloudflare: { accountId: { configured: true, endsWith: 'cf2d' }, token: { configured: true, endsWith: 'b428' } }, checkedAt: new Date().toISOString() }
+  const { browser, page, errors } = await openPanel({
+    workerHeartbeat: { at: new Date().toISOString() },
+    secretStatus: { configured: true, endsWith: 'abcd', cloudflare: { accountId: { configured: false, endsWith: null }, token: { configured: false, endsWith: null } }, checkedAt: new Date().toISOString() },
+    __secretStatusAfterSave: [null, configured]
+  })
+  try {
+    await page.fill('#cloudflare-account-id', 'account-0000cf2d')
+    await page.fill('#cloudflare-token', 'token-0000b428')
+    await page.click('#save-cloudflare')
+    await page.waitForFunction(() => /…cf2d/.test(document.getElementById('cloudflare-status').textContent), null, { timeout: 30000 })
+    assert.match(await page.textContent('#cloudflare-status'), /…b428/)
+    assert.equal(await page.inputValue('#cloudflare-account-id'), '')
+    assert.equal(await page.inputValue('#cloudflare-token'), '')
+    assert.ok(await page.evaluate(() => window.__secretStatusReadsAfterSave >= 2), 'a null status after the save was read again')
     assert.deepEqual(errors, [])
   } finally {
     await browser.close()

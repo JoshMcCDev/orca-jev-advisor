@@ -30,12 +30,13 @@ const KEYS = [
   'provider.tokenLabel', 'provider.save', 'provider.clear', 'provider.test', 'provider.testing', 'provider.status',
   'provider.notConfigured', 'provider.saved', 'provider.cleared', 'provider.needBoth', 'provider.test.ok',
   'provider.test.rejected', 'provider.test.no-credentials', 'provider.test.allowance', 'provider.test.unreachable',
-  'provider.test.failed', 'provider.test.expired', 'provider.test.timeout', 'save.whichProvider'
+  'provider.test.failed', 'provider.test.expired', 'provider.test.timeout', 'save.whichProvider',
+  'provider.reading', 'provider.readFailed'
 ]
 
 test('the section sits on the General tab with the three modes, the three models and two masked inputs', () => {
   const general = generalTab()
-  assert.match(general, /<section id="provider-section">/)
+  assert.match(general, /<section id="provider-section" data-state="loading">/)
   assert.match(general, /<div id="provider-mode" class="mode-buttons" role="group" aria-labelledby="provider-mode-label">/)
   for (const mode of ['jev', 'both', 'clef']) assert.match(general, new RegExp(`<button type="button" data-value="${mode}"`))
   assert.match(general, /<div id="clef-model" class="mode-buttons" role="group" aria-labelledby="clef-model-label">/)
@@ -63,7 +64,25 @@ test('Save writes decisionProvider from the two groups, Jev and clef by default'
   const read = extractFunction(configHtml, 'readProviderSettings')
   assert.match(read, /pressedValue\(providerModeEl, 'jev'\)/)
   assert.match(read, /pressedValue\(clefModelEl, 'clef'\)/)
-  assert.match(extractFunction(configHtml, 'load'), /read\('decisionProvider', false\)/)
+  assert.match(extractFunction(configHtml, 'loadProviderSettings'), /call\('storage\.get', \{ key: 'decisionProvider' \}, false\)/)
+})
+
+// 0.13.2: the first paint showed Jev before the stored choice was read, and a
+// failed read left it there; the owner read that as "it does not save".
+test('the first paint shows no provider choice, and a failed read retries instead of falling back to Jev', () => {
+  const load = extractFunction(configHtml, 'load')
+  assert.doesNotMatch(load, /fillProviderSettings\(null\)/)
+  assert.match(load, /showProviderUnread\('loading'\)/)
+  assert.match(load, /loadProviderSettings\(PROVIDER_READ_RETRIES\)/)
+  const loader = extractFunction(configHtml, 'loadProviderSettings')
+  assert.match(loader, /retriesLeft - 1/)
+  assert.match(loader, /showProviderUnread\('failed'\)/)
+  assert.doesNotMatch(loader, /fillProviderSettings\(null\)/)
+})
+
+test('an unread Cloudflare status says checking, not "no credentials"', () => {
+  const body = extractFunction(configHtml, 'renderCloudflareStatus')
+  assert.ok(body.indexOf("t('secret.checking')") >= 0 && body.indexOf("t('secret.checking')") < body.indexOf("t('provider.notConfigured')"))
 })
 
 test('the Cloudflare credentials travel only as secret requests naming their secret', () => {
