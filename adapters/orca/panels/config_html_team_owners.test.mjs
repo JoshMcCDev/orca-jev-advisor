@@ -65,12 +65,13 @@ test('config.html: every team owners string exists in both languages', () => {
 
 test('config.html: load() reads teamOwners and fills the field', () => {
   const body = functionBody(configHtml, 'load')
-  assert.match(body, /read\('teamOwners', false\)/)
-  assert.match(body, /fillTeamOwners\(/)
+  assert.match(body, /readStrict\('teamOwners'\)/)
+  assert.match(body, /settleSection\('teamOwners'/)
+  assert.match(configHtml, /defineSection\('teamOwners', 'teamOwners', 'save\.whichTeamOwners', .*fillTeamOwners\)/)
 })
 
 test('config.html: Save writes teamOwners from the field, under its own label', () => {
-  assert.match(configHtml, /\{ label: t\('save\.whichTeamOwners'\), promise: write\('teamOwners', readTeamOwners\(\)\) \}/)
+  assert.match(configHtml, /planSectionWrite\('teamOwners', readTeamOwners,/)
 })
 
 test('config.html: readTeamOwners sends one trimmed, non-empty line per owner', () => {

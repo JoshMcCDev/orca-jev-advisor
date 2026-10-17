@@ -452,6 +452,122 @@ test('a policy stored with a legacy Spanish kind keeps its kind on screen and on
   }
 })
 
+// 0.13.3: a host that answers a read with ok:false used to look like "nothing
+// saved", and Save wrote the empty list over the 24 policies that were there.
+test('a policies read the host refused is not an empty list: Save leaves policies alone, says so, and the failed hint stays', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const stored = [{ id: 'keep_me', rule: 'Anything that touches a client gets confirmed.', kind: 'requires_human' }]
+  const { browser, page, errors } = await openPanel({ policies: stored, __failReadsOf: { policies: 99 } }, 'es')
+  try {
+    await page.click('#save-all')
+    await page.waitForTimeout(SETTLE_MS)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies')), false, 'policies must not be written when they were never read')
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'catalog')), true, 'sections that did load are still saved')
+    const said = await page.textContent('#save-said')
+    assert.match(said, /Las políticas/)
+    assert.match(said, /no se tocó/)
+    await page.waitForFunction(() => document.querySelector('[data-section-hint="policies"]')?.getAttribute('data-state') === 'failed', null, { timeout: 50000 })
+    assert.match(await page.textContent('[data-section-hint="policies"]'), /No se pudo leer/)
+    assert.equal(await page.evaluate(() => window.__failedReads.policies), 4)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('a policies read that fails once is retried, shows the stored policies, and Save writes them back unchanged', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const stored = [
+    { id: 'keep_me', rule: 'Anything that touches a client gets confirmed.', kind: 'requires_human' },
+    { id: 'keep_me_too', rule: 'Never write directly on main.', kind: 'prohibits' }
+  ]
+  const { browser, page, errors } = await openPanel({ policies: stored, __failReadsOf: { policies: 1 } })
+  try {
+    assert.equal(await page.evaluate(() => document.querySelectorAll('#policies-list .entry').length), 0)
+    await page.waitForFunction(() => document.querySelectorAll('#policies-list .entry').length === 2, null, { timeout: 30000 })
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-section-hint="policies"]')).display), 'none')
+    await page.click('#save-all')
+    await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies'), null, { timeout: 30000 })
+    const written = await page.evaluate(() => window.__written.policies)
+    assert.deepEqual(written.map((row) => [row.id, row.rule, row.kind]), stored.map((row) => [row.id, row.rule, row.kind]))
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// 0.13.3 defense in depth: even a section that loaded must not be emptied by
+// accident. Only removing the rows in this panel session empties a stored list.
+test('Save never writes an empty policies list over stored ones unless the person removed the rows', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const stored = [
+    { id: 'keep_me', rule: 'Anything that touches a client gets confirmed.', kind: 'requires_human' },
+    { id: 'keep_me_too', rule: 'Never write directly on main.', kind: 'prohibits' }
+  ]
+  const { browser, page, errors } = await openPanel({ policies: stored })
+  try {
+    await page.evaluate(() => document.querySelectorAll('#policies-list .entry input').forEach((input) => { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })) }))
+    await page.click('#save-all')
+    await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'config'), null, { timeout: 30000 })
+    await page.waitForTimeout(500)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies')), false, 'blanked rows are not a removal')
+    assert.match(await page.textContent('#save-said'), /left alone/)
+    await page.evaluate(() => document.querySelectorAll('#policies-list .entry-actions button').forEach((button) => button.click()))
+    await page.click('#save-all')
+    await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'policies'), null, { timeout: 30000 })
+    assert.deepEqual(await page.evaluate(() => window.__written.policies), [], 'removing the rows is an explicit choice and is saved')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Save never writes an empty destination catalog over a stored one unless the person removed the rows', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const destinations = [{ id: 'dest', label: 'Dest', kind: 'webhook', url: 'https://example.com/hook' }]
+  const { browser, page, errors } = await openPanel({ catalog: { destinations } })
+  try {
+    await page.evaluate(() => document.querySelectorAll('#catalog-list .entry input').forEach((input) => { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })) }))
+    await page.click('#save-all')
+    await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'config'), null, { timeout: 30000 })
+    await page.waitForTimeout(500)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'catalog')), false, 'blanked rows are not a removal')
+    await page.evaluate(() => document.querySelectorAll('#catalog-list .entry-actions button').forEach((button) => button.click()))
+    await page.click('#save-all')
+    await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.__written, 'catalog'), null, { timeout: 30000 })
+    assert.deepEqual(await page.evaluate(() => window.__written.catalog), { destinations: [] })
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+// The same bug class on the buttons that send a whole section to the worker.
+test('Skill and tool switches and the deny tier are not sent while their stored values are unread', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ modSkillsStatus: { active: true, activeTools: true }, denyTierStatus: { denyRmRf: false }, __failReadsOf: { modSkillsStatus: 99, denyTierStatus: 99 } })
+  try {
+    await page.evaluate(() => { document.getElementById('save-mod-skills').click(); document.getElementById('save-deny-tier').click() })
+    await page.waitForTimeout(1500)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'modSkillsConfigRequest')), false)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'denyTierConfigRequest')), false)
+    assert.match(await page.textContent('#mod-skills-said'), /left alone/)
+    assert.match(await page.textContent('#deny-tier-said'), /left alone/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('the model ladder and its switches are not saved while the stored catalog is unread', { skip: chromium ? false : 'playwright is not installed' }, async () => {
+  const { browser, page, errors } = await openPanel({ models: [{ id: 'm1', label: 'M1', provider: 'anthropic', agentModel: 'opus', rank: 1, available: true }], modelsConfig: { active: true, readyOverride: true }, __failReadsOf: { models: 99, modelsConfig: 99 } })
+  try {
+    await page.evaluate(() => { document.getElementById('models-save-ladder').click(); document.getElementById('models-save-config').click() })
+    await page.waitForTimeout(1500)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'models')), false)
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window.__written, 'modelsConfig')), false)
+    assert.match(await page.textContent('#models-ladder-said'), /left alone/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
 test('a panel with no policies shows none, which is what a pre-seed install looked like', { skip: chromium ? false : 'playwright is not installed' }, async () => {
   const { browser, page } = await openPanel({ policies: [] })
   try {
@@ -5289,6 +5405,38 @@ test('Modules: the first section of General lists the eight modules with what th
     assert.match(cards[4].text, /no Jev calls and no hooks/)
     assert.match(gate, /Hooks installed \(5\), as you chose\./)
     assert.match(cards[2].text, /follows the switch directly/, 'a module with no hooks of its own says so')
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: a status read the host refused keeps saying it is reading, then shows the stored states pressed', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel({ ...SCENARIOS.ready, __failReadsOf: { claudeIntegrationStatus: 1 } })
+  try {
+    const before = await moduleCards(page)
+    assert.deepEqual(before.map((c) => c.pressed), before.map(() => []))
+    assert.ok(before.every((c) => c.disabled.every(Boolean)), 'nothing can be pressed on a state that has not been read')
+    assert.match(before[0].text, /Reading the state of the modules/)
+    await page.waitForFunction(() => document.querySelector('[data-module-row="gate"] .module-states button[aria-pressed="true"]')?.dataset.value === 'active', null, { timeout: 30000 })
+    const after = await moduleCards(page)
+    assert.deepEqual(after.map((c) => c.pressed), [['active'], ['active'], ['active'], ['active'], ['active'], ['off'], ['shadow'], ['shadow']])
+    assert.ok(after.every((c) => c.disabled.every((d) => !d)))
+    assert.doesNotMatch(after[0].text, /Reading the state of the modules/)
+    assert.deepEqual(errors, [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('Modules: a status that cannot be read at all says so on the section and on each card, and no state is pressed', MODULES_SKIP, async () => {
+  const { browser, page, errors } = await openPanel({ ...SCENARIOS.ready, __failReadsOf: { claudeIntegrationStatus: 99 } }, 'es')
+  try {
+    await page.waitForFunction(() => document.querySelector('[data-section-hint="modules"]')?.getAttribute('data-state') === 'failed', null, { timeout: 50000 })
+    const cards = await moduleCards(page)
+    assert.deepEqual(cards.map((c) => c.pressed), cards.map(() => []))
+    assert.match(cards[0].text, /No se pudo leer el estado de los módulos/)
+    assert.match(await page.textContent('[data-section-hint="modules"]'), /No se pudo leer/)
     assert.deepEqual(errors, [])
   } finally {
     await browser.close()

@@ -61,12 +61,13 @@ test('config.html: every explicit models string exists in both languages', () =>
 
 test('config.html: load() reads explicitModels and fills the select', () => {
   const body = functionBody(configHtml, 'load')
-  assert.match(body, /read\('explicitModels', false\)/)
-  assert.match(body, /fillExplicitModels\(/)
+  assert.match(body, /readStrict\('explicitModels'\)/)
+  assert.match(body, /settleSection\('explicitModels'/)
+  assert.match(configHtml, /defineSection\('explicitModels', 'explicitModels', 'save\.whichExplicitModels', .*fillExplicitModels\)/)
 })
 
 test('config.html: Save writes explicitModels from the select, under its own label', () => {
-  assert.match(configHtml, /\{ label: t\('save\.whichExplicitModels'\), promise: write\('explicitModels', readExplicitModels\(\)\) \}/)
+  assert.match(configHtml, /planSectionWrite\('explicitModels', readExplicitModels,/)
 })
 
 test('config.html: only a stored { mode: "keep" } shows "keep them"; anything else is "judge them"', () => {
