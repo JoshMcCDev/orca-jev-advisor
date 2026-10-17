@@ -108,6 +108,24 @@ test('activation mirrors every secret, a missing one as a clear', async () => {
   ])
 })
 
+// 0.13.2: a transient error from Orca's secrets host at activation cleared the
+// Jev key's env line, and the gate ran without Jev until the key was saved again.
+test('a secret whose read throws at activation keeps its env line, logs its name only, and the others still mirror', async () => {
+  const calls = []
+  const run = async (mode, stdin, args) => { calls.push({ mode, stdin, args }); return { ok: true } }
+  const secrets = fakeHost({ typesafeApiKey: 'jev-secret-value', cloudflareApiToken: 'tok' })
+  const get = secrets.get
+  secrets.get = async (key) => { if (key === 'typesafeApiKey') throw new Error('secrets host busy'); return get(key) }
+  const orca = fakeOrca()
+  await mirrorAllSecrets(orca, secrets, { run })
+  assert.deepEqual(calls, [
+    { mode: 'clear', stdin: undefined, args: ['CLOUDFLARE_ACCOUNT_ID'] },
+    { mode: 'save', stdin: 'tok', args: ['CLOUDFLARE_API_TOKEN'] }
+  ])
+  assert.deepEqual(orca._logs, ['secret mirror skipped for TYPESAFE_API_KEY: secrets host busy'])
+  assert.ok(!orca._logs.join('').includes('jev-secret-value'))
+})
+
 test('the provider choice saved by the panel is mirrored, normalized, with the other settings', async () => {
   const calls = []
   const run = async (mode, stdin) => { calls.push({ mode, stdin }); return { ok: true } }

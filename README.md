@@ -16,6 +16,13 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.13.2
+
+- **The gate keeps its Jev key.** A hiccup reading Orca's secret store could make the gate lose its Jev key until you saved it again. Now a failed read leaves the saved key where it is.
+- **The configuration shows what you saved.** Reopening Configuration showed "Solo Jev" for a few seconds (or for good, if Orca was slow to answer), even when you had saved "Ambos", and your Cloudflare credentials as missing. Your choice was saved and in use the whole time; the panel was just showing its default before reading it. Now the section says "Leyendo el proveedor guardado…" until your choice arrives, tries again if Orca does not answer, and shows "Comprobando…" for the credentials until it knows. After you save the credentials, the boxes are emptied as before and the status shows their last four characters.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.13.1
 
 - **Jev leaves alone the model and effort Orca's agent game launched an agent with.** When a game member is started with a model or an effort (from the project's `orchestrator.model` / `orchestrator.effort`, or a launch that names one), Jev's model router no longer switches it. A pinned model stays, and Jev still adjusts the effort unless that is pinned too; a pinned effort stays, and Jev still picks the model unless that is pinned too. The same holds for the subagents that agent starts. The status line says "kept: pinned by Orca" instead of claiming a switch.

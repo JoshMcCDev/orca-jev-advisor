@@ -87,6 +87,7 @@
       /* Multi-provider: the section's own labels follow a hint, not a heading, so none of them sits flush. */
       #provider-section > label { margin-top: 12px; }
       /* A label-looking heading over the credentials: a <label> must name a control. */
+      #provider-reading.bad { color: var(--destructive, var(--fb-destructive)); }
       #provider-section .field-heading { font-size: 12px; margin: 14px 0 4px; color: var(--muted-foreground, var(--fb-muted-foreground)); }
       input, select, textarea {
         font: inherit; width: 100%; padding: 7px 9px; border-radius: var(--radius-md);
@@ -379,9 +380,10 @@
         and token go only through the secret request channel, like the Jev
         key, and come back only masked (`secretStatus.cloudflare`).
       -->
-      <section id="provider-section">
+      <section id="provider-section" data-state="loading">
         <h2 data-i18n="provider.heading"></h2>
         <p class="hint" data-i18n="provider.intro"></p>
+        <p class="hint" id="provider-reading" data-i18n="provider.reading"></p>
         <label id="provider-mode-label" data-i18n="provider.modeLabel"></label>
         <div id="provider-mode" class="mode-buttons" role="group" aria-labelledby="provider-mode-label">
           <button type="button" data-value="jev" data-i18n="provider.modeJev"></button>
@@ -845,6 +847,8 @@
           'provider.testing': 'Probando…',
           'provider.status': 'Cuenta {{account}} · token {{token}}',
           'provider.notConfigured': 'Sin credenciales de Cloudflare.',
+          'provider.reading': 'Leyendo el proveedor guardado…',
+          'provider.readFailed': 'No se pudo leer el proveedor guardado. Cierra el panel y vuelve a abrirlo.',
           'provider.saved': 'Credenciales guardadas.',
           'provider.cleared': 'Credenciales eliminadas.',
           'provider.needBoth': 'Escribe el ID de cuenta, el token o ambos.',
@@ -1318,6 +1322,8 @@
           'provider.testing': 'Testing…',
           'provider.status': 'Account {{account}} · token {{token}}',
           'provider.notConfigured': 'No Cloudflare credentials.',
+          'provider.reading': 'Reading the saved provider…',
+          'provider.readFailed': 'Could not read the saved provider. Close the panel and open it again.',
           'provider.saved': 'Credentials saved.',
           'provider.cleared': 'Credentials removed.',
           'provider.needBoth': 'Type the account ID, the token, or both.',
@@ -4118,8 +4124,11 @@
 
       // ---------- decision provider (multi-provider P6) ----------------------
       // The mode and the Clef model are two button groups saved by Save; a
-      // stored value the panel does not know shows the default (Jev, clef),
-      // the same fallback src/core/provider_settings.ts applies.
+      // stored value the panel does not know, or none at all, shows the
+      // default (Jev, clef), the same fallback src/core/provider_settings.ts
+      // applies. Until storage has answered, the groups show no choice and
+      // are disabled (0.13.2): a default painted before the read looked like
+      // the stored choice had been lost.
       var providerModeEl = el('provider-mode')
       var clefModelEl = el('clef-model')
       var cloudflareStatusEl = el('cloudflare-status')
@@ -4129,8 +4138,51 @@
       var CLEF_TEST_REQUEST_KEY = 'clefTestRequest'
       var CLEF_TEST_RESULT_KEY = 'clefTestResult'
       var providerSettingsLoaded = false
+      var providerReadingEl = el('provider-reading')
+      // A failed read is retried on the next throttle windows, never filled with the default.
+      var PROVIDER_READ_RETRIES = 3
       wireButtonGroup(providerModeEl)
       wireButtonGroup(clefModelEl)
+
+      function setProviderGroupsEnabled (enabled) {
+        ;[providerModeEl, clefModelEl].forEach(function (group) {
+          Array.from(group.querySelectorAll('button')).forEach(function (b) { b.disabled = !enabled })
+        })
+      }
+
+      /** No button pressed and the groups disabled: nothing has been read yet, or the read failed. */
+      function showProviderUnread (state) {
+        setPressedValue(providerModeEl, null)
+        setPressedValue(clefModelEl, null)
+        setProviderGroupsEnabled(false)
+        el('provider-section').setAttribute('data-state', state)
+        var key = state === 'failed' ? 'provider.readFailed' : 'provider.reading'
+        // data-i18n follows, so a later applyStaticI18n repaints the same line.
+        providerReadingEl.setAttribute('data-i18n', key)
+        providerReadingEl.textContent = t(key)
+        providerReadingEl.className = 'hint' + (state === 'failed' ? ' bad' : '')
+        providerReadingEl.style.display = ''
+      }
+
+      /**
+       * Reads `decisionProvider` straight from the bridge, so a host failure
+       * (ok: false) is told apart from a value never saved (ok, no value):
+       * only the second one means the default.
+       */
+      function loadProviderSettings (retriesLeft) {
+        return call('storage.get', { key: 'decisionProvider' }, false).then(function (result) {
+          if (!result || !result.ok) {
+            if (retriesLeft <= 0) { showProviderUnread('failed'); return }
+            return new Promise(function (resolve) { setTimeout(resolve, CUPO.ventanaMs) })
+              .then(function () { return loadProviderSettings(retriesLeft - 1) })
+          }
+          fillProviderSettings(stored(result))
+          setProviderGroupsEnabled(true)
+          providerSettingsLoaded = true
+          providerReadingEl.style.display = 'none'
+          el('provider-section').setAttribute('data-state', 'ready')
+        })
+      }
 
       function fillProviderSettings (stored) {
         var mode = stored !== null && typeof stored === 'object' && PROVIDER_MODES.indexOf(stored.mode) >= 0 ? stored.mode : 'jev'
@@ -4145,7 +4197,13 @@
 
       /** Paints only what the worker published: configured or not, and at most the last four characters. */
       function renderCloudflareStatus (status) {
-        var cloudflare = status && status.cloudflare
+        // Not read yet (or the read came back empty): the same "checking" the
+        // TypeSafe key shows, never "no credentials" (0.13.2).
+        if (status === null || status === undefined) {
+          cloudflareStatusEl.textContent = t('secret.checking')
+          return
+        }
+        var cloudflare = status.cloudflare
         var account = cloudflare && cloudflare.accountId
         var token = cloudflare && cloudflare.token
         if (!account || !token || (!account.configured && !token.configured)) {
@@ -4156,8 +4214,16 @@
         cloudflareStatusEl.textContent = t('provider.status', { account: masked(account), token: masked(token) })
       }
 
+      // After a save the worker may not have republished the status yet: a
+      // null read keeps "checking" and asks once more, a little later.
       function loadCloudflareStatus () {
-        return read(SECRET_STATUS_KEY, false).then(renderCloudflareStatus)
+        return read(SECRET_STATUS_KEY, false).then(function (status) {
+          renderCloudflareStatus(status)
+          if (status !== null) return
+          return new Promise(function (resolve) { setTimeout(resolve, 1500) }).then(function () {
+            return read(SECRET_STATUS_KEY, false).then(renderCloudflareStatus)
+          })
+        })
       }
 
       el('save-cloudflare').addEventListener('click', function () {
@@ -4814,7 +4880,7 @@
 
       function load () {
         fillThresholds({})
-        fillProviderSettings(null)
+        showProviderUnread('loading')
         fillModSkillsStatus(null)
         renderModelRouterRows(null)
         fillDenyTierStatus(null)
@@ -4832,7 +4898,7 @@
           applyStaticI18n()
           renderSecretStatus(null)
           renderClaudeIntegrationStatus(null)
-          return Promise.all([
+          var firstBatch = Promise.all([
             read('config', false),
             read('catalog', false),
             read('policies', false),
@@ -4848,6 +4914,12 @@
             read('queueMode', false),
             read('explicitModels', false)
           ])
+          // 0.13.2: the provider read is queued right behind the first batch
+          // (it used to wait for that batch and two more reads, three throttle
+          // windows or more) and paints on its own, so it never holds the
+          // batch back; at worst it lands in the next 10 s window.
+          loadProviderSettings(PROVIDER_READ_RETRIES).catch(function () { showProviderUnread('failed') })
+          return firstBatch
         }).then(function (results) {
           currentConfig = results[0]
           fillThresholds(currentConfig, results[3])
@@ -4879,13 +4951,6 @@
         }).then(function () {
           // 0.6.28 T7: read on its own after the authorizations, for the same reason.
           return read(TRUSTED_STATUS_KEY, false).then(renderTrustedPrograms).catch(function () { renderTrustedPrograms({ programs: [] }) })
-        }).then(function () {
-          // Multi-provider: read on its own after the first paint, for the same quota reason.
-          return read('decisionProvider', false).then(function (stored) {
-            fillProviderSettings(stored)
-            providerSettingsLoaded = true
-            el('provider-section').setAttribute('data-state', 'ready')
-          }).catch(function () { fillProviderSettings(null) })
         })
       }
 

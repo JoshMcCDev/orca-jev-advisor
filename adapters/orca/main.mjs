@@ -247,14 +247,21 @@ async function mirrorSecretToEnvFile (orca, key, envName = 'TYPESAFE_API_KEY', r
   return result
 }
 
-/** Mirrors every secret in `secrets` (a missing one as a clear), so a restarted worker converges without anyone retyping. `options.run` is test-only. */
+/**
+ * Mirrors every secret in `secrets` (a missing one as a clear), so a restarted
+ * worker converges without anyone retyping. A read that throws is not an
+ * absence: its env line is left as it is and only its env name is logged
+ * (0.13.2; clearing on a transient host error cost the gate its Jev key).
+ * `options.run` is test-only.
+ */
 async function mirrorAllSecrets (orca, secretsHost, options = {}) {
   for (const [secretName, envName] of Object.entries(MIRRORED_SECRETS)) {
     let value = null
     try {
       value = await secretsHost.get(secretName)
-    } catch {
-      value = null
+    } catch (error) {
+      orca.log(`secret mirror skipped for ${envName}: ${String(error instanceof Error ? error.message : error).slice(0, 160)}`)
+      continue
     }
     await mirrorSecretToEnvFile(orca, typeof value === 'string' && value.trim().length > 0 ? value.trim() : null, envName, options.run)
   }

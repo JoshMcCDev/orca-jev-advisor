@@ -2,6 +2,12 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.13.2
+
+- **A failed secret read at activation no longer clears the env mirror** (`adapters/orca/main.mjs`, `mirrorAllSecrets`). A `secrets.get` that threw was treated as an absent secret, so the mirror ran `clear` and removed that secret's line from the `0600` env file. Live on 2026-10-17 at 05:03Z a transient error from Orca's secrets host did that to `TYPESAFE_API_KEY` while the store still held the key; the gate had no Jev key and ran Clef only. A throwing read now leaves the line as it is and logs `secret mirror skipped for <ENV_NAME>: <message>` (the name only, never the value); only an empty or absent value returned without an error clears, as before 0.13.0.
+- **The config panel no longer shows a default as if it were the saved provider** (`adapters/orca/panels/config.html`, "Decision provider"). The first paint pressed "Jev only", `decisionProvider` was read last (after the first batch and two more chained reads, three or more of Orca's 10 s read windows), and a failed read left Jev pressed for good, so a saved "Both" looked lost. Until the value is read the mode and model groups show no choice and are disabled, with "Reading the saved provider…"; Save does not write the section (as before). The read is now queued right behind the first batch (that batch's read count is unchanged; the provider paints on its own, so it never holds the batch back), a host failure is told apart from a value never saved, and a failed read is retried on the next three windows before "Could not read the saved provider" is shown, never Jev.
+- **Cloudflare credentials: "Checking…" until the status is read.** A secret status not read yet painted "No Cloudflare credentials."; it now says "Checking…", like the TypeSafe key. Only a status with neither the account id nor the token configured says there are none. After "Save credentials" the inputs are still cleared, and the status shows the masked saved values; a status the worker has not republished yet is read once more.
+
 ## 0.13.1
 
 - **The router honors Orca's launch pins in a game pane** (odd/tasks/router-honor-orca-pins.md, JEVADV-105). Orca Lab sets `ORCA_AGENT_MODEL_PINNED=1` and/or `ORCA_AGENT_EFFORT_PINNED=1` in an agent's env when its launch asked for that model or effort and it took effect (the Agent Teams game launches members with `orchestrator.model` / `orchestrator.effort`). In a game pane (`parseOrcaGameMode`, so a pane with `ORCA_GAME_HUD` `0`/`false` is no game) a pin of exactly `1` holds its dimension (`src/core/orca_pins.ts`):
