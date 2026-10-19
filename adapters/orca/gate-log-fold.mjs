@@ -64,7 +64,12 @@ async function writeTotals (cacheDir, totals) {
   const handle = await open(temporary, 'w')
   try {
     await handle.writeFile(JSON.stringify(totals))
-    await handle.sync()
+    try {
+      await handle.sync()
+    } catch (error) {
+      // Node 24.22 refuses fsync inside the permission sandbox the sidecar runs in; the atomic rename below still holds.
+      if (error?.code !== 'ERR_ACCESS_DENIED') throw error
+    }
   } finally {
     await handle.close()
   }
