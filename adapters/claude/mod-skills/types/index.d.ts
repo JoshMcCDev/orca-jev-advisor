@@ -35,6 +35,10 @@ export type RouterSticky = {
    * prompt. null before any real prompt.
    */
   lastPrompt: { hash: string; position: number } | null
+  /** JEVADV-106: Jev's confidence in the last decision (null when Jev judged nothing); for the Orca report. */
+  confidence?: number | null
+  /** JEVADV-106: why the router kept its model on the last decision (its reason); null when it changed. For the Orca report. */
+  hold?: string | null
 }
 
 /** Main-loop usage of this session, kept by the router after every step. */

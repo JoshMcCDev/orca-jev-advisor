@@ -94,9 +94,9 @@ interface FakeHost {
   /** 0.9.0 C2: the delay each `$.clock.after` was asked for, in order. */
   readonly timerDelays: number[];
   /** 0.9.0 C2: the `init` of every `$.process.run`, parallel to `processCalls`. */
-  readonly processInits: ({ cwd?: string } | undefined)[];
+  readonly processInits: ({ cwd?: string; env?: Record<string, string>; timeoutMs?: number } | undefined)[];
   /** 0.9.0 C2: answers a `$.process.run` before the defaults; undefined leaves it to them. It may throw, like a binary that cannot start. */
-  processHandler: ((argv: readonly string[], init?: { cwd?: string }) => { exitCode: number; stdout: string; stderr: string } | undefined) | null;
+  processHandler: ((argv: readonly string[], init?: { cwd?: string; env?: Record<string, string>; timeoutMs?: number }) => { exitCode: number; stdout: string; stderr: string } | undefined) | null;
   /** 0.9.0 C3: every `$.ui.toast` text. */
   readonly toasts: string[];
   /** 0.9.0 C5: every `$.prompt.submit` input. */
@@ -292,7 +292,7 @@ function makeFakeEngine(host: FakeHost): unknown {
     process: {
       // No real `orca` binary: resolveOrcaContext falls back to its
       // cwd-only shape, deterministically, on any non-success exit.
-      run: async (argv: readonly string[], init?: { cwd?: string }) => {
+      run: async (argv: readonly string[], init?: { cwd?: string; env?: Record<string, string>; timeoutMs?: number }) => {
         host.processCalls.push(argv.join(" "));
         host.processInits.push(init);
         if (host.failProcess) throw new Error("fake host: process.run failed");
@@ -6465,4 +6465,153 @@ test("pins, game pane, effort pinned: a subagent's steps keep the effort they ca
   assert.equal(seen.model, "claude-sonnet-5-5", "the model is still routed");
   const first = await stepThrough(handlers, engine, turnStepEvent({ agentId: "agent-1", turnId: "sub-1", index: 0, model: "claude-sonnet-5-5", effort: "xhigh" }));
   assert.equal(first.effort, "xhigh", "without the pin the tier's medium is sent");
+});
+
+// ---------------------------------------------------------------------------
+// JEVADV-106 (odd/tasks/orca-member-report.md): in a pane the game does not
+// draw but Orca runs, Jev reports its state through the Orca CLI.
+// ---------------------------------------------------------------------------
+
+const ORCA_CLI = "/opt/orca/bin/orca";
+const REPORT_ARGV = `${ORCA_CLI} game state --json`;
+
+interface ReportedState {
+  version: number;
+  model: string | null;
+  effort: string | null;
+  pinned: { model: boolean; effort: boolean };
+  line?: string;
+  confidence?: number;
+  hold?: string;
+  routedModel?: string;
+  sessionModel?: string;
+}
+
+/** What each report run was given, in order (`null` is the JSON null Jev sends at the end). */
+function reportsOf(host: FakeHost): (ReportedState | null)[] {
+  const sent: (ReportedState | null)[] = [];
+  host.processCalls.forEach((call, index) => {
+    if (call !== REPORT_ARGV) return;
+    const raw = host.processInits[index]?.env?.ORCA_GAME_ADVISOR;
+    assert.ok(raw !== undefined, "the report rides ORCA_GAME_ADVISOR");
+    sent.push(JSON.parse(raw) as ReportedState | null);
+  });
+  return sent;
+}
+
+function reportRuns(host: FakeHost): number {
+  return host.processCalls.filter((call) => call.endsWith("game state --json")).length;
+}
+
+async function memberScenario(env: Record<string, string>): Promise<{ host: FakeHost; handlers: Map<string, Hook>; engine: unknown }> {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  for (const [key, value] of Object.entries(env)) host.env.set(key, value);
+  host.processHandler = (argv) => (argv[0] === ORCA_CLI ? { exitCode: 0, stdout: "{}", stderr: "" } : undefined);
+  host.files.set(`${CONFIG_DIR}/explicit-models.json`, JSON.stringify({ mode: "keep" }));
+  host.fetchQueue.push(tierAnswer("complex"), tierAnswer("simple"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await startSession(handlers, engine);
+  await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 2);
+  await settle();
+  return { host, handlers, engine };
+}
+
+const MEMBER = { ORCA_TERMINAL_HANDLE: "term_member", ORCA_GAME_CLI: ORCA_CLI } as const;
+
+test("orca report: a member pane runs the Orca CLI with the v1 report and the line, with a short timeout", async () => {
+  const { host } = await memberScenario(MEMBER);
+  const sent = reportsOf(host);
+  const last = sent[sent.length - 1];
+  assert.ok(last, "a report was sent");
+  assert.equal(last.version, 1);
+  assert.equal(last.model, "Opus 5.5");
+  assert.equal(last.effort, "high");
+  assert.deepEqual(last.pinned, { model: false, effort: false });
+  assert.equal(last.line, lastStatus(host));
+  assert.equal(last.sessionModel, "claude-opus-5-5");
+  const index = host.processCalls.lastIndexOf(REPORT_ARGV);
+  const timeout = host.processInits[index]?.timeoutMs;
+  assert.ok(timeout !== undefined && timeout <= 3000, "a short timeout");
+  assert.ok(host.statusLines.length > 0, "Jev still draws its own line in this pane");
+});
+
+test("orca report: an unchanged state is not sent again", async () => {
+  const { host, handlers, engine } = await memberScenario(MEMBER);
+  const runs = reportRuns(host);
+  assert.ok(runs >= 1);
+  await playTurn(host, handlers, engine, 2, "same again", 2);
+  await settle();
+  const sent = reportsOf(host).map((value) => JSON.stringify(value));
+  sent.slice(1).forEach((value, index) => assert.notEqual(value, sent[index], "a run carried the value the last one did"));
+  const last = sent.length;
+  await startSession(handlers, engine);
+  await settle();
+  assert.equal(reportRuns(host), last, "a start that changes nothing sends nothing");
+});
+
+test("orca report: a pin from Orca's env rides in pinned", async () => {
+  const { host } = await memberScenario({ ...MEMBER, ORCA_AGENT_MODEL_PINNED: "1", ORCA_AGENT_EFFORT_PINNED: "true" });
+  const last = reportsOf(host).pop();
+  assert.deepEqual(last?.pinned, { model: true, effort: false });
+});
+
+test("orca report: ORCA_CLI_COMMAND is the fallback when ORCA_GAME_CLI is unset", async () => {
+  const { host } = await memberScenario({ ORCA_TERMINAL_HANDLE: "term_member", ORCA_CLI_COMMAND: ORCA_CLI });
+  assert.ok(reportsOf(host).length > 0);
+});
+
+test("orca report: nothing runs without a terminal handle, a CLI path, an absolute one, or in a game pane", async () => {
+  const cases: Record<string, Record<string, string>> = {
+    "outside Orca": { ORCA_GAME_CLI: ORCA_CLI },
+    "no executable": { ORCA_TERMINAL_HANDLE: "term_member" },
+    "a bare orca": { ORCA_TERMINAL_HANDLE: "term_member", ORCA_CLI_COMMAND: "orca" },
+    "a game pane": { ...MEMBER, ORCA_GAME_MODE: "on" },
+  };
+  for (const [name, env] of Object.entries(cases)) {
+    const { host } = await memberScenario(env);
+    assert.equal(reportRuns(host), 0, name);
+    assert.ok(!host.processCalls.some((call) => call.startsWith("orca ")), `${name}: never a bare orca for a report`);
+  }
+});
+
+test("orca report: session end sends the JSON null once", async () => {
+  const { host, handlers, engine } = await memberScenario(MEMBER);
+  const end = handlers.get("session.end");
+  assert.ok(end, "session.end was registered");
+  await end(engine, { reason: "other", sessionId: "s1", resume: {} }, async (e: unknown) => e);
+  await end(engine, { reason: "other", sessionId: "s1", resume: {} }, async (e: unknown) => e);
+  const sent = reportsOf(host);
+  assert.equal(sent[sent.length - 1], null);
+  assert.equal(sent.filter((value) => value === null).length, 1);
+});
+
+test("orca report: a failing or hung CLI is no reason to fail a hook", async () => {
+  const host = makeFakeHost();
+  seedRouterAccount(host);
+  host.env.set("ORCA_TERMINAL_HANDLE", "term_member");
+  host.env.set("ORCA_GAME_CLI", ORCA_CLI);
+  host.processHandler = (argv) => {
+    if (argv[0] === ORCA_CLI) throw new Error("fake host: cannot start");
+    return undefined;
+  };
+  host.files.set(`${CONFIG_DIR}/explicit-models.json`, JSON.stringify({ mode: "keep" }));
+  host.fetchQueue.push(tierAnswer("complex"));
+  const { handlers, engine } = loadHooksWith(host, { routerMode: "active" });
+  await startSession(handlers, engine);
+  await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 2);
+  await settle();
+  assert.ok(reportRuns(host) >= 1, "it tried");
+});
+
+test("JEVADV-106 v2: the report carries Jev's confidence, and the hold reason only when the router kept its model", async () => {
+  const { host } = await memberScenario(MEMBER);
+  const sent = reportsOf(host).filter((report): report is ReportedState => report !== null);
+  const last = sent.at(-1);
+  assert.ok(last, "a report was sent");
+  const decision = routerDecisionLines(host).at(-1);
+  assert.ok(decision, "the router logged a decision");
+  assert.equal(last.confidence, decision.confidence, "the confidence is the one Jev gave the decision");
+  if (last.hold !== undefined) assert.equal(last.hold, decision.reason, "a hold is the reason the router logged, never invented text");
+  assert.equal(JSON.stringify(last).includes("design the cache"), false, "no prompt text in the report");
 });
