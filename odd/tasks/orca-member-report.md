@@ -42,3 +42,13 @@ Jev reports there from a pane that is not a game pane. Request from orca-oss.
 
 ## Out of scope
 Release, marketplace catalog (owner's OK), Orca's own export of `ORCA_GAME_CLI` (ORCA-657).
+
+## Release note draft
+
+Not in CHANGELOG.md yet: `scripts/release-docs.test.mjs` requires the newest CHANGELOG entry to be the package version, so the entry is written at release time. Draft:
+
+- **A member pane tells Orca what Jev decided** (JEVADV-106, odd/tasks/orca-member-report.md, `src/core/orca_report.ts`, `adapters/claude/mod-skills/hooks/index.ts`).
+  - **What changed.** In a pane Orca runs (`ORCA_TERMINAL_HANDLE` set) that its game does not draw, Jev runs the Orca CLI's `game state --json` with `ORCA_GAME_ADVISOR=<report>` whenever what it draws changes, at session start, and with `null` at session end. The lead's Agent Teams Panel can then show a member's Jev.
+  - **Report.** Contract v1 (`version`, `model`, `effort`, `pinned`) as Orca reads it today, plus extra keys that never change a v1 key: `line`, `skill`, `tool`, `routedModel`, `sessionModel`. `pinned` reads `ORCA_AGENT_MODEL_PINNED` / `ORCA_AGENT_EFFORT_PINNED` equal to `1`.
+  - **Guarded.** The executable is only an absolute path from `ORCA_GAME_CLI`, else `ORCA_CLI_COMMAND`; with neither, or a bare name, nothing runs (a bare `orca` is the GNOME screen reader on Linux). A game pane keeps publishing `advisor` and never reports. Fire-and-forget with a 2 s bound; a value equal to the last one sent is not sent again, and a failed run is retried on the next change.
+  - **Not yet.** Orca does not export `ORCA_GAME_CLI` to member panes (companion ORCA-657), so until it does this is a no-op there. `hold` and `confidence` are not reported: the router hands up only the status line.
