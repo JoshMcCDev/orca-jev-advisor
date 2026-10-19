@@ -42,7 +42,7 @@ it on 2026-10-18 as wasted tokens on every advice.
   `npm run typecheck` exit 0; `npm test` 9168 pass, 0 fail; CHANGELOG and
   README 0.13.7 entries; `package.json` and `orca-plugin.json` at 0.13.7.
   No UI changed, so no screenshots.
-- [ ] T4 PR, merge, release, catalog pin, live check in odd/qa/qa-0.13.7.md.
+- [x] T4 PR, merge, release, catalog pin, live check in odd/qa/qa-0.13.7.md. Proof: PR #87 merged as 8df3632, tag and release v0.13.7, catalog pinned, live scenarios S1-S2 PASS.
 
 ## Acceptance
 
