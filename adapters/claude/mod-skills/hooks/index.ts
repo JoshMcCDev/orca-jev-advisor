@@ -203,6 +203,7 @@ import { lockPid } from '../../../../src/core/memory_tidy.ts'
 import { buildAdvisorState, parseOrcaGameMode, withNotice } from '../../../../src/core/advisor_state.ts'
 import type { AdvisorMain, AdvisorNotice, GameMode } from '../../../../src/core/advisor_state.ts'
 import { NO_ORCA_PINS, orcaPinsOf } from '../../../../src/core/orca_pins.ts'
+import { buildOrcaReport, orcaReportExecutable, orcaReportPins } from '../../../../src/core/orca_report.ts'
 import type { OrcaPins } from '../../../../src/core/orca_pins.ts'
 import { isRecord } from '../../../../src/guards.ts'
 
@@ -3646,6 +3647,8 @@ interface GameHost {
   noticesHydrated: boolean
   last: string | null
   writes: Promise<void>
+  /** JEVADV-106: what a pane the game does not draw reports to Orca (`reportToOrca`). */
+  readonly orca: OrcaReporter
   /** The main loop's model and effort as its last step was sent; null before one in this load. */
   main: { readonly modelId: string; readonly effort: SessionEffort | null } | null
   readonly line: () => string | null
@@ -3658,6 +3661,14 @@ interface GameHost {
   readonly agents: () => readonly RunningSubagent[]
   readonly ciRows: () => readonly CiBandRow[]
   readonly beforeLoad: () => Set<string> | undefined
+}
+
+/** What `reportToOrca` keeps: the last JSON sent (null: nothing reported, or ended), the run chain, and the last prompt's picks. */
+interface OrcaReporter {
+  last: string | null
+  chain: Promise<void>
+  skill: string | null
+  tool: string | null
 }
 
 /** The game this pane is drawn by; a failed read is no game, so Jev draws as always. */
@@ -3715,6 +3726,66 @@ function publishAdvisor($: EngineInterface, game: GameHost): Promise<void> {
   return game.writes
 }
 
+// JEVADV-106: Orca stores a report from any pane (`game state --json` with ORCA_GAME_ADVISOR). A short bound: the CLI is local and answers at once.
+const ORCA_REPORT_TIMEOUT_MS = 2000
+
+/** The CLI to run and the pane it speaks for, or null: not in Orca, no absolute path in Orca's env, or the game draws this pane. */
+async function orcaReportTarget($: EngineInterface, game: GameHost): Promise<string | null> {
+  const [handle, gameCli, cliCommand] = await Promise.all([$.env.get('ORCA_TERMINAL_HANDLE'), $.env.get('ORCA_GAME_CLI'), $.env.get('ORCA_CLI_COMMAND')])
+  if (handle === undefined || handle.trim().length === 0) return null
+  if ((await gameModeOf($, game)) !== null) return null
+  return orcaReportExecutable(gameCli, cliCommand)
+}
+
+/**
+ * Runs the Orca CLI with `json` as the pane's report, after any run already
+ * queued. Fire-and-forget by its callers; a failed run leaves `last` as it was,
+ * so the next change tries again. Never throws.
+ */
+function sendOrcaReport($: EngineInterface, game: GameHost, build: () => Promise<string | null>): Promise<void> {
+  game.orca.chain = game.orca.chain.then(async () => {
+    try {
+      const exe = await orcaReportTarget($, game)
+      if (exe === null) return
+      const json = await build()
+      if (json === null || json === game.orca.last) return
+      const result = await $.process.run([exe, 'game', 'state', '--json'], { env: { ORCA_GAME_ADVISOR: json }, timeoutMs: ORCA_REPORT_TIMEOUT_MS })
+      if (result.exitCode === 0) game.orca.last = json === 'null' ? null : json
+    } catch {
+      // Orca keeps the last report; Jev's work never waits on it.
+    }
+  })
+  return game.orca.chain
+}
+
+/** Reports what Jev draws now to Orca, once a change makes it differ from the last report. */
+function reportToOrca($: EngineInterface, game: GameHost): Promise<void> {
+  return sendOrcaReport($, game, async () => {
+    const modules = await resolveFeatureModules($, game.modulesFile)
+    const routerOn = moduleState(modules, 'model-router') !== 'off'
+    const main = routerOn ? await advisorMain($, game) : null
+    const sticky = routerOn ? (await $.state.get({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' })).value : undefined
+    const [pinnedModel, pinnedEffort] = await Promise.all([$.env.get('ORCA_AGENT_MODEL_PINNED'), $.env.get('ORCA_AGENT_EFFORT_PINNED')])
+    return JSON.stringify(
+      buildOrcaReport({
+        model: main?.label ?? null,
+        effort: main?.effort === null || main?.effort === undefined ? null : String(main.effort),
+        pins: orcaReportPins(pinnedModel, pinnedEffort),
+        line: game.line(),
+        skill: game.orca.skill,
+        tool: game.orca.tool,
+        routedModel: sticky?.model ?? null,
+        sessionModel: sticky?.configuredModel ?? null,
+      }),
+    )
+  })
+}
+
+/** Tells Orca Jev stopped (the JSON null), when something was reported. Awaited: the process is ending. */
+function endOrcaReport($: EngineInterface, game: GameHost): Promise<void> {
+  return sendOrcaReport($, game, async () => (game.orca.last === null ? null : 'null'))
+}
+
 /** Publishes `advisor` in a game pane; nothing without the game. */
 async function publishIfGame($: EngineInterface, game: GameHost): Promise<void> {
   if ((await gameModeOf($, game)) !== null) await publishAdvisor($, game)
@@ -3724,6 +3795,7 @@ async function publishIfGame($: EngineInterface, game: GameHost): Promise<void> 
 async function showLine($: EngineInterface, game: GameHost, text: string | undefined): Promise<void> {
   if ((await gameModeOf($, game)) !== null) return publishAdvisor($, game)
   $.ui.status(text)
+  void reportToOrca($, game)
 }
 
 /** A toast's notice, kept and published only in a game pane (the toast shows either way). */
@@ -3850,6 +3922,7 @@ export function register(on: On, options: PluginOptions): void {
     noticesHydrated: false,
     last: null,
     writes: Promise.resolve(),
+    orca: { last: null, chain: Promise.resolve(), skill: null, tool: null },
     main: null,
     line: () => statusLine(),
     modulesFile,
@@ -3992,6 +4065,9 @@ export function register(on: On, options: PluginOptions): void {
       }
     }
 
+    // JEVADV-106: what Orca is told about this prompt's picks starts empty; a closure below fills it.
+    game.orca.skill = null
+    game.orca.tool = null
     // Skill selection and tool selection each run in their own isolated
     // closure: a failure or timeout in one must never touch the other, and
     // neither may throw out of this hook (both fail open on their own).
@@ -4154,6 +4230,7 @@ export function register(on: On, options: PluginOptions): void {
         pendingListingWithheld = listingWithheld
 
         // 0.6.2 E8: applied only when the winner's SKILL.md was injected.
+        game.orca.skill = decision.name
         return { block, status: skillStatusPart(locale, decision.name, block !== null ? 'applied' : activeMode ? 'unchanged' : 'measuring') }
       } catch {
         // Fail open, always: any unexpected error leaves the prompt
@@ -4273,6 +4350,7 @@ export function register(on: On, options: PluginOptions): void {
         pendingToolMeasurementId = measurementId
 
         const outcome = !activeToolMode ? 'measuring' : decision.name === null ? 'unchanged' : 'applied'
+        game.orca.tool = decision.name
         const status = toolStatusPart(locale, decision.name, outcome)
 
         // Measurement mode stops here: nothing observable changes beyond
@@ -4330,7 +4408,10 @@ export function register(on: On, options: PluginOptions): void {
     const showRouterStatus = (text: string): void => {
       routerStatusText = text
       if (gameMode !== null) void publishAdvisor($, game)
-      else $.ui.status(statusLine() ?? text)
+      else {
+        $.ui.status(statusLine() ?? text)
+        void reportToOrca($, game)
+      }
     }
     // JEVADV-63: read from the closure's own orcaContextCache (plain data,
     // not `$`) -- never a fresh resolveOrcaContext call per step. null when
@@ -4348,9 +4429,9 @@ export function register(on: On, options: PluginOptions): void {
       }
     }
     const noteMain = (modelId: string, effort: SessionEffort | null): void => {
-      if (gameMode === null || (game.main?.modelId === modelId && game.main.effort === effort)) return
+      if (game.main?.modelId === modelId && game.main.effort === effort) return
       game.main = { modelId, effort }
-      void publishAdvisor($, game)
+      void (gameMode === null ? reportToOrca($, game) : publishAdvisor($, game))
     }
     return yield* handleTurnStep($, e, next, stepMode, options, showRouterStatus, subagentEffortTarget, project, noteEffort, async (step, input, r) => ({ ...(await effortLogFields($, step, input, r, effortLoops, runningSubagents.agents, subagentEffortTarget)), ...phaseLogFields(step, input, r, phaseHolder) }), noteMain)
   })
@@ -4466,6 +4547,7 @@ export function register(on: On, options: PluginOptions): void {
     }
     // Game mode: the game gets a value from the start, even with nothing to say yet.
     await publishIfGame($, game)
+    void reportToOrca($, game)
     // Memory (memoryDetectAtStart): the backend is decided on a timer, so the start never waits on an MCP dial.
     if (moduleState(modules, 'memory') !== 'off') {
       try {
@@ -4474,6 +4556,12 @@ export function register(on: On, options: PluginOptions): void {
         // No timer: the first turn decides the backend.
       }
     }
+    return next(e)
+  })
+
+  // JEVADV-106: a pane Orca runs is told Jev stopped (its short bound is the hook's own budget).
+  on('session.end', async ($, e, next) => {
+    await endOrcaReport($, game)
     return next(e)
   })
 
