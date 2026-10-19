@@ -1329,9 +1329,21 @@ async function main() {
     ? process.argv[process.argv.indexOf('--scenario') + 1]
     : (quick ? 'ready' : 'all')
   const names = requested === 'all' ? Object.keys(SCENARIOS) : [requested]
-  const combos = quick
-    ? [['light', 1440], ['dark', 390]]
-    : THEMES.flatMap((theme) => WIDTHS.map((width) => [theme, width]))
+  // --combos light:1440,dark:390 picks the theme and width pairs to photograph
+  // (one image per panel and pair, with --quick). It is how a release review
+  // covers all four widths without the full matrix.
+  const combosArg = process.argv.includes('--combos')
+    ? process.argv[process.argv.indexOf('--combos') + 1]
+    : null
+  const combos = combosArg
+    ? combosArg.split(',').map((pair) => {
+      const [theme, width] = pair.split(':')
+      if (!THEMES.includes(theme) || !WIDTHS.includes(Number(width))) throw new Error(`bad --combos entry: ${pair}`)
+      return [theme, Number(width)]
+    })
+    : quick
+      ? [['light', 1440], ['dark', 390]]
+      : THEMES.flatMap((theme) => WIDTHS.map((width) => [theme, width]))
   for (const name of names) {
     if (!(name in SCENARIOS)) throw new Error(`unknown scenario: ${name}`)
   }

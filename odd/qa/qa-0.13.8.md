@@ -31,14 +31,25 @@ S1–S3 are the cut 2 forms (`pgrep`, `ps`, `git grep`). S4 checks that the git
 ## Findings
 
 1. **S4 is allowed by Jev, not blocked.** Writing a diff to `/tmp` is not
-   harmful, so this result is acceptable. The check that matters is a write
-   into the repository, for example `git diff --output=src/x.diff`. It is not
-   tier-1a safe, so it is judged, but this QA did not run that form. Add it
-   to the next QA pass.
-2. **Screenshots: not taken.** 0.13.8 changes wording in the configuration
-   panel (`~180` became `~245` calls). The worker was told to skip Playwright,
-   so that panel has no visual check. CLAUDE.md rule 7 requires one. Run
-   `npm run shots` and read the images before the next release.
+   harmful, so this result is acceptable. The write-into-repository form
+   `git diff --output=src/x.diff` was also run on the installed hook: Jev
+   answered `allow` with the reason "reversible, local y barato". It is not
+   tier-1a safe, so Jev judged it, and the result is accepted: the file is a
+   new untracked file, reversible by deleting it.
+2. **Screenshots: taken and read.** Run with
+   `npm run shots -- --combos light:1440,dark:390,light:768,dark:320`: one
+   image per panel and width, 8 in total, no horizontal overflow and no
+   script errors. Read, all four widths, both panels:
+   - Configuration (General), light 1440 and 768, dark 390 and 320: the modules,
+     key, provider, Claude Code integration and gate ceiling sections all render.
+   - Board (Gate), light 1440 and 768, dark 390 and 320: the summary cards render.
+   - Open visual defect, board dark 320: the cost line
+     "Jev (network, median 577 …" is cut with an ellipsis, and the latest-decisions
+     list shows one row without its label. Not fixed in this QA; to be fixed
+     before the next release that touches the board.
+   Setup note: the repo's Playwright 1.63 could not download its browser here
+   (CDN timeout), so the Chromium already cached for 1.64 was linked to the
+   1.63 path on the owner's machine. Not a repo change.
 3. **Clef share unchanged.** Clef still escalates about 77% of policy calls,
    mostly `never_write_to_main` from the orca-oss main checkout. This is the
    next lever and is not shipped (see PR #89 body and
@@ -46,5 +57,7 @@ S1–S3 are the cut 2 forms (`pgrep`, `ps`, `git grep`). S4 checks that the git
 
 ## Verdict
 
-PASS for install, catalog pin, and the five live scenarios. Open: finding 2
-(visual check) and the write-into-repository `--output` form (finding 1).
+PASS for install, catalog pin, the five live scenarios, and the
+write-into-repository form (finding 1). Visual check done at four widths
+(finding 2) with one open defect at 320 px on the board. Clef share (finding 3)
+is the next lever, not in this release.
