@@ -25,6 +25,7 @@
 // Pure: no I/O, no clock, no randomness.
 
 import { withoutHeredocBodies, withoutLineContinuations } from "./command_text.ts";
+import { DEPLOY_PUBLISH_DESCRIPTIONS } from "./deploy_publish.ts";
 import { splitOnCommandSeparators } from "./git_discard.ts";
 import { isSafeSegment } from "./gate_safe_command.ts";
 import { isProtectedRecoverabilityWhy } from "./git_recoverability.ts";
@@ -158,25 +159,40 @@ export interface ComposedAdvice {
   readonly effectSummary: string;
 }
 
+/**
+ * Reasons the model already knows from its own command (0.13.7,
+ * odd/tasks/advice-no-repeat.md): a deploy/publish pattern's description, the
+ * generic "leaves this machine" axis, and the catalog note that only explains
+ * the gate's own configuration. Repeating them cost tokens on every advice
+ * and told the model nothing.
+ */
+const MODEL_KNOWN_REASONS: ReadonlySet<string> = new Set([
+  ...DEPLOY_PUBLISH_DESCRIPTIONS,
+  MODEL_RISK_REASON["reason.cannotUndoAndLeavesMachine"] ?? "",
+  "this directory doesn't match any catalog destination, so the global thresholds were used",
+]);
+
+/** The reasons worth telling the model: each one split out of a cached `·`-joined reason, minus what its own command already says. */
+function reasonsForModel(reasons: readonly string[]): readonly string[] {
+  return reasons.flatMap((reason) => reason.split(" · ")).map((reason) => reason.trim()).filter((reason) => reason.length > 0 && !MODEL_KNOWN_REASONS.has(reason));
+}
+
 /** Composes the full advice text. Never throws; `reasons` with no entries falls back to a generic "this looks risky" phrase rather than producing an empty sentence. */
 export function composeAdviceText(input: AdviceCompositionInput): ComposedAdvice {
   const segments = affectedSegments(input.command);
   const reasons = input.reasons.length > 0 ? input.reasons : ["this could not be undone or verified safely"];
-
-  const affectedLine =
-    segments.length > 0
-      ? `It would run: ${segments.map((s) => `\`${s}\``).join(", ")}.`
-      : "It would run the command as given.";
-  const reasonsLine = `Why: ${reasons.join("; ")}.`;
+  const modelReasons = reasonsForModel(reasons);
+  // The model wrote the command: naming its segments only helps when there is more than one to pick from.
+  const compound = splitOnCommandSeparators(withoutLineContinuations(withoutHeredocBodies(input.command))).length > 1;
 
   const recoverabilitySentences = (input.recoverability ?? [])
     .map(recoverabilitySentence)
     .filter((s): s is string => s !== null);
 
   const lines = [
-    `${input.judge === "clef" ? "Clef" : "Jev"} advice (not a refusal): this command would affect something worth a second look before it runs.`,
-    affectedLine,
-    reasonsLine,
+    `${input.judge === "clef" ? "Clef" : "Jev"} advice (not a refusal): worth a second look before it runs.`,
+    ...(compound && segments.length > 0 ? [`It would run: ${segments.map((s) => `\`${s}\``).join(", ")}.`] : []),
+    ...(modelReasons.length > 0 ? [`Why: ${modelReasons.join("; ")}.`] : []),
     ...recoverabilitySentences,
     retryClause(input.sessionEligibleForRetry),
   ];

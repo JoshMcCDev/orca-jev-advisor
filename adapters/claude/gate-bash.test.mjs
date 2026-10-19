@@ -2344,7 +2344,7 @@ function writeVerdictCacheEntry (home, key, entry) {
 
 const ADVICE_MIDDLE_TIER_COMMAND = 'some-unmeasured-advisable-tool --flag'
 
-test('a risk-stage advice: permissionDecision is deny, the reason is never REFUSED, names a concrete segment and carries the retry clause', () => {
+test('a risk-stage advice: permissionDecision is deny, the reason is never REFUSED, the person sees the concrete segment and the model gets the retry clause', () => {
   const home = makeHome()
   const key = expectedCacheKey(ADVICE_MIDDLE_TIER_COMMAND, home, home)
   writeVerdictCacheEntry(home, key, { decision: 'advise', reason: "it can't be undone", at: Date.now() })
@@ -2353,9 +2353,11 @@ test('a risk-stage advice: permissionDecision is deny, the reason is never REFUS
   assert.equal(payload.hookSpecificOutput.permissionDecision, 'deny')
   const reason = payload.hookSpecificOutput.permissionDecisionReason
   assert.doesNotMatch(reason, /REFUSED/i, 'the model must be able to tell an advice apart from a hard stop')
-  assert.match(reason, /`some-unmeasured-advisable-tool --flag`/, 'the concrete segment must be named')
+  // 0.13.7 (odd/tasks/advice-no-repeat.md): the model wrote this single-segment command, so its text no longer echoes it.
+  assert.doesNotMatch(reason, /It would run/, 'a single-segment command is not echoed back to the model')
   assert.match(reason, /run the same command again unchanged and it will go through/, 'the retry clause must be present')
   assert.match(payload.systemMessage, /advis/i, 'the person sees a short, non-blocking advice line')
+  assert.match(payload.systemMessage, /`some-unmeasured-advisable-tool --flag`/, 'the person-facing line still names the concrete segment')
 
   const record = JSON.parse(gateLogText(home).trim())
   assert.equal(record.verdict, 'advise')
@@ -2501,7 +2503,7 @@ test('requires_human policy stops stay a human ask, never an advice -- unaffecte
 // Jev call answered 'allow' for a detected deploy/publish command.
 // ---------------------------------------------------------------------------
 
-test('a deploy command that Jev would silently allow is floored into an advice naming the deploy, not a silent allow', () => {
+test('a deploy command that Jev would silently allow is floored into an advice, not a silent allow, without repeating the deploy to the model', () => {
   const home = makeHome()
   const command = 'gh workflow run deploy-azure-dev.yml --ref release/0.3.1'
   const key = expectedCacheKey(command, home, home)
@@ -2511,8 +2513,10 @@ test('a deploy command that Jev would silently allow is floored into an advice n
   assert.equal(payload.hookSpecificOutput.permissionDecision, 'deny', 'never a silent allow for a recognised deploy command')
   const reason = payload.hookSpecificOutput.permissionDecisionReason
   assert.doesNotMatch(reason, /REFUSED/i)
-  assert.match(reason, /triggers a deployment workflow on GitHub Actions/)
+  // 0.13.7 (odd/tasks/advice-no-repeat.md): the model wrote `gh workflow run`, so the description is not repeated to it.
+  assert.doesNotMatch(reason, /triggers a deployment workflow on GitHub Actions/)
   assert.match(reason, /run the same command again unchanged and it will go through/)
+  assert.match(payload.systemMessage, /`gh workflow run deploy-azure-dev\.yml --ref release\/0\.3\.1`/, 'the person-facing line still names the deploy segment')
 
   const record = JSON.parse(gateLogText(home).trim())
   assert.equal(record.verdict, 'advise')
@@ -2678,7 +2682,9 @@ test('es locale: the deploy/publish floor advice names the segment and picks "di
   assert.equal(payload.hookSpecificOutput.permissionDecision, 'deny')
   assert.equal(payload.systemMessage, 'jev · avisó al modelo antes de `gh workflow run deploy-azure-dev.yml --ref release/0.3.1`: dispara un deploy')
   const reason = payload.hookSpecificOutput.permissionDecisionReason
-  assert.match(reason, /triggers a deployment workflow on GitHub Actions/, 'the model-facing text keeps the specific English description')
+  // 0.13.7 (odd/tasks/advice-no-repeat.md): the person-facing line above is unchanged; the model text drops the description it already knows.
+  assert.doesNotMatch(reason, /triggers a deployment workflow on GitHub Actions/, 'the model-facing text no longer repeats the deploy description')
+  assert.match(reason, /run the same command again unchanged and it will go through/)
 })
 
 test('es locale: the deploy/publish floor picks "publica un paquete" for a publish-shaped detection', () => {

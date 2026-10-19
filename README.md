@@ -16,6 +16,12 @@ The judgement is made by [Jev](https://typesafe.ai) (TypeSafe), which
 answers small typed questions in a few hundred milliseconds for a fraction
 of a cent — not by a large model reasoning about your shell.
 
+## What changed in 0.13.7
+
+- **Shorter advice to the coding model.** When Jev advised the model to take a second look, it repeated the command the model had just written and what that command obviously does, such as "triggers a deployment workflow". Now it says only what the model does not already know, which costs fewer tokens on every advice. The line you see in the session is the same as before.
+
+To update: Settings → Plugins → Refresh → Jev Advisor → Check for update.
+
 ## What changed in 0.13.6
 
 - **Jev no longer leaves git locked.** When Jev checked a git command in a large repository, it could leave an empty `index.lock` file behind. Then the next git command in that folder failed with "Unable to create index.lock" until someone deleted the file by hand. Jev's own git reads now never lock the repository.

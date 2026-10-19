@@ -50,6 +50,9 @@ const DEPLOY_PUBLISH_PATTERNS: readonly DeployPublishPattern[] = [
   { pattern: /kubectl\s+apply\b/, description: "applies a Kubernetes manifest", kind: "deploy" },
 ];
 
+/** Every pattern's own description: what the matched command itself says it does, so the model-facing advice never repeats it (gate_advice_text.ts). */
+export const DEPLOY_PUBLISH_DESCRIPTIONS: ReadonlySet<string> = new Set(DEPLOY_PUBLISH_PATTERNS.map((p) => p.description));
+
 export interface DeployPublishDetection {
   readonly description: string;
   readonly kind: "deploy" | "publish";

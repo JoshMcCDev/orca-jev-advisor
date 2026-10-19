@@ -171,6 +171,49 @@ test("C2: the header names Clef when Clef judged, and stays Jev's otherwise", ()
   assert.equal(clef.replace(/^Clef advice/, "Jev advice"), jev);
 });
 
+// 0.13.7 (odd/tasks/advice-no-repeat.md): the model wrote the command, so the
+// advice never repeats it, nor an effect the command already makes obvious.
+test("0.13.7: a single-segment deploy advice repeats neither the command nor its obvious effect", () => {
+  const { modelText } = composeAdviceText({
+    command: "gh workflow run lab-release.yml -R ab2webco/orca-oss --ref main",
+    reasons: ["triggers a deployment workflow on GitHub Actions"],
+    sessionEligibleForRetry: true,
+  });
+  assert.doesNotMatch(modelText, /It would run/);
+  assert.doesNotMatch(modelText, /Why:/);
+  assert.doesNotMatch(modelText, /triggers a deployment workflow/);
+  assert.match(modelText, /^Jev advice \(not a refusal\): /);
+  assert.match(modelText, /run the same command again unchanged and it will go through/);
+});
+
+test("0.13.7: obvious-effect and config-only reasons are dropped, specific ones kept, also from a cached joined reason", () => {
+  const { modelText } = composeAdviceText({
+    command: "some-tool --flag",
+    reasons: [
+      `${MODEL_RISK_REASON["reason.cannotUndoAndLeavesMachine"]} · if it is wrong, it breaks something that matters to someone`,
+      "this directory doesn't match any catalog destination, so the global thresholds were used",
+    ],
+    sessionEligibleForRetry: true,
+  });
+  assert.doesNotMatch(modelText, /leaves this machine/);
+  assert.doesNotMatch(modelText, /catalog destination/);
+  assert.match(modelText, /Why: if it is wrong, it breaks something that matters to someone\./);
+});
+
+test("0.13.7: a command of one segment is not echoed back; a compound one still names the segments that concern", () => {
+  assert.doesNotMatch(composeAdviceText({ command: "rm -rf dist", reasons: ["it can't be undone"], sessionEligibleForRetry: true }).modelText, /It would run/);
+  assert.match(composeAdviceText({ command: "npm test && rm -rf dist", reasons: ["it can't be undone"], sessionEligibleForRetry: true }).modelText, /It would run: `rm -rf dist`\./);
+});
+
+test("0.13.7: the advice is shorter than before for the measured common case", () => {
+  const { modelText } = composeAdviceText({
+    command: "git push origin main",
+    reasons: ["if it is wrong, it needs cleanup afterwards", MODEL_RISK_REASON["reason.cannotUndoAndLeavesMachine"] as string],
+    sessionEligibleForRetry: true,
+  });
+  assert.ok(modelText.length < 300, `${modelText.length} chars: ${modelText}`);
+});
+
 test("C2: the model-facing risk reason names the judge", () => {
   assert.equal(modelRiskReasonFor("reason.tooCloseToTheLine", "jev"), MODEL_RISK_REASON["reason.tooCloseToTheLine"]);
   assert.equal(modelRiskReasonFor("reason.tooCloseToTheLine", "clef"), "Clef's risk score for this command is right at its limit");
