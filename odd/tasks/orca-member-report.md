@@ -21,9 +21,9 @@ Jev reports there from a pane that is not a game pane. Request from orca-oss.
   `routedModel`, `sessionModel`.
 
 ## Tasks
-- [ ] R1 pure `src/core/orca_report.ts`: `orcaReportExecutable`, `orcaReportPins`, `buildOrcaReport`. RED first.
-- [ ] R2 hooks: report from non-game panes, null at session end, guarded no-op. RED first.
-- [ ] R3 CHANGELOG, version, preflight, live check, QA doc.
+- [x] R1 pure `src/core/orca_report.ts`: `orcaReportExecutable`, `orcaReportPins`, `buildOrcaReport`. RED first.
+- [x] R2 hooks: report from non-game panes, null at session end, guarded no-op. RED first.
+- [x] R3 CHANGELOG (Unreleased, no version bump: release needs the owner), preflight, live check, QA doc.
 
 ## Not done (said plainly)
 - `hold` (the "se mantiene" text) and `confidence`: the router computes them
