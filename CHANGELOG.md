@@ -2,6 +2,10 @@
 
 Every release of Jev Advisor, newest first.
 
+## 0.13.7
+
+- **The advice to the model says only what the model does not already know** (odd/tasks/advice-no-repeat.md, `src/core/gate_advice_text.ts`). The model-facing advice repeated the command the model had just written ("It would run: `gh workflow run ...`"), the effect that command obviously has ("triggers a deployment workflow on GitHub Actions", "it cannot be undone and its effect leaves this machine") and an internal config note ("this directory doesn't match any catalog destination, so the global thresholds were used"). The owner flagged it as tokens wasted on every advice. On 2026-10-18 the gate gave 296 advices and 253 of them were retried unchanged, so that text was read once per advice and changed nothing. The advice now drops the deploy/publish descriptions, the "leaves this machine" reason and the catalog note, also from a cached `·`-joined reason; names the affected segments only when the command has more than one; and has a shorter header ("Jev advice (not a refusal): worth a second look before it runs."). Specific reasons, recoverability sentences, the retry clause and the judge name stay. The person-facing line (`systemMessage`) is byte for byte unchanged.
+
 ## 0.13.6
 
 - **The gate never leaves a git `index.lock` behind** (odd/tasks/hook-git-locks.md, `adapters/claude/gate-bash.ts`). To read a checkout, the hook runs `git status`, which refreshes the index and takes the optional index lock to do so. A call that ran past its 1.5 s limit was stopped with SIGKILL, so git could not remove the lock. That left a 0-byte `index.lock`, and the next git command in that worktree failed on it. This happened three times in one orca-oss session, in a worktree where `git status --porcelain --ignored -uall` takes 1.8 s. Every hook git call now runs with `GIT_OPTIONAL_LOCKS=0`, so `status` and `diff` take no lock. A call that overruns gets SIGTERM, on which git removes the lock files it holds; `git add --dry-run` still takes one.

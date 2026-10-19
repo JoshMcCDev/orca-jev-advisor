@@ -302,10 +302,13 @@ test('both mode: a policy block Jev decided after a Clef policy hit names Jev', 
 })
 
 // Captured from 0.13.3 (384e242) before C2: Jev-only output must never change.
-const GOLDEN_JEV_ADVICE = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Jev advice (not a refusal): this command would affect something worth a second look before it runs.\\nIt would run: `some-unmeasured-tool --flag`.\\nWhy: if it is wrong, it breaks something that matters to someone; this directory doesn\'t match any catalog destination, so the global thresholds were used.\\nThis session could not be identified, so repeating the command will NOT be recognized as the same request and will be judged fresh. If the user explicitly asked for exactly this, say so plainly and proceed deliberately; otherwise, change course."},"systemMessage":"jev · advised the model before `some-unmeasured-tool --flag`: Jev isn\'t sure it\'s harmless"}'
+// Recaptured on purpose in 0.13.7 (odd/tasks/advice-no-repeat.md): the model
+// text no longer echoes a single-segment command nor the catalog note, and
+// has a shorter header. The systemMessage part is byte for byte unchanged.
+const GOLDEN_JEV_ADVICE = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Jev advice (not a refusal): worth a second look before it runs.\\nWhy: if it is wrong, it breaks something that matters to someone.\\nThis session could not be identified, so repeating the command will NOT be recognized as the same request and will be judged fresh. If the user explicitly asked for exactly this, say so plainly and proceed deliberately; otherwise, change course."},"systemMessage":"jev · advised the model before `some-unmeasured-tool --flag`: Jev isn\'t sure it\'s harmless"}'
 const GOLDEN_JEV_DENY_ES = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"REFUSED: forbidden by the team policy never_rewrite_shared_history (Never rewrite history that others share.). You cannot run this command. Do not retry it, and do not reach the same result by another command, tool or script — the refusal is about the effect, not the spelling. If it genuinely needs to happen, say so and let the person run it themselves in a terminal; they are not blocked. Continue with the rest of the work."},"systemMessage":"jev · bloqueó `some-unmeasured-tool --flag`: lo prohíbe la política never_rewrite_shared_history"}'
 
-test('Jev-only mode: an advice and a policy block are byte-identical to 0.13.3', () => {
+test('Jev-only mode: an advice and a policy block are byte-identical to the 0.13.7 capture', () => {
   assert.equal(run(makeHome({ settings: { mode: 'jev' } }), { script: { 'api.typesafe.ai': { status: 200, body: jevBody(2.5) } } }).stdout, GOLDEN_JEV_ADVICE)
   const home = makeHome({ settings: { mode: 'jev' } })
   setLocale(home, 'es')
@@ -315,8 +318,11 @@ test('Jev-only mode: an advice and a policy block are byte-identical to 0.13.3',
 })
 
 // C3b: a cache hit names whoever decided the entry it replays. Captured
-// before C3b: a Jev-only cache hit must never change.
-const GOLDEN_JEV_CACHE_ADVICE = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Jev advice (not a refusal): this command would affect something worth a second look before it runs.\\nIt would run: `some-unmeasured-tool --flag`.\\nWhy: if it is wrong, it breaks something that matters to someone · this directory doesn\'t match any catalog destination, so the global thresholds were used.\\nThis session could not be identified, so repeating the command will NOT be recognized as the same request and will be judged fresh. If the user explicitly asked for exactly this, say so plainly and proceed deliberately; otherwise, change course."},"systemMessage":"jev · advised the model before `some-unmeasured-tool --flag`: Jev isn\'t sure it\'s harmless"}'
+// before C3b: a Jev-only cache hit must never change. Recaptured on purpose
+// in 0.13.7 (odd/tasks/advice-no-repeat.md): the cached `·`-joined reason is
+// split and the catalog note dropped, so it now matches the fresh advice. The
+// systemMessage part is byte for byte unchanged.
+const GOLDEN_JEV_CACHE_ADVICE = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Jev advice (not a refusal): worth a second look before it runs.\\nWhy: if it is wrong, it breaks something that matters to someone.\\nThis session could not be identified, so repeating the command will NOT be recognized as the same request and will be judged fresh. If the user explicitly asked for exactly this, say so plainly and proceed deliberately; otherwise, change course."},"systemMessage":"jev · advised the model before `some-unmeasured-tool --flag`: Jev isn\'t sure it\'s harmless"}'
 const GOLDEN_JEV_CACHE_DENY_ES = GOLDEN_JEV_DENY_ES
 const policyDenyAnswers = () => policyAnswers(0.2, { violation: { none: 0.04, policy_1: 0.96 } })
 
