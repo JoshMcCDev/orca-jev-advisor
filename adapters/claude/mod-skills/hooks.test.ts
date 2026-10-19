@@ -6481,6 +6481,8 @@ interface ReportedState {
   effort: string | null;
   pinned: { model: boolean; effort: boolean };
   line?: string;
+  confidence?: number;
+  hold?: string;
   routedModel?: string;
   sessionModel?: string;
 }
@@ -6600,4 +6602,16 @@ test("orca report: a failing or hung CLI is no reason to fail a hook", async () 
   await playTurn(host, handlers, engine, 1, "design the cache invalidation across both services", 2);
   await settle();
   assert.ok(reportRuns(host) >= 1, "it tried");
+});
+
+test("JEVADV-106 v2: the report carries Jev's confidence, and the hold reason only when the router kept its model", async () => {
+  const { host } = await memberScenario(MEMBER);
+  const sent = reportsOf(host).filter((report): report is ReportedState => report !== null);
+  const last = sent.at(-1);
+  assert.ok(last, "a report was sent");
+  const decision = routerDecisionLines(host).at(-1);
+  assert.ok(decision, "the router logged a decision");
+  assert.equal(last.confidence, decision.confidence, "the confidence is the one Jev gave the decision");
+  if (last.hold !== undefined) assert.equal(last.hold, decision.reason, "a hold is the reason the router logged, never invented text");
+  assert.equal(JSON.stringify(last).includes("design the cache"), false, "no prompt text in the report");
 });

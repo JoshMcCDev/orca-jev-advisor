@@ -1411,7 +1411,7 @@ async function routeMainStep($: EngineInterface, e: Frozen<TurnStepInput>, mode:
   const at = new Date(await $.clock.now()).toISOString()
   await appendRouterDecision($, at, `${JSON.stringify(routerDecisionRecord({ at, account, point: 'start', decision, applied, quotaBand: band, quotaSource, origin: originKind, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed), ...(jev?.margin === undefined ? {} : { margin: jev.margin }) }))}\n`)
 
-  const own = { configuredModel: e.model, configuredEffort: stickyEffort(e.effort), pendingLower: null, stats: EMPTY_STATS, lastPrompt: promptKey }
+  const own = { configuredModel: e.model, configuredEffort: stickyEffort(e.effort), pendingLower: null, stats: EMPTY_STATS, lastPrompt: promptKey, ...orcaJudgment(decision) }
   const next: RouterSticky = decision.changed
     ? { ...own, model: decision.model, effort: decision.effort, rewrite: applied, tier: decision.tier }
     : { ...own, model: e.model, effort: stickyEffort(e.effort), rewrite: false, tier: decision.tier }
@@ -1444,7 +1444,7 @@ async function routeEngineTurn($: EngineInterface, e: Frozen<TurnStepInput>, mod
   if (decision === null) return { input: stickyStepInput(e, sticky, mode), status: null }
   const at = new Date(await $.clock.now()).toISOString()
   await appendRouterDecision($, at, `${JSON.stringify(routerDecisionRecord({ at, account, point: 'stage', decision, applied: mode === 'active', quotaBand: band, quotaSource, origin: originKind, project, sessionId: await readSessionId($), turnId: e.turnId, engine: engineNotesOf(tiers, decision.proposed) }))}\n`)
-  const next: RouterSticky = { ...sticky, model: decision.model, effort: decision.effort, rewrite: false, pendingLower: null }
+  const next: RouterSticky = { ...sticky, model: decision.model, effort: decision.effort, rewrite: false, pendingLower: null, confidence: null, hold: orcaHold(decision) }
   await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' }, next)
   return { input: stickyStepInput(e, next, mode), status: null }
 }
@@ -1499,8 +1499,9 @@ async function routeStage($: EngineInterface, e: Frozen<TurnStepInput>, mode: 'm
         tier: decision.tier ?? sticky.tier,
         pendingLower: null,
         lastPrompt: promptKey,
+        ...orcaJudgment(decision),
       }
-    : { ...sticky, pendingLower: decision.pending, lastPrompt: promptKey }
+    : { ...sticky, pendingLower: decision.pending, lastPrompt: promptKey, ...orcaJudgment(decision) }
   await $.state.set({ plugin: 'orca-jev-mod-skills', key: 'routerSticky' }, next)
 
   const shown = { tier: decision.tier, model: next.model, effort: next.effort, effortTarget: decision.effortTarget, reason: decision.reason, guard: decision.guard, changed: decision.changed, proposed: decision.proposed }
@@ -3758,6 +3759,16 @@ function sendOrcaReport($: EngineInterface, game: GameHost, build: () => Promise
   return game.orca.chain
 }
 
+/** JEVADV-106: what the router's last decision says for the Orca report, kept in `routerSticky`. */
+function orcaJudgment(decision: { readonly confidence: number | null; readonly changed: boolean; readonly reason: string }): { confidence: number | null; hold: string | null } {
+  return { confidence: decision.confidence, hold: orcaHold(decision) }
+}
+
+/** JEVADV-106: the reason the router kept its model; null when the model changed. */
+function orcaHold(decision: { readonly changed: boolean; readonly reason: string }): string | null {
+  return decision.changed ? null : decision.reason
+}
+
 /** Reports what Jev draws now to Orca, once a change makes it differ from the last report. */
 function reportToOrca($: EngineInterface, game: GameHost): Promise<void> {
   return sendOrcaReport($, game, async () => {
@@ -3776,6 +3787,8 @@ function reportToOrca($: EngineInterface, game: GameHost): Promise<void> {
         tool: game.orca.tool,
         routedModel: sticky?.model ?? null,
         sessionModel: sticky?.configuredModel ?? null,
+        confidence: sticky?.confidence ?? null,
+        hold: sticky?.hold ?? null,
       }),
     )
   })

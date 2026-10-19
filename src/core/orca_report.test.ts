@@ -28,12 +28,12 @@ test("pins: only exactly 1 is a pin", () => {
 });
 
 test("report: v1 keys exactly, v2 keys only when there is something to say", () => {
-  const bare = buildOrcaReport({ model: null, effort: null, pins: { model: false, effort: false }, line: null, skill: null, tool: null, routedModel: null, sessionModel: null });
+  const bare = buildOrcaReport({ model: null, effort: null, pins: { model: false, effort: false }, line: null, skill: null, tool: null, routedModel: null, sessionModel: null, confidence: null, hold: null });
   assert.deepEqual(bare, { version: 1, model: null, effort: null, pinned: { model: false, effort: false } });
 });
 
 test("report: v2 extras sit beside v1 and v1 keeps its meaning", () => {
-  const report = buildOrcaReport({ model: "Haiku 5.5", effort: "high", pins: { model: true, effort: false }, line: "jev · model: Haiku 5.5 · high effort", skill: "tdd", tool: "Bash", routedModel: "claude-haiku-5-5", sessionModel: "claude-opus-5-5" });
+  const report = buildOrcaReport({ model: "Haiku 5.5", effort: "high", pins: { model: true, effort: false }, line: "jev · model: Haiku 5.5 · high effort", skill: "tdd", tool: "Bash", routedModel: "claude-haiku-5-5", sessionModel: "claude-opus-5-5", confidence: null, hold: null });
   assert.deepEqual(report, {
     version: 1,
     model: "Haiku 5.5",
@@ -45,4 +45,9 @@ test("report: v2 extras sit beside v1 and v1 keeps its meaning", () => {
     routedModel: "claude-haiku-5-5",
     sessionModel: "claude-opus-5-5",
   });
+});
+
+test("report: confidence and hold are v2 extras, a zero confidence is still a value", () => {
+  const report = buildOrcaReport({ model: "Haiku 5.5", effort: null, pins: { model: false, effort: false }, line: null, skill: null, tool: null, routedModel: null, sessionModel: null, confidence: 0, hold: "low-confidence" });
+  assert.deepEqual(report, { version: 1, model: "Haiku 5.5", effort: null, pinned: { model: false, effort: false }, confidence: 0, hold: "low-confidence" });
 });

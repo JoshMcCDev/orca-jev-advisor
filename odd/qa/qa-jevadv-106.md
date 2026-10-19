@@ -19,5 +19,5 @@ Date: 2026-10-19. Branch `feat/jevadv-106-orca-report`.
 ## Not verified
 - The hooks module was not run inside a real Claude session with `ORCA_GAME_CLI` exported: Orca does not export it to member panes yet (ORCA-657). Scenario 9 drives the real CLI with the real report builder by hand, not through the hook.
 - That Orca stored the report and the lead's Panel shows it was not read back or looked at.
-- `hold` and `confidence` are not reported.
+- `hold` is the router's reason code, not the translated "se mantiene" text.
 - No UI changed; `npm run shots` (4 panel screenshots, no overflow) only confirms the config panels are untouched.

@@ -41,6 +41,10 @@ export interface OrcaReportInput {
   /** The model the router sent the loop to, and the one the session itself runs. */
   readonly routedModel: string | null;
   readonly sessionModel: string | null;
+  /** Jev's confidence in its last pick (0 to 1); null when Jev judged nothing. */
+  readonly confidence: number | null;
+  /** Why the router kept the model it had (`same`, `held-by-guard`, ...); null when it changed or nothing held. */
+  readonly hold: string | null;
 }
 
 /** The v1 report; a v2 key is there only when it has a value. */
@@ -54,6 +58,8 @@ export interface OrcaReport {
   readonly tool?: string;
   readonly routedModel?: string;
   readonly sessionModel?: string;
+  readonly confidence?: number;
+  readonly hold?: string;
 }
 
 export function buildOrcaReport(input: OrcaReportInput): OrcaReport {
@@ -67,5 +73,7 @@ export function buildOrcaReport(input: OrcaReportInput): OrcaReport {
     ...(input.tool === null ? {} : { tool: input.tool }),
     ...(input.routedModel === null ? {} : { routedModel: input.routedModel }),
     ...(input.sessionModel === null ? {} : { sessionModel: input.sessionModel }),
+    ...(input.confidence === null ? {} : { confidence: input.confidence }),
+    ...(input.hold === null ? {} : { hold: input.hold }),
   };
 }
