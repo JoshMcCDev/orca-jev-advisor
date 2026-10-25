@@ -50,23 +50,27 @@ export interface GateOwnFiles {
  * spelling (a symlinked home or temp directory: macOS's `/var` is
  * `/private/var`), so a target resolved through `canonical` still matches.
  */
-export function gateOwnFiles(input: { readonly configDir: string; readonly cacheDir: string; readonly orcaUserDataDir: string | null }, canonical: (path: string) => string = identity): GateOwnFiles {
+export function gateOwnFiles(input: { readonly configDir: string; readonly cacheDir: string; readonly orcaUserDataDir: string | null; readonly codexConfigDirs?: readonly string[] }, canonical: (path: string) => string = identity): GateOwnFiles {
   const spellings = (dir: string): readonly string[] => [...new Set([normalize(dir), normalize(canonical(dir))])];
   const configDirs = spellings(input.configDir);
   const cacheDirs = spellings(input.cacheDir);
+  const codexDirs = (input.codexConfigDirs ?? []).flatMap(spellings);
   const files = new Set<string>([
     ...configDirs.flatMap((dir) => GATE_OWN_CONFIG_FILES.map((name) => join(dir, name))),
     ...cacheDirs.flatMap((dir) => GATE_OWN_CACHE_FILES.map((name) => join(dir, name))),
+    ...codexDirs.flatMap((dir) => [join(dir, "hooks.json"), join(dir, "config.toml")]),
   ]);
   const orcaDirs = input.orcaUserDataDir === null ? [] : spellings(input.orcaUserDataDir);
   const storageDirs = orcaDirs.map((dir) => join(dir, "plugins-data", PLUGIN_ID));
   for (const dir of orcaDirs) files.add(join(dir, "orca-profile-index.json"));
   for (const dir of storageDirs) for (const name of GATE_OWN_ORCA_STORAGE_FILES) files.add(join(dir, name));
-  return { files, roots: [...configDirs, ...cacheDirs, ...storageDirs], orcaUserDataDirs: orcaDirs };
+  return { files, roots: [...configDirs, ...cacheDirs, ...storageDirs, ...codexDirs], orcaUserDataDirs: orcaDirs };
 }
 
 function ownFile(path: string, own: GateOwnFiles): string | null {
   if (own.files.has(path)) return path;
+  if (["hooks.json", "config.toml"].includes(basename(path)) && basename(dirname(path)) === "home" &&
+    own.orcaUserDataDirs.some((orca) => dirname(dirname(dirname(path))) === join(orca, "codex-accounts"))) return path;
   if (basename(path) === "orca-data.json" && own.orcaUserDataDirs.some((orca) => dirname(dirname(path)) === join(orca, "profiles"))) return path;
   return null;
 }

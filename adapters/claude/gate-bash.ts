@@ -2072,7 +2072,9 @@ function displayPath(path: string): string {
  */
 function gateOwnFileWritten(command: string, cwd: string): string | null {
   try {
-    const own = gateOwnFiles({ configDir: CONFIG_DIR, cacheDir: CACHE_DIR, orcaUserDataDir: orcaUserDataPath(PLATFORM, HOME_PATHS.home) }, canonicalPath)
+    const codexConfigDirs = process.env.ORCA_JEV_CODEX_GATE === '1'
+      ? [join(homedir(), '.codex'), resolve(process.env.CODEX_HOME || join(homedir(), '.codex'))] : []
+    const own = gateOwnFiles({ configDir: CONFIG_DIR, cacheDir: CACHE_DIR, orcaUserDataDir: orcaUserDataPath(PLATFORM, HOME_PATHS.home), codexConfigDirs }, canonicalPath)
     return commandWritesGateOwnFile(command, cwd, homedir(), own, canonicalPath)
   } catch {
     return null

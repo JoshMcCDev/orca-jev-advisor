@@ -25,10 +25,9 @@
  * events pile up unacked. Nothing in this module keeps state in memory
  * across calls -- every read and write goes through storage
  * (src/core/store.ts), so a killed-and-restarted worker picks up exactly
- * where the last one left off. Storage is also the ONLY channel to the
- * panels: they never call the worker directly, only `storage.get`/
- * `storage.set` through the postMessage bridge (see panels/board.html and
- * panels/config.html).
+ * where the last one left off. Orca 1.4.235 panels cannot call plugin
+ * storage; config.html therefore uses a short-lived loopback browser page
+ * for its storage bridge.
  */
 
 import { DENY_TOGGLE_KEYS } from '../../src/core/deny_tier_config.ts'
@@ -48,7 +47,7 @@ import {
   migratePolicyKind
 } from '../../src/core/decisions.ts'
 import { auditPoliciesWithoutKind } from '../../src/core/policy_kind_audit.ts'
-import { ORCA_CLI_ARGUMENTS, orcaCliCommand, orcaCliOptions } from '../../src/core/orca_cli.ts'
+import { ORCA_CLI_ARGUMENTS, orcaCliCommand, orcaCliOptions, orcaLoopbackConfigTabArguments } from '../../src/core/orca_cli.ts'
 import { deriveCatalogProposals } from '../../src/core/catalog_proposals.ts'
 import { resolveLinkedWorktreeMainCheckout } from '../../src/core/linked_worktree.ts'
 import { POLICY_SEED_MARKER_KEY, parseSeedPolicies, parseSeedVersion, shouldSeedPolicies } from '../../src/core/policy_seed.ts'
@@ -68,6 +67,8 @@ import { managedNodeRoots } from '../../src/core/node_runtime.ts'
 import { decideRescanInstall, isRescanDue } from '../../src/core/claude_integration_rescan.ts'
 import { DEFAULT_FEATURE_MODULES } from '../../src/core/feature_modules.ts'
 import { createModuleScheduler, followStatus, modulesFromRead } from './module-scheduler.mjs'
+import { startConfigWebServer } from './config-web.mjs'
+import { createCodexIntegration } from './codex-integration.mjs'
 import {
   attendModelsMirrorRequest,
   attendModelsSeedRequest,
@@ -100,6 +101,11 @@ const HOME_PATHS = {
   xdgCacheHome: process.env.XDG_CACHE_HOME,
 }
 const CACHE_DIR = resolveCacheDir(PLATFORM, HOME_PATHS)
+// Node makes a directory grant recursive only while the directory exists.
+// The explicit wildcard keeps missing-cache reads and first writes working
+// without granting the broader ~/.cache parent.
+const CACHE_DIR_READ_GRANTS = [`--allow-fs-read=${CACHE_DIR}`, `--allow-fs-read=${CACHE_DIR}/*`]
+const CACHE_DIR_WRITE_GRANTS = [`--allow-fs-write=${CACHE_DIR}`, `--allow-fs-write=${CACHE_DIR}/*`]
 const CONFIG_DIR = resolveConfigDir(PLATFORM, HOME_PATHS)
 // Claude Code's own config roots the install sidecar writes into -- see
 // src/core/orca_accounts.ts. `claudeAccountsDir` is one parent directory
@@ -352,10 +358,10 @@ async function mirrorCatalogAndPolicies (orca, storageHost, options = {}) {
 
 const ACCOUNT_QUOTA_REFRESH_MS = 10 * 60 * 1000
 
-/** Runs `orca account list --json` and returns the raw accounts array (Orca's
- *  own `{ok, result: {accounts}}` envelope unwrapped) -- never throws: a
- *  fetch that cannot run reports its detail rather than swallowing it, same
- *  shape as fetchOrcaWorktrees above. */
+/** Runs `orca account list --json` and returns raw account rows -- never
+ *  throws. Older CLIs returned `result.accounts`; current Orca groups rows
+ *  under `result.<provider>.accounts`, so attach that group key as `provider`
+ *  for the consumers that join accounts across providers. */
 async function fetchAccountQuotas (orca) {
   try {
     const { execFile } = await import('node:child_process')
@@ -363,8 +369,12 @@ async function fetchAccountQuotas (orca) {
     const execFileAsync = promisify(execFile)
     const { stdout } = await execFileAsync(ORCA_CLI_BIN, ORCA_CLI_ARGUMENTS.accountList, orcaCliOptions(PLATFORM, PLUGIN_ROOT))
     const parsed = JSON.parse(stdout)
-    const accounts = parsed?.result?.accounts
-    if (!Array.isArray(accounts)) return { accounts: [], failure: 'orca account list --json returned no accounts array' }
+    const result = parsed?.result
+    if (Array.isArray(result?.accounts)) return { accounts: result.accounts, failure: null }
+    if (!isRecord(result)) return { accounts: [], failure: 'orca account list --json returned no account groups' }
+    const groups = Object.entries(result).filter(([provider, value]) => provider !== 'rateLimits' && isRecord(value) && Array.isArray(value.accounts))
+    if (groups.length === 0) return { accounts: [], failure: 'orca account list --json returned no account groups' }
+    const accounts = groups.flatMap(([provider, group]) => group.accounts.filter(isRecord).map((account) => ({ ...account, provider })))
     return { accounts, failure: null }
   } catch (error) {
     return { accounts: [], failure: String(error?.message ?? error).slice(0, 200) }
@@ -883,7 +893,13 @@ const PLUGIN_ROOT = join(__dirname, '..', '..')
 
 /** The CLI this plugin shells out to. Named so every invocation is findable,
  *  and so the three call sites cannot drift apart again. */
-const ORCA_CLI_BIN = orcaCliCommand(PLATFORM, { orcaCliCommand: process.env.ORCA_CLI_COMMAND })
+const LINUX_ORCA_CLI_SHIM = PLATFORM === 'linux'
+  ? join(HOME_PATHS.xdgConfigHome?.trim() || join(HOME_PATHS.home, '.config'), 'orca', 'linux-orca-cli-shim', 'orca')
+  : undefined
+const ORCA_CLI_BIN = orcaCliCommand(PLATFORM, {
+  orcaCliCommand: process.env.ORCA_CLI_COMMAND,
+  linuxCliShim: LINUX_ORCA_CLI_SHIM
+})
 const CLAUDE_INTEGRATION_SCRIPT = join(__dirname, 'install-claude-integration.mjs')
 const CLAUDE_INTEGRATION_TIMEOUT_MS = 8000
 // hooks-check runs the hooks in parallel with 5 s each; the outer budget must outlast that.
@@ -1310,7 +1326,7 @@ const MEASUREMENTS_REFRESH_MS = 15 * 1000
 async function readMeasurementsSummary () {
   return new Promise((resolve) => {
     try {
-      execFile(process.execPath, ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, `--allow-fs-read=${CACHE_DIR}`, MEASUREMENTS_SCRIPT], {
+      execFile(process.execPath, ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, ...CACHE_DIR_READ_GRANTS, MEASUREMENTS_SCRIPT], {
         timeout: MEASUREMENTS_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
         env: sidecarEnv({ ELECTRON_RUN_AS_NODE: '1' })
@@ -1355,7 +1371,7 @@ const MODEL_MEASUREMENTS_SCRIPT = join(__dirname, 'read-model-measurements.mjs')
 
 function runReadModelMeasurementsScript (catalog) {
   return spawnSidecar(
-    ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, `--allow-fs-read=${CACHE_DIR}`, MODEL_MEASUREMENTS_SCRIPT],
+    ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, ...CACHE_DIR_READ_GRANTS, MODEL_MEASUREMENTS_SCRIPT],
     {
       timeout: MEASUREMENTS_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
@@ -1430,8 +1446,8 @@ function consumptionSidecarArgv () {
   return [
     '--permission',
     `--allow-fs-read=${PLUGIN_ROOT}`,
-    `--allow-fs-read=${CACHE_DIR}`,
-    `--allow-fs-write=${CACHE_DIR}`,
+    ...CACHE_DIR_READ_GRANTS,
+    ...CACHE_DIR_WRITE_GRANTS,
     `--allow-fs-read=${CONFIG_DIR}`,
     `--allow-fs-read=${CLAUDE_HOME_DIR}`,
     `--allow-fs-read=${CLAUDE_JSON_PATH}`,
@@ -1489,7 +1505,7 @@ function activitySidecarArgv () {
   return [
     '--permission',
     `--allow-fs-read=${PLUGIN_ROOT}`,
-    `--allow-fs-read=${CACHE_DIR}`,
+    ...CACHE_DIR_READ_GRANTS,
     ACTIVITY_SCRIPT
   ]
 }
@@ -1608,14 +1624,12 @@ async function attendPanelSignals (orca, storageHost, scheduler, nowMs = Date.no
 }
 
 // ---------------------------------------------------------------------------
-// Worker heartbeat -- a panel cannot wake a reaped worker (see this module's
-// header and odd/tasks/panel-worker-wakeup.md): the only five panel-callable
-// host actions are answered in Orca's Electron main process without ever
-// reaching this worker. So before a panel writes anything secret-carrying it
-// needs to know whether a worker is actually alive right now, rather than
-// trust a poll that will never come. This key is that signal: written once
-// at activation and again on every runSecretPoll tick, so its age tracks how
-// long ago a worker was last definitely running.
+// Worker heartbeat -- the embedded panel cannot wake a reaped worker or call
+// storage on Orca 1.4.235. The supported configuration page is opened by a
+// command and talks to this worker through config-web.mjs. Before that page
+// writes a secret-carrying request, it checks whether a worker is actually
+// alive rather than leave the request unattended in storage. This key is
+// written at activation and on every runSecretPoll tick.
 // ---------------------------------------------------------------------------
 
 const WORKER_HEARTBEAT_KEY = 'workerHeartbeat'
@@ -1881,6 +1895,8 @@ async function attendClaudeIntegrationRequest (orca, storageHost, options = {}) 
   await storageHost.set(CLAUDE_INTEGRATION_RESULT_KEY, claudeIntegrationResultPayload(request.id, result))
     .catch((err) => orca.log(`claude integration result publish failed: ${err.message}`))
 
+  if (result.ok && request.intent === 'install') await storageHost.set('agentIntegration', 'claude')
+
   await publishClaudeIntegrationStatus(orca, storageHost, options)
 }
 
@@ -1958,7 +1974,7 @@ async function attendFeatureModulesSaveRequest (orca, storageHost, scheduler, op
 
   // The hooks follow the file, under the same guard activation uses (no force):
   // a newer install is left alone, and `skipped` tells the panel so.
-  const installed = await installClaudeIntegration(orca, options)
+  const installed = await storageHost.get('agentIntegration') === 'codex' ? { ok: true } : await installClaudeIntegration(orca, options)
   const skipped = installed.ok === true && installed.skipped === true && installed.reason === 'newer-install-present'
 
   // The worker's own jobs and the mod follow the file whatever the hooks did.
@@ -2394,8 +2410,8 @@ const GATE_AUTHORIZATIONS_TIMEOUT_MS = 10000
 
 /** The exact argv the sidecar runs with, exported so a test can pin its grants. */
 function gateAuthorizationsArgv (mode) {
-  const grants = ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, `--allow-fs-read=${CACHE_DIR}`]
-  if (mode === 'forget') grants.push(`--allow-fs-write=${CACHE_DIR}`)
+  const grants = ['--permission', `--allow-fs-read=${PLUGIN_ROOT}`, ...CACHE_DIR_READ_GRANTS]
+  if (mode === 'forget') grants.push(...CACHE_DIR_WRITE_GRANTS)
   return [...grants, GATE_AUTHORIZATIONS_SCRIPT, mode]
 }
 
@@ -3082,12 +3098,16 @@ async function checkClaudeIntegration () {
 }
 
 /** advisor.doctor -- checks the key against a real Jev call, CLI reachability, catalog validity, the secret mirror, and the Claude Code integration. */
-async function cmdDoctor (orca, storageHost, secretsHost) {
+async function cmdDoctor (orca, storageHost, secretsHost, codexIntegration = null) {
   const checks = []
 
   checks.push(...(await checkDecisionProviders(secretsHost, storageHost)))
   checks.push(await checkSecretMirror(secretsHost))
-  checks.push(await checkClaudeIntegration())
+  const codexStatus = codexIntegration ? await codexIntegration.run('status') : null
+  const codexSelected = await storageHost.get('agentIntegration') === 'codex'
+  checks.push(codexStatus && (codexSelected || codexStatus.installed)
+    ? { id: 'codex-integration', ok: codexStatus.ok === true && codexStatus.installed === true, detail: codexStatus.ok ? `Hooks configured in ${codexStatus.targets.filter(target => target.installed).length} of ${codexStatus.targets.length} Codex home(s). Review /hooks in each account; trust and execution have not been verified.` : codexStatus.detail || 'Could not read Codex hook configuration.' }
+    : await checkClaudeIntegration())
 
   let cliOk = false
   let cliDetail = 'Could not verify (missing the process:spawn capability, or the binary does not respond).'
@@ -3196,6 +3216,49 @@ function buildModuleRunners (orca, storageHost) {
 export default function activate (orca) {
   const storageHost = makeStorageHost(orca)
   const secretsHost = makeSecretsHost(orca)
+  const codexIntegration = createCodexIntegration({ root: PLUGIN_ROOT, userData: ORCA_USER_DATA_DIR, home: HOME_PATHS.home, env: sidecarEnv({ ELECTRON_RUN_AS_NODE: '1' }), storage: storageHost, log: message => orca.log(message) })
+  let configWebServer = null
+  let configWebServerStarting = null
+
+  const openConfiguration = async (doctorResult = null) => {
+    try {
+      if (configWebServer === null) {
+        if (configWebServerStarting === null) {
+          configWebServerStarting = startConfigWebServer({
+            htmlPath: join(PLUGIN_ROOT, 'adapters', 'orca', 'panels', 'config.html'),
+            storageHost
+          }).then((server) => {
+            configWebServer = server
+            return server
+          }).finally(() => { configWebServerStarting = null })
+        }
+        await configWebServerStarting
+      }
+
+      if (doctorResult !== null) configWebServer.setDoctorResult(doctorResult)
+      const localUrl = configWebServer.url
+      // Restrict the one dynamic CLI argument to the loopback/token shape
+      // before it reaches the Windows .cmd shell path.
+      await new Promise((resolve, reject) => {
+        execFile(ORCA_CLI_BIN, orcaLoopbackConfigTabArguments(localUrl), orcaCliOptions(PLATFORM, PLUGIN_ROOT), (error) => {
+          if (error) reject(error)
+          else resolve()
+        })
+      })
+      return { ok: true }
+    } catch (error) {
+      // Do not include the one-use URL: execFile errors can echo argv, which
+      // contains the local bridge token.
+      const code = String(error?.code ?? 'unknown').slice(0, 40)
+      orca.log(`configuration page could not open (orca CLI ${code})`)
+      const locale = await resolveWorkerLocale().catch(() => DEFAULT_LOCALE)
+      await orca.host.call('notifications.show', {
+        title: translate(ADVISOR_CATALOG, locale, 'title'),
+        body: translate(ADVISOR_CATALOG, locale, 'notify.configOpenFailed')
+      }).catch(() => {})
+      return { ok: false, reason: 'configuration-page-open-failed' }
+    }
+  }
 
   // Feature modules (src/core/feature_modules.ts): every job that belongs to
   // a module -- activation work, the interval ticks, the poll's panel
@@ -3214,9 +3277,19 @@ export default function activate (orca) {
 
   orca.commands.register('advisor.decide', (args) => cmdDecide(orca, storageHost, secretsHost, args))
   orca.commands.register('advisor.board', () => cmdBoard(storageHost))
-  orca.commands.register('advisor.doctor', () => cmdDoctor(orca, storageHost, secretsHost))
-  orca.commands.register('advisor.installClaude', () => installClaudeIntegration(orca, { force: true }))
+  orca.commands.register('advisor.doctor', async () => {
+    const result = await cmdDoctor(orca, storageHost, secretsHost, codexIntegration)
+    await openConfiguration(result)
+    return result
+  })
+  orca.commands.register('advisor.installClaude', async () => {
+    const result = await installClaudeIntegration(orca, { force: true })
+    if (result.ok) await storageHost.set('agentIntegration', 'claude')
+    return result
+  })
   orca.commands.register('advisor.uninstallClaude', () => uninstallClaudeIntegration(orca))
+  orca.commands.register('advisor.installCodex', () => codexIntegration.configure('install'))
+  orca.commands.register('advisor.uninstallCodex', () => codexIntegration.configure('uninstall'))
   orca.commands.register('advisor.refreshCatalog', () => cmdRefreshCatalog(orca, storageHost))
 
   // Secret AND Claude-integration request/result polling loop (see
@@ -3236,7 +3309,7 @@ export default function activate (orca) {
     // The module states ride on the installer's status, which this rescan
     // already spawns about once a minute: following them costs no process.
     readStatus: followStatus(scheduler, claudeIntegrationStatus),
-    install: () => installClaudeIntegration(orca),
+    install: async () => await storageHost.get('agentIntegration') === 'codex' ? { ok: true } : installClaudeIntegration(orca),
     publish: () => publishClaudeIntegrationStatus(orca, storageHost),
     now: () => Date.now()
   }
@@ -3251,6 +3324,8 @@ export default function activate (orca) {
       .catch((error) => orca.log(`secret request handling failed: ${error.message}`))
       .then(() => attendClaudeIntegrationRequest(orca, storageHost))
       .catch((error) => orca.log(`claude integration request handling failed: ${error.message}`))
+      .then(() => codexIntegration.attend())
+      .catch((error) => orca.log(`codex integration request handling failed: ${error.message}`))
       .then(() => attendClefTestRequest(orca, storageHost, secretsHost))
       .catch((error) => orca.log(`clef test request handling failed: ${error.message}`))
       // Base work, outside the scheduler: the module switch must work with every module off.
@@ -3354,9 +3429,10 @@ export default function activate (orca) {
   // mod-skills link, idempotently -- a fresh install where none of this
   // exists yet, and a silent no-op everywhere it already does. This is what
   // makes "install the plugin, save the key" enough on another machine.
-  installClaudeIntegration(orca)
+  storageHost.get('agentIntegration').then(selected => selected === 'codex' ? { ok: true } : installClaudeIntegration(orca))
     .then(() => publishClaudeIntegrationStatus(orca, storageHost))
     .catch((error) => orca.log(`initial claude integration install failed: ${error.message}`))
+  codexIntegration.publish().catch((error) => orca.log(`Codex integration status failed: ${error.message}`))
   // JEVADV-10 -- reads Orca's OWN language setting once, before the status
   // this panel-open reads is even computed, so the very first thing the
   // panel sees already reflects it (see applyOrcaUiLanguageAtActivation's
@@ -3401,6 +3477,11 @@ export default function activate (orca) {
     scheduler.close()
     secretPollStopped = true
     if (secretTimer) clearTimeout(secretTimer)
+    if (configWebServer !== null) {
+      const server = configWebServer
+      configWebServer = null
+      server.close().catch(() => {})
+    }
   }
 }
 

@@ -13,6 +13,7 @@ export type AdvisorKey =
   | "notify.decide.body"
   | "notify.doctor.ok"
   | "notify.doctor.problem"
+  | "notify.configOpenFailed"
   | "error.noApiKey"
   // adapters/orca/install-claude-integration.mjs's own failure paths (the
   // `reason`/`detail` shape it returns on save/clear key, install/revert
@@ -29,10 +30,11 @@ export const ADVISOR_CATALOG: Catalog<AdvisorKey> = {
   es: {
     title: "Jev Advisor",
     titleDoctor: "Jev Advisor: diagnóstico",
-    "notify.noKey.body": "No hay una clave de TypeSafe configurada. Abre la configuración del plugin.",
+    "notify.noKey.body": "No hay una clave de TypeSafe configurada. Ejecuta «Advisor: Check configuration» para abrir la configuración.",
     "notify.decide.body": "{{act}} para actuar · {{blocked}} bloqueadas · {{ask}} para revisar.",
-    "notify.doctor.ok": "Todo en orden.",
-    "notify.doctor.problem": "Hay problemas de configuración: revisa el panel.",
+    "notify.doctor.ok": "Todo en orden. La configuración se abrió en Orca Browser.",
+    "notify.doctor.problem": "Hay problemas de configuración. Se abrió la página de configuración en Orca Browser para corregirlos.",
+    "notify.configOpenFailed": "No se pudo abrir la configuración local. Revisa la ruta de Orca CLI en Ajustes → General y vuelve a ejecutar «Advisor: Check configuration».",
     "error.noApiKey": "No hay TYPESAFE_API_KEY configurada en el almacén de secrets del plugin.",
     "install.missingPluginRoot": "Falta pluginRoot: uso esperado install-claude-integration.mjs <install|uninstall|status> <pluginRoot>.",
     "install.unknownMode": "Modo no reconocido: {{mode}}.",
@@ -43,10 +45,11 @@ export const ADVISOR_CATALOG: Catalog<AdvisorKey> = {
   en: {
     title: "Jev Advisor",
     titleDoctor: "Jev Advisor: diagnostics",
-    "notify.noKey.body": "No TypeSafe key is configured. Open the plugin's settings.",
+    "notify.noKey.body": "No TypeSafe key is configured. Run “Advisor: Check configuration” to open the settings page.",
     "notify.decide.body": "{{act}} to act on · {{blocked}} blocked · {{ask}} to review.",
-    "notify.doctor.ok": "Everything checks out.",
-    "notify.doctor.problem": "There are configuration problems: check the panel.",
+    "notify.doctor.ok": "Everything checks out. The configuration page is open in Orca Browser.",
+    "notify.doctor.problem": "Configuration problems found. The settings page opened in Orca Browser so you can fix them.",
+    "notify.configOpenFailed": "Could not open the local configuration page. Check the Orca CLI path in Settings → General, then run “Advisor: Check configuration” again.",
     "error.noApiKey": "No TYPESAFE_API_KEY is configured in the plugin's secrets store.",
     "install.missingPluginRoot": "Missing pluginRoot: usage is install-claude-integration.mjs <install|uninstall|status> <pluginRoot>.",
     "install.unknownMode": "Unrecognized mode: {{mode}}.",

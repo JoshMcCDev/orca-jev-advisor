@@ -406,10 +406,20 @@ long each took, on your own traffic.
 
 1. Install the plugin from the Ab2Web marketplace in Orca, or load this
    repository as a development plugin.
-2. Open **Settings → Jev Advisor** and paste a TypeSafe API key. It is
-   stored with Electron's `safeStorage`, encrypted, and never shown in
-   full again.
-3. Press **Set up** under *Claude Code integration*.
+2. Run **Advisor: Check configuration** from Orca's command palette. It
+   checks the setup and opens the settings page in an Orca Browser tab because
+   Orca 1.4.235 does not let embedded plugin panels read or save plugin
+   settings. Paste the TypeSafe API key there; it is stored with Electron's
+   `safeStorage`, encrypted, and never shown in full again.
+3. Press **Set up** under *Codex integration* or *Claude Code integration*.
+   For Codex, restart the session and review and trust the hooks in `/hooks`
+   for each account. Claude does not need to be installed.
+
+Codex supports the command gate, destination policies, local deny rules,
+execution outcome logging and protection of advisor configuration from
+patch edits, using the same key and policy mirrors. Model routing, the
+context steward and the skills mod currently require Claude Code. See
+[Codex integration](adapters/codex/README.md) for setup and runtime limits.
 
 That is all. There is nothing to configure in your terminal, and no
 `settings.json` to edit by hand.
@@ -421,10 +431,12 @@ and no key at all. The key only buys judgement on the grey cases.
 
 ## What it writes outside itself
 
-A plugin that reaches outside its own directory should say so. This one
-writes twelve things, all listed in the settings panel. **Revert
+A plugin that reaches outside its own directory should say so. Codex setup
+updates `hooks.json` in each configured Codex home and keeps a one-time
+`hooks.json.jev-advisor.bak` backup; reverting removes the advisor entries.
+The Claude Code integration writes the twelve things below. Its **Revert
 everything** puts back the hook entries, the env var and the skills-mod
-copy. Clearing the key from the settings panel deletes the key file
+copy. Clearing the key from the configuration page deletes the key file
 separately. The three JSON mirrors below are never deleted by any action
 here — each is only ever overwritten by its own next save; the same goes
 for the three setting mirrors and the queue below:
