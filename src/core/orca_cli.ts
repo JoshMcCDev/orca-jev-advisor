@@ -22,12 +22,11 @@
 // the second is the one that is easy to miss:
 //
 //   1. Arguments are re-parsed by cmd.exe, whose quoting cannot be made
-//      reliably injection-proof. Acceptable in this one place only because
-//      every argument this plugin passes is a compile-time literal -- see
-//      ORCA_CLI_ARGUMENTS and the test that holds it to that. Nothing derived
-//      from a repository, a branch name, a panel field or a Jev response is
-//      ever passed. If that changes, this helper is the wrong tool and the
-//      call must move to `spawn` with an explicit interpreter.
+//      reliably injection-proof. Fixed CLI arguments live in
+//      ORCA_CLI_ARGUMENTS. The only dynamic argument is the configuration
+//      page URL, restricted by orcaLoopbackConfigTabArguments to 127.0.0.1,
+//      a numeric port and a hex-only token. Nothing from a repository, a
+//      branch name, a panel field or a Jev response reaches this shell path.
 //   2. cmd.exe resolves a bare command name from the CURRENT DIRECTORY before
 //      it consults PATH. The worker's cwd is not ours to assume, and this
 //      plugin's whole job is to sit inside repositories: a checkout carrying
@@ -37,19 +36,18 @@
 //      place no repository can write to.
 //
 // Node 24 (which package.json requires) raises DEP0190 for args + shell:true.
-// The warning is about exposure 1, which the literal-arguments invariant
-// already answers; it is recorded here so the next person does not have to
-// rediscover why the deprecation was accepted rather than silenced.
+// The warning is about exposure 1, which the fixed literals and validated
+// loopback URL address; it is recorded here so the next person does not have
+// to rediscover why the deprecation was accepted rather than silenced.
 // ---------------------------------------------------------------------------
 
 import type { SupportedPlatform } from "./paths.ts";
 
 /**
- * Every argument list this plugin passes to the CLI.
+ * Fixed argument lists this plugin passes to the CLI.
  *
- * Kept here as data so the "all arguments are literals" claim the shell
- * decision rests on is checkable by a test rather than by reading three call
- * sites and trusting them to stay that way.
+ * Kept here as data so the fixed-command call sites stay auditable rather
+ * than relying on three separately maintained argument lists.
  */
 export const ORCA_CLI_ARGUMENTS = {
   worktreePs: ["worktree", "ps", "--json"],
@@ -60,16 +58,34 @@ export const ORCA_CLI_ARGUMENTS = {
 } as const;
 
 /**
- * The CLI's name on `platform`. On Linux it is `orca-ide`: a bare `orca`
- * there is usually the GNOME screen reader (running it starts speech) or
- * missing, so every call failed and fell back to an empty result. Orca
- * exports ORCA_CLI_COMMAND to the sessions it manages under WSL, and when it
- * is set it names the right binary on any platform. Never falls back from
- * `orca-ide` to `orca` on Linux, for the screen reader's sake.
+ * The one dynamic CLI argument: the short-lived Jev configuration page URL.
+ * Keep it restricted to a loopback URL and a hex-only fragment token before
+ * it reaches `execFile` (which uses a shell for Windows `.cmd` shims).
  */
-export function orcaCliCommand(platform: SupportedPlatform, env: { readonly orcaCliCommand?: string | undefined }): string {
+export function orcaLoopbackConfigTabArguments(url: string): string[] {
+  const match = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/#jev-config=([0-9a-f]{64})$/.exec(url);
+  if (match === null) throw new Error("configuration tab URL must be a Jev loopback URL");
+  const port = Number(match[1]);
+  if (port < 1 || port > 65535) throw new Error("configuration tab URL port is invalid");
+  return ["tab", "create", "--url", url, "--json"];
+}
+
+/**
+ * Select the CLI for `platform`. An explicit Orca-provided override wins;
+ * packaged Linux callers can supply Orca's registered CLI shim because
+ * `orca-ide` may resolve to the AppImage launcher. The generic Linux
+ * fallback stays `orca-ide` so it never accidentally launches GNOME's
+ * screen reader through a bare `orca` command.
+ */
+export function orcaCliCommand(platform: SupportedPlatform, env: {
+  readonly orcaCliCommand?: string | undefined;
+  /** Packaged Linux Orca exposes its command through this shim; the AppImage launcher is not a CLI. */
+  readonly linuxCliShim?: string | undefined;
+}): string {
   const override = env.orcaCliCommand?.trim();
   if (override !== undefined && override.length > 0) return override;
+  const linuxCliShim = env.linuxCliShim?.trim();
+  if (platform === "linux" && linuxCliShim !== undefined && linuxCliShim.length > 0) return linuxCliShim;
   return platform === "linux" ? "orca-ide" : "orca";
 }
 

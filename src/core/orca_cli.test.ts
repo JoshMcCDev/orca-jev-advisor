@@ -77,11 +77,11 @@ test("every CLI call site passes a cwd this plugin controls", () => {
   }
 });
 
-// On Linux the Orca CLI is `orca-ide`; a bare `orca` there is usually the
-// GNOME screen reader (running it starts speech) or nothing at all. Orca
-// itself exports ORCA_CLI_COMMAND to the sessions it manages under WSL.
+// The generic Linux fallback avoids accidentally starting GNOME's screen
+// reader. The packaged worker supplies Orca's registered CLI shim instead.
 test("the CLI is orca-ide on Linux and orca elsewhere", () => {
   assert.equal(orcaCliCommand("linux", {}), "orca-ide");
+  assert.equal(orcaCliCommand("linux", { linuxCliShim: "/home/dev/.config/orca/linux-orca-cli-shim/orca" }), "/home/dev/.config/orca/linux-orca-cli-shim/orca");
   assert.equal(orcaCliCommand("darwin", {}), "orca");
   assert.equal(orcaCliCommand("win32", {}), "orca");
 });
@@ -99,5 +99,5 @@ test("an empty ORCA_CLI_COMMAND is ignored, never run as an empty command", () =
 
 test("main.mjs resolves its CLI through orcaCliCommand, never a literal name", () => {
   assert.doesNotMatch(mainSource, /const ORCA_CLI_BIN = ['"]orca['"]/);
-  assert.match(mainSource, /const ORCA_CLI_BIN = orcaCliCommand\(PLATFORM, \{ orcaCliCommand: process\.env\.ORCA_CLI_COMMAND \}\)/);
+  assert.match(mainSource, /const ORCA_CLI_BIN = orcaCliCommand\(PLATFORM, \{[\s\S]*?orcaCliCommand: process\.env\.ORCA_CLI_COMMAND,[\s\S]*?linuxCliShim: LINUX_ORCA_CLI_SHIM[\s\S]*?\}\)/);
 });

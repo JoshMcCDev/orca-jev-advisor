@@ -15,7 +15,6 @@
   },
   "pluginApi": 1,
   "main": "adapters/orca/main.mjs",
-  "_automationsNote": "No automations yet. When added (e.g. a periodic log or board review), they go inside contributes.automations, following the shape seen in other Orca plugins (id, title, provider, trigger, prompt).",
   "contributes": {
     "panels": [
       {
@@ -55,6 +54,14 @@
         "title": "Advisor: Revert the Claude Code side"
       },
       {
+        "id": "advisor.installCodex",
+        "title": "Advisor: Install the Codex side"
+      },
+      {
+        "id": "advisor.uninstallCodex",
+        "title": "Advisor: Revert the Codex side"
+      },
+      {
         "id": "advisor.refreshCatalog",
         "title": "Advisor: Add newly seen worktrees to the catalog"
       }
@@ -69,13 +76,9 @@
       {
         "on": "worktree.removed"
       }
-    ],
-    "automations": []
+    ]
   },
   "capabilities": [
-    {
-      "kind": "process:spawn"
-    },
     {
       "kind": "storage"
     },
@@ -87,14 +90,6 @@
     },
     {
       "kind": "notifications:show"
-    },
-    {
-      "kind": "net:fetch",
-      "hosts": [
-        "api.typesafe.ai",
-        "platform.claude.com",
-        "api.cloudflare.com"
-      ]
     }
   ]
 }

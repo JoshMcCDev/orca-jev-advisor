@@ -18,6 +18,7 @@ the worker, and the two panels.
 ```
 orca-plugin.json           manifest: panels, commands, events, capabilities
 main.mjs                    worker: activate(host) -> { commands, teardown }
+config-web.mjs              short-lived loopback bridge for the config page
 write-secret-mirror.mjs      sidecar: writes/reads the key mirror (see below)
 panels/board.html            navigation panel: the board, in four tabs
                              (Gate, Activity, Consumption, Skills)
@@ -25,7 +26,7 @@ panels/config.html           settings panel: key, catalog, policies, thresholds
 icons/advisor.svg            icon used by both panels
 ```
 
-## The three commands
+## Commands
 
 - **`advisor.decide`** — receives `{ actions: string[] }`, runs
   `decideDestination` (policy first, risk after, same as
@@ -47,20 +48,26 @@ icons/advisor.svg            icon used by both panels
     or no key. A dead key shows up red here, not green.
   - `secret-mirror`: whether the mirror file (see the next
     section) matches what's currently in `secrets`.
-  - `orca-cli`: whether the `orca` binary responds to `status --json`
-    (`process:spawn` capability -- nothing is ever sent to a real
-    terminal).
+  - `orca-cli`: whether the platform-selected Orca CLI responds to
+    `status --json` (the registered Linux CLI shim by default; the worker
+    launches it as a child process and does not send anything to a terminal).
   - `catalog`: whether the catalog stored in `storage` has a valid
     shape.
+- **`advisor.doctor`** checks the configuration, then opens the configuration
+  page in an Orca Browser tab. Orca 1.4.235 does not allow its embedded plugin
+  panels to access plugin storage, so this is the supported way to load and
+  save settings.
 
 ## The key mirror (`~/.config/orca-supervisor/env`)
 
-The settings panel stores the TypeSafe key in `secrets`
-(encrypted by Orca with Electron's `safeStorage`), but the `tools/`
+The configuration page stores the TypeSafe key in `secrets` (encrypted by
+Orca with Electron's `safeStorage`), but the `tools/`
 CLIs and `adapters/claude/gate-bash.ts` run as plain Node, outside
 of Electron, and can't read `secrets` -- it's a real boundary, not an
-oversight. That's why, every time the key changes in `secrets` (saved
-or deleted from the panel) and also when the worker activates,
+oversight. On Orca 1.4.235, however, sandboxed panels cannot call
+`storage.*` or `secrets.*`, so this panel cannot load or save settings.
+The worker itself can still read and write its own `secrets` store. When
+a worker-side key change does happen, or when the worker activates,
 `main.mjs` mirrors its value to `~/.config/orca-supervisor/env`
 (`TYPESAFE_API_KEY=...`, the same fallback already documented by
 `src/core/secrets.ts`), with **`0600`** permissions and an atomic
@@ -77,11 +84,15 @@ same `/usr/bin/env -u NODE_OPTIONS` pattern already used by
 crosses to that child only via **stdin**, never via argv (visible in
 any `ps`) nor in any `orca.log`.
 
-This means that, as of this version, the panel is the only place
-where the user writes the key -- but the file still exists on
-disk, in plain text, with the permissions of a file only its owner
-can read. Anyone who'd rather not have that mirror on disk should
-know this before saving the key from the panel.
+The fallback file is plaintext, though only its owner can read it.
+The embedded settings panel cannot call `storage.*` or `secrets.*` on Orca
+1.4.235. **Advisor: Check configuration** serves the same HTML from a
+short-lived server bound only to `127.0.0.1`; a random token in the URL
+fragment authorizes that browser tab to forward only `storage.get` and
+`storage.set` to the worker. The fragment is not sent in HTTP requests, the
+server does not expose secret methods, and the API key stays in the worker's
+encrypted `secrets` store. The worker handles the secret request and writes
+the existing 0600 fallback mirror for tools and hooks.
 
 ## How the board gets filled across worktrees
 
@@ -136,39 +147,54 @@ does NOT do yet (see below).
   `storage.*`, `secrets.*`, `settings.*`, `events.subscribe`) are
   verified; how Orca invokes `activate` and dispatches an invoked
   command to the `commands` map is not.
-- **No automations.** The manifest leaves `contributes.automations: []`
-  with a note (`_automationsNote`) explaining that, when one is
-  designed (for example, a periodic review of the log or the board),
-  it goes there.
+- **No automations.** Orca 1.4.235's strict `contributes` schema does
+  not allow `automations`, so the manifest does not declare it.
 - **No action crosses worktrees yet.** `advisor.decide` judges
   actions; it doesn't execute them on any worktree. Executing on
-  another worktree would require spawning `orca terminal send` via
-  `process:spawn` -- the capability is declared because it's
-  anticipated, but it isn't used anywhere in this skeleton (and this
-  task explicitly asked not to execute `orca terminal send` /
-  `terminal create`).
-- **None of this is installed or loaded in a real Orca
-  configuration.** Neither `~/.claude/settings.json` nor Orca's
-  configuration were touched.
+  another worktree would require a separate action implementation; this
+  adapter does not send commands to terminals or create terminals.
+- **Manifest capability boundary.** The manifest lists the supported
+  host capabilities used here: `notifications:show`, `storage`,
+  `secrets`, and `events:subscribe`. Orca 1.4.235's capability schema
+  does not include `process:spawn` or `net:fetch`. The worker uses Node
+  `child_process` and `fetch` directly; Orca's host capability review
+  does not gate those calls.
+- **Plugin activation still needs a live Orca check.** The manifest has
+  been aligned with the 1.4.235 schema, but loading, worker command
+  registration, and panel communication have not been exercised.
+- **Agent hooks have their own runtime boundary.** Codex setup installs
+  hook definitions; Codex's trust review and actual execution still require
+  a live check. Successful Codex setup selects it as the preferred integration
+  and suppresses automatic Claude setup on subsequent activation.
 
 ## How to load it as a development plugin
 
-This wasn't run as part of this task (installing the plugin was
-out of scope); these are the steps as documented by the reference
-manifest (`orca-wa-inbox`) for a plugin loaded from disk:
+The development plugin path must point to the repository root, where
+`orca-plugin.json` lives. Orca resolves the manifest's `main`, panel,
+and icon paths relative to that root.
 
-1. Open Orca's plugin settings and add this folder
-   (`adapters/orca/`) as a development plugin path
-   (`devPluginPaths` in Orca's configuration, following the pattern
-   seen in other plugins).
-2. Orca should read `orca-plugin.json`, validate that `main.mjs`
-   exists, and offer the plugin in the list of installed/in-development
-   plugins.
-3. Configure the TypeSafe key from the settings panel
-   (`Jev Advisor` under settings) -- that stores it via `secrets`, not
-   on disk.
-4. Invoke `advisor.doctor` first to confirm that the key, the `orca`
-   CLI, and the catalog are in order before using `advisor.decide`.
+1. Open Orca's plugin settings and add the repository root (the folder
+   containing `orca-plugin.json`) as a development plugin path
+   (`devPluginPaths` in Orca's configuration). Do not add
+   `adapters/orca/`; that folder does not contain the manifest.
+2. Refresh the plugin list. Review and enable Jev Advisor if Orca
+   prompts for permission review.
+3. The `Jev Advisor` settings panel cannot read or save settings on
+   Orca 1.4.235 because the host does not expose plugin storage or
+   secrets to sandboxed panels. Run **Advisor: Check configuration** to
+   check the setup and open the working settings page in Orca Browser. Do not
+   assume a key entered into the embedded panel was saved.
+4. Save the key in that browser page, then run **Advisor: Check
+   configuration** again to confirm it before using `advisor.decide`.
+
+## Codex integration
+
+The configuration page has Codex setup/revert controls and matching
+`advisor.installCodex` / `advisor.uninstallCodex` commands. Native hooks
+share the gate, policies and key mirror without a Claude installation.
+Setup preserves other hooks and requires review through Codex's `/hooks`.
+See the [Codex guide](../codex/README.md) for supported features and runtime
+verification limits.
 
 ## Node and dependencies
 

@@ -5,15 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Jev Advisor</title>
     <!--
-      Sandboxed panels may call ONLY `notifications.show`, `storage.get` and
-      `storage.set` over the postMessage bridge (isPluginPanelAction,
-      orca-oss plugin-host-api.ts / plugin-panel-bridge.ts); `secrets.*` is
-      worker-only. This panel never calls `secrets.get`/`secrets.set`/
-      `secrets.delete` directly -- it writes a request into storage and polls
-      a result key that `main.mjs` fills in, same shape as orca-wa-inbox's
-      SIDECAR_REQUEST_KEY/SIDECAR_RESULT_KEY pair. The full key is never read
-      back here: this panel only ever shows the masked status the worker
-      publishes (`secretStatus`).
+      Orca 1.4.235 does not allow sandboxed panels to call storage.* or
+      secrets.*. The "Advisor: Check configuration" command opens this same
+      document in a short-lived loopback browser page; there, storage.get/set
+      are forwarded to the plugin worker, and secrets remain worker-only.
+      The full key is never read back here: the page only shows the masked
+      status the worker publishes (`secretStatus`).
 
       Every user-facing string in this file comes from CATALOG (es/en)
       below, looked up by key -- never typed inline at the point it is
@@ -78,6 +75,16 @@
          bleed, separated by a thin --border rule and a small uppercase
          label, same as activity.html and wa-inbox/config.html. */
       section { padding: 12px; margin: 0; border-top: 1px solid var(--border, var(--fb-border)); }
+      .doctor-report[hidden] { display: none; }
+      .doctor-report-summary { margin: 0 0 8px; font-size: 12px; }
+      .doctor-report.has-problems .doctor-report-summary { color: var(--destructive, var(--fb-destructive)); }
+      .doctor-checks { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
+      .doctor-check { border-left: 3px solid #16803c; padding: 7px 9px; background: var(--muted, var(--fb-muted)); }
+      .doctor-check.has-problem { border-left-color: var(--destructive, var(--fb-destructive)); }
+      .doctor-check-title { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; }
+      .doctor-check-status { color: #16803c; font-weight: 600; }
+      .doctor-check.has-problem .doctor-check-status { color: var(--destructive, var(--fb-destructive)); }
+      .doctor-check-detail { margin: 4px 0 0; color: var(--muted-foreground, var(--fb-muted-foreground)); font-size: 12px; overflow-wrap: anywhere; }
       h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
            color: var(--muted-foreground, var(--fb-muted-foreground));
            margin: 0 0 10px; font-weight: 600; }
@@ -318,6 +325,12 @@
       </div>
       <p class="sub" data-i18n="app.subtitle"></p>
 
+      <section class="doctor-report" id="doctor-report" aria-labelledby="doctor-report-heading" aria-live="polite" hidden>
+        <h2 id="doctor-report-heading"></h2>
+        <p class="doctor-report-summary" id="doctor-report-summary"></p>
+        <ul class="doctor-checks" id="doctor-report-checks"></ul>
+      </section>
+
       <!--
         JEVADV-41. Orca clamps a panel's reported height at
         PANEL_CONTENT_HEIGHT_MAX_PX = 8000 (orca-oss
@@ -414,6 +427,17 @@
         </div>
       </section>
 
+      <section id="codex-integration-section">
+        <h2 data-i18n="codex.heading"></h2>
+        <p class="hint" data-i18n="codex.hint"></p>
+        <p class="hint" data-i18n="codex.trust"></p>
+        <p id="codex-integration-status" class="hint" role="status"></p>
+        <div class="actions">
+          <button id="codex-integration-setup" class="primary" type="button" data-i18n="integration.setup"></button>
+          <button id="codex-integration-revert" class="link" type="button" data-i18n="integration.revert"></button>
+          <span class="said" id="codex-integration-said"></span>
+        </div>
+      </section>
       <section id="claude-integration-section">
         <h2 data-i18n="integration.heading"></h2>
         <p class="hint" id="integration-hint"></p>
@@ -737,6 +761,26 @@
       var CATALOG = {
         es: {
           'app.subtitle': 'Configuración del plugin. Todo se guarda a través del host de Orca — nada de esto llama a una URL externa desde este panel.',
+          'doctor.heading': 'Informe de configuración',
+          'codex.heading': 'Integración con Codex',
+          'codex.hint': 'Gate de comandos, políticas y protección de archivos con Codex, sin instalar Claude. El enrutador de modelos, el steward y el mod de skills siguen siendo específicos de Claude Code.',
+          'codex.trust': 'Después de configurar, reinicia Codex y revisa y confía en los hooks desde /hooks en cada cuenta. Repite la configuración después de añadir cuentas de Orca.',
+          'codex.ready': 'Hooks configurados en {{n}} directorio(s). Confianza y ejecución pendientes de comprobar en Codex.',
+          'codex.missing': 'Pulsa Configurar para instalar los hooks de Codex.',
+          'codex.failed': 'No se pudo configurar Codex: {{detail}}',
+          'doctor.check.codex-integration': 'Integración con Codex',
+          'doctor.allPassed': 'Pasaron todas las comprobaciones ({{count}}).',
+          'doctor.problems': '{{failed}} de {{total}} comprobaciones necesitan atención.',
+          'doctor.passed': 'Correcto',
+          'doctor.failed': 'Problema',
+          'doctor.unavailable': 'No se pudo cargar el informe detallado. Ejecuta «Advisor: Check configuration» otra vez.',
+          'doctor.check.api-key': 'Clave de Jev',
+          'doctor.check.clef': 'Proveedor Clef',
+          'doctor.check.secret-mirror': 'Copia local de la clave',
+          'doctor.check.claude-integration': 'Integración con Claude Code',
+          'doctor.check.orca-cli': 'Orca CLI',
+          'doctor.check.catalog': 'Catálogo de destinos',
+          'doctor.check.unknown': 'Comprobación',
           'tabs.groupLabel': 'Secciones de configuración',
           'tabs.general': 'General',
           'tabs.destinations': 'Destinos',
@@ -1128,7 +1172,7 @@
           'save.rejectedWhich': 'El host rechazó esto: {{which}}.',
           'save.invalidField': 'Hay un campo con un valor no válido; se cambió a su pestaña y quedó enfocado.',
           'common.timeout': 'Tiempo de espera agotado.',
-          'common.workerSilent': 'El proceso del plugin todavía no se ha iniciado. Arranca la primera vez que se ejecuta un comando de Advisor: abre la paleta de comandos de Orca, ejecuta "Advisor: Check configuration" una vez y luego vuelve a abrir este panel.',
+          'common.workerSilent': 'Orca 1.4.235 no permite que este panel lea o guarde la configuración. Ejecuta "Advisor: Check configuration" desde la paleta de comandos para abrir la página de configuración.',
           'common.hostRejectedRequest': 'El host rechazó el pedido.',
           'common.couldNotSend': 'No se pudo enviar el pedido.',
           'common.hostRejectedWrite': 'El host rechazó la escritura.',
@@ -1222,6 +1266,26 @@
         },
         en: {
           'app.subtitle': "Plugin settings. Everything is saved through Orca's own host — none of this calls an external URL from this panel.",
+          'doctor.heading': 'Configuration check report',
+          'codex.heading': 'Codex integration',
+          'codex.hint': 'Command gate, policies and advisor file protection with Codex, without installing Claude. Model routing, the context steward and the skills mod remain specific to Claude Code.',
+          'codex.trust': 'After setup, restart Codex and review and trust the hooks through /hooks in each account. Run setup again after adding Orca accounts.',
+          'codex.ready': 'Hooks configured in {{n}} home(s). Trust and execution still need checking in Codex.',
+          'codex.missing': 'Press Set up to install the Codex hooks.',
+          'codex.failed': 'Could not configure Codex: {{detail}}',
+          'doctor.check.codex-integration': 'Codex integration',
+          'doctor.allPassed': 'All checks passed ({{count}}).',
+          'doctor.problems': '{{failed}} of {{total}} checks need attention.',
+          'doctor.passed': 'Passed',
+          'doctor.failed': 'Needs attention',
+          'doctor.unavailable': 'The detailed report could not load. Run “Advisor: Check configuration” again.',
+          'doctor.check.api-key': 'Jev API key',
+          'doctor.check.clef': 'Clef provider',
+          'doctor.check.secret-mirror': 'Local key mirror',
+          'doctor.check.claude-integration': 'Claude Code integration',
+          'doctor.check.orca-cli': 'Orca CLI',
+          'doctor.check.catalog': 'Destination catalog',
+          'doctor.check.unknown': 'Check',
           'tabs.groupLabel': 'Configuration sections',
           'tabs.general': 'General',
           'tabs.destinations': 'Destinations',
@@ -1613,7 +1677,7 @@
           'save.rejectedWhich': 'The host rejected this: {{which}}.',
           'save.invalidField': 'A field has an invalid value; switched to its tab and focused it.',
           'common.timeout': 'Timed out.',
-          'common.workerSilent': "The plugin's background process has not started yet. It starts the first time an Advisor command runs: open Orca's command palette, run \"Advisor: Check configuration\" once, then reopen this panel.",
+          'common.workerSilent': 'Orca 1.4.235 does not let this panel read or save configuration. Run "Advisor: Check configuration" from the command palette to open the configuration page.',
           'common.hostRejectedRequest': 'The host rejected the request.',
           'common.couldNotSend': 'Could not send the request.',
           'common.hostRejectedWrite': 'The host rejected the write.',
@@ -1837,12 +1901,12 @@
         })
       }
 
-      // ---------- real bridge to the host -------------------------------
-      // Same protocol as panels/board.html and wa-inbox/config.html: the
-      // iframe is sandboxed with an opaque origin, so the only channel is
-      // postMessage with the parent frame (orca-oss
-      // src/shared/plugins/plugin-panel-bridge.ts). '*' is the only usable
-      // targetOrigin; the host validates which window sends it.
+      // ---------- host bridge -------------------------------------------
+      // In Orca's sandboxed panel, use the postMessage bridge. Orca 1.4.235
+      // rejects storage actions from that surface, so the supported setup
+      // command opens this document in a loopback browser tab. That
+      // page carries a one-use token in its URL fragment (never sent in the
+      // HTTP request) and forwards storage actions to the worker.
       //
       // Every write this panel makes is born from a click -- saving the key,
       // saving the configuration -- so it travels the user lane: a reserved
@@ -1859,6 +1923,89 @@
       var colaTimer = null
       var frenoHasta = 0
       var RECHAZADO = { ok: false, errorCode: 'rate_limited' }
+      var CONFIG_SERVER_TOKEN = null
+      try {
+        var configUrl = new URL(window.location.href)
+        var configTokenMatch = configUrl.hash.match(/^#jev-config=([0-9a-f]{64})$/)
+        if (configUrl.hostname === '127.0.0.1') {
+          CONFIG_SERVER_TOKEN = configTokenMatch
+            ? configTokenMatch[1]
+            : window.sessionStorage.getItem('jevConfigToken')
+          if (CONFIG_SERVER_TOKEN !== null) {
+            window.sessionStorage.setItem('jevConfigToken', CONFIG_SERVER_TOKEN)
+            window.history.replaceState(null, '', configUrl.pathname + configUrl.search)
+          }
+        }
+      } catch (_error) {}
+
+      function renderDoctorReport (report) {
+        var reportEl = document.getElementById('doctor-report')
+        var headingEl = document.getElementById('doctor-report-heading')
+        var summaryEl = document.getElementById('doctor-report-summary')
+        var checksEl = document.getElementById('doctor-report-checks')
+        var checks = report && Array.isArray(report.checks) ? report.checks : []
+        if (checks.length === 0) {
+          checks = [{ id: 'unknown', ok: false, detail: t('doctor.unavailable') }]
+        }
+        var failed = checks.filter(function (check) { return !check || check.ok !== true }).length
+        var allPassed = report && report.ok === true && failed === 0
+
+        headingEl.textContent = t('doctor.heading')
+        summaryEl.textContent = allPassed
+          ? t('doctor.allPassed', { count: checks.length })
+          : t('doctor.problems', { failed: failed, total: checks.length })
+        reportEl.classList.toggle('has-problems', !allPassed)
+        reportEl.hidden = false
+        checksEl.replaceChildren()
+
+        checks.forEach(function (check) {
+          var id = check && typeof check.id === 'string' ? check.id : 'unknown'
+          var ok = !!check && check.ok === true
+          var item = document.createElement('li')
+          item.className = 'doctor-check' + (ok ? '' : ' has-problem')
+
+          var title = document.createElement('div')
+          title.className = 'doctor-check-title'
+          var status = document.createElement('span')
+          status.className = 'doctor-check-status'
+          status.textContent = t(ok ? 'doctor.passed' : 'doctor.failed')
+          var label = document.createElement('strong')
+          var labelKey = 'doctor.check.' + id
+          var labelText = t(labelKey)
+          label.textContent = labelText === labelKey
+            ? t('doctor.check.unknown') + ' (' + id + ')'
+            : labelText
+          title.append(status, label)
+          item.append(title)
+
+          var detailText = check && typeof check.detail === 'string' ? check.detail : ''
+          if (detailText) {
+            var detail = document.createElement('p')
+            detail.className = 'doctor-check-detail'
+            detail.textContent = detailText
+            item.append(detail)
+          }
+          checksEl.append(item)
+        })
+      }
+
+      function loadDoctorReport () {
+        if (CONFIG_SERVER_TOKEN === null) return
+        fetch('/__jev/doctor', {
+          method: 'POST',
+          credentials: 'omit',
+          cache: 'no-store',
+          redirect: 'error',
+          referrerPolicy: 'no-referrer',
+          headers: { 'Authorization': 'Bearer ' + CONFIG_SERVER_TOKEN }
+        }).then(function (response) {
+          if (!response.ok) throw new Error('doctor report unavailable')
+          return response.json()
+        }).then(renderDoctorReport).catch(function () {
+          renderDoctorReport({ ok: false, checks: [] })
+        })
+      }
+      loadDoctorReport()
 
       function hayLugarDeSondeo () {
         var corte = Date.now() - CUPO.ventanaMs
@@ -1881,6 +2028,34 @@
           it.espera = Math.min((it.espera || 300) * 2, 2500)
           it.desde = Date.now() + it.espera
           encolar(it)
+        }
+        if (CONFIG_SERVER_TOKEN !== null) {
+          fetch('/__jev/action', {
+            method: 'POST',
+            credentials: 'omit',
+            cache: 'no-store',
+            redirect: 'error',
+            referrerPolicy: 'no-referrer',
+            headers: {
+              'Authorization': 'Bearer ' + CONFIG_SERVER_TOKEN,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ action: it.action, params: it.params })
+          }).then(function (response) {
+            if (!response.ok) throw new Error('configuration bridge rejected the request')
+            return response.json()
+          }).then(function (d) {
+            var resolve = pending[requestId]
+            if (!resolve) return
+            delete pending[requestId]
+            resolve(d)
+          }).catch(function () {
+            var resolve = pending[requestId]
+            if (!resolve) return
+            delete pending[requestId]
+            resolve({ ok: false, errorCode: 'local_bridge_failed' })
+          })
+          return
         }
         window.parent.postMessage(
           { type: 'orca-panel-action', requestId: requestId, action: it.action, params: it.params }, '*')
@@ -4603,6 +4778,7 @@
       var integrationReadFailed = false
 
       function loadClaudeIntegrationStatus (retriesLeft) {
+        loadCodexIntegrationStatus().catch(function () {})
         var generation = ++integrationReadGeneration
         var retries = typeof retriesLeft === 'number' ? retriesLeft : INTEGRATION_READ_RETRIES
         return Promise.all([
@@ -4629,6 +4805,40 @@
           }).catch(function () {})
         })
       }
+
+      function loadCodexIntegrationStatus () {
+        return read('codexIntegrationStatus', false).then(function (status) {
+          el('codex-integration-status').textContent = status && status.ok && status.installed
+            ? t('codex.ready', { n: String(status.targets.length) })
+            : status && status.ok === false ? String(status.detail || status.reason) : t('codex.missing')
+        })
+      }
+
+      function requestCodexIntegration (intent) {
+        var requestId = 'codex-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+        var deadline = Date.now() + 30000
+        var output = el('codex-integration-said')
+        said(output, t(intent === 'install' ? 'integration.configuring' : 'integration.reverting'))
+        function waitForResult () {
+          return read('codexIntegrationResult', false).then(function (result) {
+            if (result && result.id === requestId) {
+              if (!result.ok) throw shownError(t('codex.failed', { detail: String(result.detail || result.reason).slice(0, 300) }))
+              said(output, t(intent === 'install' ? 'codex.trust' : 'integration.reverted'))
+              return loadCodexIntegrationStatus()
+            }
+            if (Date.now() >= deadline) throw shownError(t('common.workerSilent'))
+            return pause(700).then(waitForResult)
+          })
+        }
+        signalPanelOpen()
+        write('codexIntegrationRequest', { id: requestId, at: new Date().toISOString(), intent: intent })
+          .then(function (result) {
+            if (!result || !result.ok) throw shownError(t('common.couldNotSend'))
+            return waitForResult()
+          }).catch(function (error) { said(output, errorText(error), true) })
+      }
+      el('codex-integration-setup').addEventListener('click', function () { requestCodexIntegration('install') })
+      el('codex-integration-revert').addEventListener('click', function () { requestCodexIntegration('uninstall') })
 
       el('claude-integration-setup').addEventListener('click', function () {
         said(claudeIntegrationSaidEl, t('integration.configuring'))

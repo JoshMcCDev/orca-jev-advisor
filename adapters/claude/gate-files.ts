@@ -60,10 +60,10 @@ async function refusal(file: string, configDir: string): Promise<string> {
 }
 
 /** The hook's output for a write to `path` (absolute): a refusal for one of the gate's own files, null for any other or with the plugin switched off in Orca. */
-export async function ownFileRefusal(path: string): Promise<string | null> {
+export async function ownFileRefusal(path: string, codexConfigDirs: readonly string[] = []): Promise<string | null> {
   const configDir = resolveConfigDir(PLATFORM, HOME_PATHS)
   const cacheDir = resolveCacheDir(PLATFORM, HOME_PATHS)
-  const own = gateOwnFiles({ configDir, cacheDir, orcaUserDataDir: orcaUserDataPath(PLATFORM, HOME_PATHS.home) }, canonicalPath)
+  const own = gateOwnFiles({ configDir, cacheDir, orcaUserDataDir: orcaUserDataPath(PLATFORM, HOME_PATHS.home), codexConfigDirs }, canonicalPath)
   const file = gateOwnFileAt(path, own, canonicalPath)
   if (file === null) return null
   if (pluginDisabledInOrca(PLATFORM, HOME_PATHS.home, join(cacheDir, 'gate-enablement.json'))) return null
