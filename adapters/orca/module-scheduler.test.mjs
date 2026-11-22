@@ -16,7 +16,7 @@ import { createModuleScheduler, followStatus, modulesFromRead, modulesFromStatus
 const ALL_OFF = { gate: 'off', 'model-router': 'off', steward: 'off', 'skill-selection': 'off', board: 'off', memory: 'off' }
 
 const INTERVAL_TRIGGERS = ['interval-15s', 'interval-account-quota-10min', 'interval-consumption-10min', 'interval-activity-10min']
-const EVENT_TRIGGERS = ['agent.status.changed', 'worktree.created', 'worktree.removed']
+const EVENT_TRIGGERS = ['agent.status.changed', 'workspace.created', 'workspace.removed']
 const PERIODS = { 'interval-15s': 15_000, 'interval-account-quota-10min': 600_000, 'interval-consumption-10min': 600_001, 'interval-activity-10min': 600_002 }
 
 function states (overrides) {

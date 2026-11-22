@@ -1730,13 +1730,13 @@ function isRecord (value) {
 
 function isAgentStatusChangedPayload (value) {
   if (!isRecord(value)) return false
-  const worktreeIdOk = value.worktreeId === null || typeof value.worktreeId === 'string'
+  const worktreeIdOk = value.workspaceId === null || typeof value.workspaceId === 'string'
   return worktreeIdOk && typeof value.paneKey === 'string' &&
     typeof value.state === 'string' && typeof value.receivedAt === 'number'
 }
 
 function isWorktreeLifecyclePayload (value) {
-  return isRecord(value) && typeof value.worktreeId === 'string'
+  return isRecord(value) && typeof value.workspaceId === 'string'
 }
 
 // ---------------------------------------------------------------------------
@@ -2651,9 +2651,9 @@ function boardEntryKey (entry) {
   return `${entry.worktreeId ?? '(no-worktree)'}::${entry.paneKey}`
 }
 
-// `orca worktree list --json` resolves a worktreeId to its project and
+// `orca worktree list --json` resolves a workspaceId to its project and
 // branch (raw `refs/heads/...` shortened) -- best-effort: `agent.status.
-// changed`'s own `worktreeId` format was never independently confirmed to
+// changed`'s own `workspaceId` format was never independently confirmed to
 // match `orca worktree list`'s `id` field, so a miss just leaves both
 // null rather than guessing. Cached briefly so a burst of status events
 // does not spawn `orca` once per event.
@@ -2784,11 +2784,11 @@ async function onAgentStatusChanged (orca, storageHost, payload, options = {}) {
     (options.resolveWorktreeProjects ?? resolveWorktreeProjects)(orca),
     (options.resolveRepoNames ?? resolveRepoNames)(orca)
   ])
-  const resolved = payload.worktreeId !== null ? projects.get(payload.worktreeId) : undefined
+  const resolved = payload.workspaceId !== null ? projects.get(payload.workspaceId) : undefined
 
   const board = await getBoard(storageHost)
   const updated = {
-    worktreeId: payload.worktreeId,
+    worktreeId: payload.workspaceId,
     project: resolved?.project ?? null,
     rama: resolved?.rama ?? null,
     paneKey: payload.paneKey,
@@ -2826,7 +2826,7 @@ async function onWorktreeCreated (orca, storageHost, payload) {
 async function onWorktreeRemoved (orca, storageHost, payload) {
   if (!isWorktreeLifecyclePayload(payload)) return
   const board = await getBoard(storageHost)
-  const entries = board.entries.filter((entry) => entry.worktreeId !== payload.worktreeId)
+  const entries = board.entries.filter((entry) => entry.worktreeId !== payload.workspaceId)
   if (entries.length !== board.entries.length) {
     await setBoard(storageHost, { entries }).catch((error) =>
       orca.log(`setBoard failed: ${error.message}`))
@@ -3207,8 +3207,8 @@ function buildModuleRunners (orca, storageHost) {
   }
   const eventHandlers = {
     'agent.status.changed': (payload) => onAgentStatusChanged(orca, storageHost, payload),
-    'worktree.created': (payload) => onWorktreeCreated(orca, storageHost, payload),
-    'worktree.removed': (payload) => onWorktreeRemoved(orca, storageHost, payload)
+    'workspace.created': (payload) => onWorktreeCreated(orca, storageHost, payload),
+    'workspace.removed': (payload) => onWorktreeRemoved(orca, storageHost, payload)
   }
   return { runners, eventHandlers }
 }

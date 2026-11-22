@@ -521,8 +521,8 @@ export const WORKER_TASKS: readonly WorkerTask[] = [
   { id: "consumption summary", trigger: "interval", intervalMs: 10 * MINUTE, sidecarsPerRun: 1, otherSpawns: "orca account list (shared 30 s)", owner: "shared", modules: ["model-router", "steward"], auditKey: "consumptionSummary" },
   { id: "activity summary", trigger: "interval", intervalMs: 10 * MINUTE, sidecarsPerRun: 1, otherSpawns: "", owner: "shared", modules: ["gate", "model-router"], auditKey: "activityByProjectSummary" },
   { id: "agent status board", trigger: "event: agent.status.changed", intervalMs: null, sidecarsPerRun: 0, otherSpawns: "orca worktree list + orca repo list (cached 30 s)", owner: "board", modules: ["board"], auditKey: "board" },
-  { id: "worktree created", trigger: "event: worktree.created", intervalMs: null, sidecarsPerRun: 0, otherSpawns: "", owner: "board", modules: ["board"], auditKey: null },
-  { id: "worktree removed", trigger: "event: worktree.removed", intervalMs: null, sidecarsPerRun: 0, otherSpawns: "", owner: "board", modules: ["board"], auditKey: null },
+  { id: "worktree created", trigger: "event: workspace.created", intervalMs: null, sidecarsPerRun: 0, otherSpawns: "", owner: "board", modules: ["board"], auditKey: null },
+  { id: "worktree removed", trigger: "event: workspace.removed", intervalMs: null, sidecarsPerRun: 0, otherSpawns: "", owner: "board", modules: ["board"], auditKey: null },
   { id: "request poll + heartbeat", trigger: "interval", intervalMs: 15_000, sidecarsPerRun: 0, otherSpawns: "1 s while the panel is open", owner: "base", modules: [], auditKey: "workerHeartbeat" },
 ];
 

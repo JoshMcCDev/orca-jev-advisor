@@ -113,8 +113,8 @@ export type WorkerTrigger =
   | "interval-consumption-10min"
   | "interval-activity-10min"
   | "agent.status.changed"
-  | "worktree.created"
-  | "worktree.removed";
+  | "workspace.created"
+  | "workspace.removed";
 
 /** One worker job: its function in main.mjs (or models-worker.mjs), when it runs and the node sidecar it spawns, null when none. */
 export interface WorkerJob {
@@ -283,8 +283,8 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     workerJobs: [
       // Its 30 s cache of `orca worktree list` and `orca repo list` runs inside this handler.
       { id: "board-agent-status", fn: "onAgentStatusChanged", triggers: ["agent.status.changed"], sidecar: null },
-      { id: "board-worktree-created", fn: "onWorktreeCreated", triggers: ["worktree.created"], sidecar: null },
-      { id: "board-worktree-removed", fn: "onWorktreeRemoved", triggers: ["worktree.removed"], sidecar: null },
+      { id: "board-worktree-created", fn: "onWorktreeCreated", triggers: ["workspace.created"], sidecar: null },
+      { id: "board-worktree-removed", fn: "onWorktreeRemoved", triggers: ["workspace.removed"], sidecar: null },
     ],
     modes: [],
   },
