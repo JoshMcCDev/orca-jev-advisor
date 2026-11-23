@@ -1065,7 +1065,7 @@ function buildAdviceForCommand(command: string, cwd: string, reasonsEnglish: rea
   const repoRoot = getRepoRootForAdvice(cwd)
   const recoverability = repoRoot === null ? undefined : resolveRecoverabilityTargets(command, cwd, repoRoot, getGitStatusSetsForAdvice(repoRoot))
   const personEffectSummary = localizePersonEffect({ ...effectSource, recoverability })
-  return composeAdviceText({ command, reasons: reasonsEnglish, recoverability, sessionEligibleForRetry, personEffectSummary, judge: decidedBy() })
+  return composeAdviceText({ command, reasons: reasonsEnglish, recoverability, sessionEligibleForRetry, personEffectSummary, judge: decidedBy(), nonBlocking: process.env.ORCA_JEV_CODEX_GATE === '1' })
 }
 
 /**
@@ -1081,7 +1081,11 @@ function buildAdviceForCommand(command: string, cwd: string, reasonsEnglish: rea
  */
 function emitAdvice(segment: string, effect: string, modelText: string): void {
   const payload = {
-    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: modelText },
+    // Codex receives advice without a permission override. Explicit denials
+    // and policy asks use their own emit path and remain blocking.
+    hookSpecificOutput: process.env.ORCA_JEV_CODEX_GATE === '1'
+      ? { hookEventName: 'PreToolUse', additionalContext: modelText }
+      : { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: modelText },
     systemMessage: tJudged('advisedLine', { segment, effect }),
   }
   writeSync(1, JSON.stringify(payload))
@@ -1108,6 +1112,8 @@ function emitAdvice(segment: string, effect: string, modelText: string): void {
  * local rule's own toggled-off/interpreter-code advice.
  */
 function tryAdviceRetryPass(command: string, sessionCwd: string, cwd: string, sessionId: string | null, source: GateSource, latencyMs: number | null = null, teamInternal = false): boolean {
+  // A repeat after nonblocking context is not confirmation or authorization.
+  if (process.env.ORCA_JEV_CODEX_GATE === '1') return false
   if (!checkAdviceRetryPass(sessionId, command)) return false
   // 0.6.28: re-running an advised delivery line unchanged is the confirmation
   // the gate remembers for the repository. Never a local rule's own advice:
@@ -1254,7 +1260,7 @@ function resolveAdviceOutcome(input: {
   const sessionEligible = sessionId !== null
   const advice = buildAdviceForCommand(command, cwd, reasonsEnglish, sessionEligible, effectSource)
   appendGateRecord(input.actingCwd ?? cwd, command, source, 'advise', input.latencyMs ?? null, stopReason, null, teamInternal)
-  recordAdviceIssued(sessionId, command)
+  if (process.env.ORCA_JEV_CODEX_GATE !== '1') recordAdviceIssued(sessionId, command)
   emitAdvice(segment, advice.effectSummary, advice.modelText)
 }
 

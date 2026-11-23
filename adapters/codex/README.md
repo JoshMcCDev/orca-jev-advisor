@@ -32,7 +32,16 @@ node adapters/orca/install-codex-integration.mjs uninstall .
 ```
 
 Hook commands contain absolute Node and plugin paths; rerun setup after
-moving the plugin.
+moving the plugin. Installation checks the selected Node version. Status
+checks the configured executable's accessibility without launching it, so its
+Node version remains unverified. A sandbox that cannot inspect that executable
+reports the home as unreadable.
+
+Run `npm run jev-status -- --json` for read-only configuration and credential
+presence checks. Add `--check-provider` to send a small request to each
+configured provider; this may incur usage. Provider acceptance is separate
+from credential presence. Hook configuration does not establish trust or live
+execution; review `/hooks` and exercise the hook in Codex separately.
 
 ## Supported behavior
 
@@ -60,5 +69,17 @@ Orca's Codex runtime need a live check. Hosted and specialized tool paths,
 and input sent to existing exec sessions, can bypass Codex's PreToolUse path.
 Hooks are not a complete enforcement boundary.
 
+Advisory observations are stored separately from approval analytics in
+`gate-advisory-records` under the advisor cache. Each owner-only file is keyed
+by a hash of the session and tool IDs and contains only a state and timestamp.
+Both IDs are required. Repeated events converge on one file; a post without a
+pending record is ignored, and failed calls count as execution observations.
+Writes are atomic and a failed write leaves the previous state available for a
+retry. Pending entries without a post remain unknown and are retained until the
+cache is manually cleared; completed entries are retained as deduplication
+markers. These observations are best effort, not an approval or audit log.
+
 References: [official Codex hooks](https://learn.chatgpt.com/docs/hooks) and
 [Orca 1.4.235 managed homes](https://github.com/stablyai/orca/blob/v1.4.235/src/main/codex-accounts/codex-managed-home-path.ts).
+
+For machine-readable status JSON, use `npm run --silent jev-status -- --json` to suppress npm banners.

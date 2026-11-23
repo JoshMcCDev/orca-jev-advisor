@@ -11,6 +11,33 @@ const PROJECT = "/home/dev/Projects/app";
 const OWN = gateOwnFiles({ configDir: CONFIG, cacheDir: CACHE, orcaUserDataDir: ORCA });
 const writes = (command: string, cwd: string = PROJECT) => commandWritesGateOwnFile(command, cwd, HOME, OWN);
 
+test("relative interpreter heredocs do not inherit another command's cwd", () => {
+  const path = ".config/orca-supervisor/policies.json";
+  const command = (first: string, second: string) => `cd ${first}; python3 - <<'A'; cd ${second}; python3 - <<'B'\nprint(1)\nA\nopen('${path}', 'w')\nB`;
+  // Relative interpreter paths are unsupported; neither cwd is guessed.
+  assert.equal(writes(command(PROJECT, HOME)), null);
+  assert.equal(writes(command(HOME, PROJECT)), null);
+  assert.equal(writes(`python3 -c "open('${path}', 'w')"`, HOME), null);
+  assert.equal(writes(`python3 -c "open('${CONFIG}/policies.json', 'w')"`, HOME), `${CONFIG}/policies.json`);
+});
+
+test("commandWritesGateOwnFile: isolated Codex fixtures do not inherit an unrelated real-home read", () => {
+  const own = gateOwnFiles({ configDir: CONFIG, cacheDir: CACHE, orcaUserDataDir: ORCA, codexConfigDirs: [`${HOME}/.codex`] });
+  for (const root of ["/tmp/reviewer-fixture", `${HOME}/reviewer-fixture`]) {
+    const code = `from pathlib import Path\nreal = Path.home() / '.codex/config.toml'\ntext = real.read_text()\nfixture = Path('${root}') / '.codex/config.toml'\nfixture.write_text(text)`;
+    assert.equal(commandWritesGateOwnFile(`python3 - <<'PY'\n${code}\nPY`, PROJECT, HOME, own), null, root);
+  }
+});
+
+test("commandWritesGateOwnFile: real Codex writes remain protected through home and literal aliases", () => {
+  const own = gateOwnFiles({ configDir: CONFIG, cacheDir: CACHE, orcaUserDataDir: ORCA, codexConfigDirs: [`${HOME}/.codex`] });
+  for (const base of ["Path.home()", `Path('${HOME}')`, `Path('${HOME}/.codex')`]) {
+    const suffix = base.includes("/.codex") ? "config.toml" : ".codex/config.toml";
+    const code = `from pathlib import Path\nbase = ${base}\nfile = base / '${suffix}'\nalias = file\nalias.write_text('fixture')`;
+    assert.equal(commandWritesGateOwnFile(`python3 - <<'PY'\n${code}\nPY`, PROJECT, HOME, own), `${HOME}/.codex/config.toml`, base);
+  }
+});
+
 test("gateOwnFiles: the decision inputs the gate and the router read, and nothing else in those directories", () => {
   for (const name of ["catalog.json", "policies.json", "team-owners.json", "queue-mode.json", "deny-tier-config.json", "models-catalog.json", "explicit-models.json", "quota.json", "mod-skills-config.json", "env"]) {
     assert.ok(GATE_OWN_CONFIG_FILES.includes(name), name);
@@ -119,6 +146,21 @@ test("commandWritesGateOwnFile: a write through a variable, a chain of them, or 
   assert.equal(writes("python3 - <<'EOF'\nfrom pathlib import Path\nbase = Path.home() / '.config' / 'orca-supervisor'\np = base / 'policies.json'\np.write_text('[]')\nEOF"), `${CONFIG}/policies.json`);
   assert.equal(writes("node - <<'EOF'\nconst os = require('os'), fs = require('fs')\nconst target = `${os.homedir()}/.config/orca-supervisor/team-owners.json`\nfs.writeFileSync(target, '[]')\nEOF"), `${CONFIG}/team-owners.json`);
   assert.equal(writes("python3 -c \"import os; os.remove(os.path.expanduser('~/.cache/orca-supervisor/gate-bash.json'))\""), `${CACHE}/gate-bash.json`);
+});
+
+test("commandWritesGateOwnFile: a configuration read before an unrelated same-line log write", () => {
+  const command = "python3 - <<'PY'\nfrom pathlib import Path\nbase = ['--ro-bind', str(Path.home() / '.config/orca-supervisor/policies.json')]\nresult = subprocess.run(base + args); Path('/tmp/stdout.log').write_text(result.stdout); Path('/tmp/stderr.log').write_text(result.stderr)\nPY";
+  assert.equal(writes(command), null);
+});
+
+test("commandWritesGateOwnFile: same-line path writes still protect direct and aliased targets", () => {
+  const file = `${CONFIG}/policies.json`;
+  for (const code of [
+    "base = Path.home() / '.config/orca-supervisor/policies.json'; alias = base; alias.write_text('[]')",
+    "print('log; message'); (Path.home() / '.config/orca-supervisor/policies.json').write_text('[]')",
+  ]) {
+    assert.equal(writes(`python3 - <<'PY'\nfrom pathlib import Path\n${code}\nPY`), file, code);
+  }
 });
 
 test("commandWritesGateOwnFile: a symlink to one is the file it points at", () => {
