@@ -11,7 +11,7 @@
   "repository": "https://github.com/JoshMcCDev/orca-jev-advisor",
   "icon": "adapters/orca/icons/advisor.svg",
   "engines": {
-    "orca": ">=1.4.0"
+    "orca": ">=1.4.245"
   },
   "pluginApi": 1,
   "main": "adapters/orca/main.mjs",
@@ -20,16 +20,14 @@
       {
         "id": "advisor-board",
         "title": "Advisor",
-        "icon": "adapters/orca/icons/advisor.svg",
-        "entry": "adapters/orca/panels/board.html",
-        "surface": "nav"
+        "icon": "activity",
+        "entry": "adapters/orca/panels/board.html"
       },
       {
         "id": "advisor-config",
         "title": "Jev Advisor",
-        "icon": "adapters/orca/icons/advisor.svg",
-        "entry": "adapters/orca/panels/config.html",
-        "surface": "settings"
+        "icon": "wrench",
+        "entry": "adapters/orca/panels/config.html"
       }
     ],
     "commands": [

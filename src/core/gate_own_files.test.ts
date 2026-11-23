@@ -133,6 +133,11 @@ test("commandWritesGateOwnFile: a symlink to one is the file it points at", () =
 // key mirror from its secrets file), so a write there reaches the gate at the
 // next refresh. Orca keeps it under `<user data>/plugins-data/<plugin id>/`.
 const STORE = `${ORCA}/plugins-data/ab2web.orca-jev-advisor`;
+test("the renamed plugin storage remains protected", () => {
+  const own = gateOwnFiles({ configDir: CONFIG, cacheDir: CACHE, orcaUserDataDir: ORCA });
+  const path = `${ORCA}/plugins-data/joshmccdev.jev-advisor/storage.json`;
+  assert.equal(gateOwnFileAt(path, own), path);
+});
 
 test("gateOwnFiles: the plugin's Orca storage and secrets, and nothing else of Orca's plugin data", () => {
   assert.equal(gateOwnFileAt(`${STORE}/storage.json`, OWN), `${STORE}/storage.json`);

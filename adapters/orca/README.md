@@ -170,9 +170,12 @@ does NOT do yet (see below).
 ## How to load it as a development plugin
 
 This fork uses the plugin ID `jev-advisor` and publisher `joshmccdev`.
+It requires Orca 1.4.245 or later. Both panels appear in the right sidebar.
 This changes its Orca storage identity from `ab2web.orca-jev-advisor`;
 settings and secrets saved under the old identity do not automatically move.
-Review and reconfigure them after enabling the new plugin. A Git URL install
+Disable the old plugin before enabling this fork: both workers can otherwise
+repoint the shared agent hooks. Review and reconfigure settings and secrets
+after enabling the new plugin. A Git URL install
 uses a published tag or an explicit commit; local edits are not included.
 
 The development plugin path must point to the repository root, where

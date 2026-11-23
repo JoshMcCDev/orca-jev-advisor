@@ -22,7 +22,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const OVERRIDES = ['ORCA_SUPERVISOR_CONFIG_DIR', 'ORCA_SUPERVISOR_CACHE_DIR', 'ORCA_USER_DATA_PATH']
 // The plugin's Orca storage directory is named by its id (src/core/orca_enablement.ts PLUGIN_ID).
-const NEEDLES = ['orca-supervisor', 'orca-data.json', 'orca-profile-index.json', 'ab2web.orca-jev-advisor']
+const NEEDLES = ['orca-supervisor', 'orca-data.json', 'orca-profile-index.json', 'ab2web.orca-jev-advisor', 'joshmccdev.jev-advisor']
 
 /** The path a file tool is about to write, absolute; null for any other tool or a payload that names none. */
 function targetPath (raw) {

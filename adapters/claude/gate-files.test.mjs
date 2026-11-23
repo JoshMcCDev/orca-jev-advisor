@@ -97,7 +97,7 @@ test('with the plugin switched off in Orca, nothing is refused', () => {
   const userData = join(home, 'orca-userdata')
   mkdirSync(join(userData, 'profiles', 'p1'), { recursive: true })
   writeFileSync(join(userData, 'orca-profile-index.json'), JSON.stringify({ activeProfileId: 'p1' }))
-  writeFileSync(join(userData, 'profiles', 'p1', 'orca-data.json'), JSON.stringify({ settings: { disabledPlugins: ['ab2web.orca-jev-advisor'] } }))
+  writeFileSync(join(userData, 'profiles', 'p1', 'orca-data.json'), JSON.stringify({ settings: { disabledPlugins: ['joshmccdev.jev-advisor'] } }))
   assert.equal(run(home, { tool_name: 'Write', tool_input: { file_path: join(home, '.config', 'orca-supervisor', 'policies.json'), content: '[]' } }), '')
 })
 
@@ -119,6 +119,8 @@ test('an Edit or Write of the plugin\'s Orca storage is refused; another plugin\
     assert.match(payload.hookSpecificOutput.permissionDecisionReason, /^REFUSED: edits the gate's own rules \(~\/.*plugins-data\/ab2web\.orca-jev-advisor\/(storage\.json|secrets\.json\.enc)\)/, tool_name)
   }
   assert.equal(conventional({ tool_name: 'Write', tool_input: { file_path: join(userData, 'plugins-data', 'ab2web.wa-inbox', 'storage.json'), content: '{}' } }), '')
+  const renamedStore = join(userData, 'plugins-data', 'joshmccdev.jev-advisor', 'storage.json')
+  assert.equal(denied(conventional({ tool_name: 'Write', tool_input: { file_path: renamedStore, content: '{}' } })).hookSpecificOutput.permissionDecision, 'deny')
 })
 
 test('feature modules T2: an Edit or Write of the module state file is refused', () => {
