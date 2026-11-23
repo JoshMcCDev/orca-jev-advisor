@@ -1,5 +1,7 @@
 # Jev Advisor
 
+For standalone Codex setup, see the [Codex integration guide](adapters/codex/README.md).
+
 An Orca Lab plugin that judges what your agents are about to do, before
 they do it — and stays out of the way the rest of the time.
 
@@ -1063,3 +1065,5 @@ What it cannot see: anything written on GitHub itself (PR titles and
 bodies, review comments, squash-merge messages edited there), commit
 author and committer names and emails, branch and tag names, tag messages,
 and pushes made with `--no-verify`.
+
+For machine-readable status JSON, use `npm run --silent jev-status -- --json` to suppress npm banners.

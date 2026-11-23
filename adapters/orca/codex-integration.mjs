@@ -11,10 +11,11 @@ export function createCodexIntegration ({ root, userData, home, env, storage, lo
       grants.push(`--allow-fs-read=${path}`, `--allow-fs-read=${path}/*`)
       if (mode !== 'status') grants.push(`--allow-fs-write=${path}`, `--allow-fs-write=${path}/*`)
     }
-    if (mode === 'install') {
+    if (mode === 'install' || mode === 'status') {
       for (const { root: nodeRoot } of managedNodeRoots(process.platform, home)) grants.push(`--allow-fs-read=${nodeRoot}`, `--allow-fs-read=${nodeRoot}/*`)
-      grants.push('--allow-child-process')
     }
+    // Status validates the configured Node executable as well as install.
+    if (mode === 'install' || mode === 'status') grants.push('--allow-child-process')
     execFile(process.execPath, [...grants, join(root, 'adapters/orca/install-codex-integration.mjs'), mode, root], {
       env, timeout: 20000, maxBuffer: 256 * 1024
     }, (error, stdout) => {

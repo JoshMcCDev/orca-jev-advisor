@@ -12,19 +12,19 @@ import { normalizePlatform } from '../../src/core/paths.ts'
 const MARKER = 'orca-jev-advisor: Codex gate'
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 
-export async function discoverCodexHomes (env = process.env, home = homedir()) {
+export async function discoverCodexHomes (env = process.env, home = homedir(), errors = null) {
   const homes = new Set([join(home, '.codex'), resolve(env.CODEX_HOME || join(home, '.codex'))])
   const userData = resolveOrcaUserDataDir(normalizePlatform(process.platform), {
     home, appDataDir: env.APPDATA, xdgConfigHome: env.XDG_CONFIG_HOME, orcaUserDataPath: env.ORCA_USER_DATA_PATH
   }).path
   const accounts = join(userData, 'codex-accounts')
   let entries = []
-  try { entries = await readdir(accounts, { withFileTypes: true }) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  try { entries = await readdir(accounts, { withFileTypes: true }) } catch (error) { if (error.code !== 'ENOENT') { if (errors) errors.push(accounts); else throw error } }
   for (const entry of entries.filter(entry => entry.isDirectory())) {
     const target = join(accounts, entry.name, 'home')
     try {
       if ((await lstat(target)).isDirectory() && (await readFile(join(target, '.orca-managed-home'), 'utf8')).trim() === entry.name) homes.add(target)
-    } catch (error) { if (error.code !== 'ENOENT') throw error }
+    } catch (error) { if (error.code !== 'ENOENT') { if (errors) errors.push(target); else throw error } }
   }
   return [...homes]
 }
@@ -84,6 +84,41 @@ function quote (path) {
   return `'${path.replaceAll("'", "'\\''")}'`
 }
 
+async function configured (value, pluginRoot) {
+  const scriptPath = join(pluginRoot, 'adapters', 'codex', 'hook.mjs')
+  try {
+    if (!(await lstat(scriptPath)).isFile()) return false
+    await readFile(scriptPath)
+  } catch { return false }
+  const script = quote(scriptPath)
+  let trustedNode
+  try { trustedNode = await nodeCommand() } catch { return false }
+  for (const event of ['PreToolUse', 'PostToolUse']) {
+    const owned = (value.hooks?.[event] ?? []).flatMap(group => group.hooks.filter(hook => isRecord(hook) && hook.statusMessage === MARKER).map(hook => ({ group, hook })))
+    if (owned.length !== 1) return false
+    const { group, hook } = owned[0]
+    if (!ours(hook) || group.matcher !== (event === 'PreToolUse' ? '^(Bash|apply_patch)$' : '^Bash$') || hook.type !== 'command' || hook.timeout !== 15) return false
+    const suffix = ` ${script}`
+    if (!hook.command.endsWith(suffix)) return false
+    const executable = hook.command.slice(0, -suffix.length)
+    let path
+    if (process.platform === 'win32') {
+      if (!/^"[^"%!,\r\n]+"$/.test(executable)) return false
+      path = executable.slice(1, -1)
+    } else {
+      if (!/^'(?:[^']|'\\'' )*'$/.test(executable)) {
+        // Decode only the exact shell quoting emitted by quote().
+        const parts = executable.split("'\\''")
+        if (!executable.startsWith("'") || !executable.endsWith("'") || parts.some((part, i) => (i === 0 ? part.slice(1) : i === parts.length - 1 ? part.slice(0, -1) : part).includes("'"))) return false
+      }
+      path = executable.slice(1, -1).replaceAll("'\\''", "'")
+    }
+    if (!path || quote(path) !== executable) return false
+    if (path !== trustedNode) return false
+  }
+  return true
+}
+
 async function writeGuarded (path, expected, text) {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${randomUUID()}.tmp`
@@ -96,7 +131,18 @@ async function writeGuarded (path, expected, text) {
 
 export async function configureCodex (mode, pluginRoot, options = {}) {
   if (!['install', 'uninstall', 'status'].includes(mode)) throw new Error('Expected install, uninstall, or status')
-  const homes = options.homes ?? await discoverCodexHomes()
+  const discoveryErrors = []
+  const homes = options.homes ?? await discoverCodexHomes(process.env, homedir(), mode === 'status' ? discoveryErrors : null)
+  if (mode === 'status') {
+    const targets = await Promise.all(homes.map(async home => {
+      try {
+        const value = parseHooks(await readRaw(join(home, 'hooks.json')))
+        const installed = await configured(value, pluginRoot)
+        return { home, installed, state: installed ? 'configured' : 'missing-or-stale' }
+      } catch { return { home, installed: false, state: 'unreadable' } }
+    }))
+    return { ok: true, targets, discoveryErrors, installed: discoveryErrors.length === 0 && targets.length > 0 && targets.every(target => target.installed), trustRequired: true }
+  }
   if (mode === 'install' && !(await lstat(join(pluginRoot, 'adapters', 'codex', 'hook.mjs'))).isFile()) throw new Error('Codex hook script is missing')
   // Validate every target before changing any of them.
   const inputs = await Promise.all(homes.map(async home => {
@@ -118,9 +164,7 @@ export async function configureCodex (mode, pluginRoot, options = {}) {
       }
     }
     const current = mode === 'status' ? value : parseHooks(await readRaw(path))
-    const installed = ['PreToolUse', 'PostToolUse'].every(event => current.hooks?.[event]?.some(group =>
-      group.matcher === (event === 'PreToolUse' ? '^(Bash|apply_patch)$' : '^Bash$') &&
-      group.hooks.some(hook => ours(hook) && hook.command.includes(quote(join(pluginRoot, 'adapters', 'codex', 'hook.mjs'))))))
+    const installed = await configured(current, pluginRoot)
     targets.push({ home, installed })
   }
   return { ok: true, targets, installed: targets.length > 0 && targets.every(target => target.installed), trustRequired: true }

@@ -90,7 +90,7 @@ function callArguments(code: string, open: number): string {
 }
 
 /** The call's arguments split at its own commas, not those of a nested call, list or string. */
-function topLevelArguments(args: string): readonly string[] {
+function topLevelArguments(args: string, separator = ","): readonly string[] {
   const out: string[] = [];
   let depth = 0;
   let quote: string | null = null;
@@ -105,7 +105,7 @@ function topLevelArguments(args: string): readonly string[] {
     if (char === "'" || char === '"' || char === "`") quote = char;
     else if ("([{".includes(char)) depth += 1;
     else if (")]}".includes(char)) depth -= 1;
-    else if (char === "," && depth === 0) {
+    else if (char === separator && depth === 0) {
       out.push(args.slice(from, at));
       from = at + 1;
     }
@@ -122,6 +122,16 @@ const isFileUtilsCall = (call: string): boolean => call.startsWith("FileUtils.")
 function namesFile(text: string, file: string, home: string): boolean {
   if (text.includes(file)) return true;
   if (!file.startsWith(`${home}/`)) return false;
+  // A matching suffix belongs to the real config only when this path
+  // expression is rooted there. A home read elsewhere in the program must
+  // not turn /tmp/fixture/.codex/config.toml into ~/.codex/config.toml.
+  const literalRoot = [...text.matchAll(/(['"`])([^'"`\r\n]+)\1/g)].some((match) => {
+    const value = match[2] ?? "";
+    if (!isAbsolute(value)) return false;
+    const root = normalize(value);
+    return (root === home || root.startsWith(`${home}/`)) && file.startsWith(`${root}/`);
+  });
+  if (!CODE_HOME.test(text) && !literalRoot) return false;
   const relative = file.slice(home.length + 1);
   if (text.includes(relative)) return true;
   const parts = relative.split("/");
@@ -167,7 +177,8 @@ function codeWrites(code: string, home: string, own: GateOwnFiles): string | nul
   }
   for (const match of code.matchAll(PATH_METHOD)) {
     const lineStart = code.lastIndexOf("\n", match.index ?? 0) + 1;
-    const file = named(code.slice(lineStart, match.index ?? 0));
+    const prefix = code.slice(lineStart, match.index ?? 0);
+    const file = named(topLevelArguments(prefix, ";").at(-1) ?? "");
     if (file !== null) return file;
   }
   return null;

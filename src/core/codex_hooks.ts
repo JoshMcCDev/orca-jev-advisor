@@ -16,6 +16,11 @@ export function codexGateOutput(value: unknown): Record<string, unknown> | null 
         permissionDecisionReason: String(decision.permissionDecisionReason ?? "Stopped by Jev Advisor.") +
           (decision.permissionDecision === "ask" ? " This policy requires human approval. Codex cannot request it through PreToolUse; ask the person to handle this action." : ""),
       };
+    } else if (typeof decision.additionalContext === "string") {
+      output.hookSpecificOutput = {
+        hookEventName: "PreToolUse",
+        additionalContext: decision.additionalContext,
+      };
     }
     // A gate pass leaves Codex's own approval flow in charge.
   }

@@ -130,6 +130,8 @@ function retryClause(sessionEligible: boolean): string {
 }
 
 export interface AdviceCompositionInput {
+  /** Deliver advice without stopping the tool or requesting a retry. */
+  readonly nonBlocking?: boolean;
   readonly command: string;
   /** Plain-English reasons behind the concern -- either the risk stage's own axis reasons, or a local rule's own English description. Never empty. */
   readonly reasons: readonly string[];
@@ -194,7 +196,9 @@ export function composeAdviceText(input: AdviceCompositionInput): ComposedAdvice
     ...(compound && segments.length > 0 ? [`It would run: ${segments.map((s) => `\`${s}\``).join(", ")}.`] : []),
     ...(modelReasons.length > 0 ? [`Why: ${modelReasons.join("; ")}.`] : []),
     ...recoverabilitySentences,
-    retryClause(input.sessionEligibleForRetry),
+    input.nonBlocking
+      ? "This is advisory context, not a permission decision. Normal user authorization and host approvals still apply; no retry is needed."
+      : retryClause(input.sessionEligibleForRetry),
   ];
 
   return {

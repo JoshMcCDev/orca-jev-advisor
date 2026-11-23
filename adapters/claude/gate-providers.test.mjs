@@ -47,9 +47,11 @@ const clefBody = (consequence) => JSON.stringify({ result: { model: 'clef', answ
 const jevBody = (consequence) => JSON.stringify({ model: 'jev-latest', answers: answers(consequence), usage: { input_tokens: 480, output_tokens: 10 } })
 const LINE = GATE_CONSEQUENCE_CEILING - CONSEQUENCE_NOISE_MARGIN
 
-function run (home, { script, apiKey = 'jev-key' }) {
+function run (home, { script, apiKey = 'jev-key', codex = false }) {
   const logPath = join(home, 'fetch.log')
   const env = { ...process.env, HOME: home, GIT_CEILING_DIRECTORIES: home }
+  if (codex) env.ORCA_JEV_CODEX_GATE = '1'
+  else delete env.ORCA_JEV_CODEX_GATE
   delete env.XDG_CACHE_HOME
   delete env.XDG_CONFIG_HOME
   delete env.CLAUDE_CODE_TMPDIR
@@ -64,7 +66,7 @@ function run (home, { script, apiKey = 'jev-key' }) {
   env.SYSTEM_ONE_FETCH_LOG = logPath
   const stdout = execFileSync(process.execPath, ['--experimental-strip-types', '--import', PRELOAD, SCRIPT_PATH], {
     env,
-    input: JSON.stringify({ tool_input: { command: COMMAND }, cwd: home, tool_use_id: 'tool-providers' }),
+    input: JSON.stringify({ tool_input: { command: COMMAND }, cwd: home, tool_use_id: 'tool-providers', ...(codex ? { session_id: 'codex-advice-test' } : {}) }),
     encoding: 'utf8'
   })
   const requests = existsSync(logPath) ? readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []
@@ -74,6 +76,19 @@ function run (home, { script, apiKey = 'jev-key' }) {
     : []
   return { stdout, requests, rows, cache }
 }
+
+test('Codex risk advice is context on the first attempt, not a retry barrier', () => {
+  const home = makeHome({ settings: { mode: 'jev' } })
+  const { stdout, rows } = run(home, { codex: true, script: { 'api.typesafe.ai': { status: 200, body: jevBody(2.5) } } })
+  const payload = JSON.parse(stdout)
+  assert.equal(payload.hookSpecificOutput.permissionDecision, undefined)
+  assert.match(payload.hookSpecificOutput.additionalContext, /Jev advice/)
+  assert.doesNotMatch(payload.hookSpecificOutput.additionalContext, /run the same command again|repeating the command/)
+  assert.equal(rows[0].verdict, 'advise')
+  const repeated = run(home, { codex: true, script: {} })
+  assert.equal(JSON.parse(repeated.stdout).hookSpecificOutput.permissionDecision, undefined)
+  assert.equal(repeated.rows.at(-1).verdict, 'advise', 'a repeat must not become learned authorization')
+})
 
 test('no settings file is Jev only: Jev is asked and the row carries no provider keys', () => {
   const home = makeHome({ cloudflare: true })

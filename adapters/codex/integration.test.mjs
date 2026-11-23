@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises'
+import { execFileSync, spawn } from 'node:child_process'
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { codexGateOutput, codexPatchPaths } from '../../src/core/codex_hooks.ts'
 import { configureCodex, discoverCodexHomes } from '../orca/install-codex-integration.mjs'
 import { createCodexIntegration } from '../orca/codex-integration.mjs'
+import { handleCodexHook } from './hook.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 async function temporary (t) {
@@ -29,6 +30,116 @@ test('Codex protocol preserves policy stops and leaves normal approvals in charg
 
 test('patch paths include add, update, delete and move destinations but ignore content', () => {
   assert.deepEqual(codexPatchPaths('*** Begin Patch\r\n*** Add File: a b\r\n+*** Delete File: inert\r\n*** Update File: old\r\n*** Move to: next\r\n*** Delete File: gone\r\n*** End Patch'), ['a b', 'old', 'next', 'gone'])
+})
+
+test('Codex preserves nonblocking advisory context without granting approval', () => {
+  assert.deepEqual(codexGateOutput({ hookSpecificOutput: {
+    hookEventName: 'PreToolUse', additionalContext: 'Jev advice: review the effect.'
+  }, systemMessage: 'notice' }), {
+    hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: 'Jev advice: review the effect.' },
+    systemMessage: 'notice'
+  })
+})
+
+test('advisory hook pair correlates execution without recording approval or command', async t => {
+  const cache = await temporary(t)
+  const previousCache = process.env.ORCA_SUPERVISOR_CACHE_DIR
+  const previousConfig = process.env.ORCA_SUPERVISOR_CONFIG_DIR
+  process.env.ORCA_SUPERVISOR_CACHE_DIR = cache
+  process.env.ORCA_SUPERVISOR_CONFIG_DIR = cache
+  t.after(() => { for (const [key, value] of [['ORCA_SUPERVISOR_CACHE_DIR', previousCache], ['ORCA_SUPERVISOR_CONFIG_DIR', previousConfig]]) { if (value === undefined) delete process.env[key]; else process.env[key] = value } })
+  const run = async script => script === 'gate-bash.ts' ? JSON.stringify({ hookSpecificOutput: { additionalContext: 'advice' } }) : ''
+  const payload = { session_id: 'session', tool_name: 'Bash', tool_use_id: 'same-id', tool_input: { command: 'secret-command' }, cwd: cache }
+  await handleCodexHook({ ...payload, hook_event_name: 'PreToolUse' }, run)
+  await handleCodexHook({ ...payload, tool_use_id: 'other-id', hook_event_name: 'PostToolUse' }, run)
+  await handleCodexHook({ ...payload, hook_event_name: 'PostToolUse' }, run)
+  const dir = join(cache, 'gate-advisory-records')
+  const names = await readdir(dir)
+  assert.equal(names.length, 1)
+  const raw = await readFile(join(dir, names[0]), 'utf8')
+  assert.equal(JSON.parse(raw).state, 'executed')
+  assert.equal(raw.includes('secret-command'), false)
+  await Promise.all(Array.from({ length: 8 }, () => handleCodexHook({ ...payload, hook_event_name: 'PreToolUse' }, run)))
+  await Promise.all(Array.from({ length: 8 }, () => handleCodexHook({ ...payload, hook_event_name: 'PostToolUse' }, run)))
+  await handleCodexHook({ ...payload, session_id: 'another', hook_event_name: 'PreToolUse' }, run)
+  const distinct = await readdir(dir)
+  assert.equal(distinct.length, 2)
+  assert.deepEqual((await Promise.all(distinct.map(async name => JSON.parse(await readFile(join(dir, name), 'utf8')).state))).sort(), ['executed', 'pending'])
+})
+
+test('advisory storage failure permits a later retry', async t => {
+  const cache = await temporary(t)
+  const old = process.env.ORCA_SUPERVISOR_CACHE_DIR
+  const oldConfig = process.env.ORCA_SUPERVISOR_CONFIG_DIR
+  process.env.ORCA_SUPERVISOR_CACHE_DIR = cache
+  process.env.ORCA_SUPERVISOR_CONFIG_DIR = cache
+  t.after(() => { if (old === undefined) delete process.env.ORCA_SUPERVISOR_CACHE_DIR; else process.env.ORCA_SUPERVISOR_CACHE_DIR = old })
+  t.after(() => { if (oldConfig === undefined) delete process.env.ORCA_SUPERVISOR_CONFIG_DIR; else process.env.ORCA_SUPERVISOR_CONFIG_DIR = oldConfig })
+  const dir = join(cache, 'gate-advisory-records')
+  await writeFile(dir, 'obstruction')
+  const payload = { session_id: 's', tool_use_id: 'i', tool_name: 'Bash', tool_input: { command: 'x' }, hook_event_name: 'PreToolUse' }
+  const run = async () => JSON.stringify({ hookSpecificOutput: { additionalContext: 'advice' } })
+  await handleCodexHook(payload, run)
+  await rm(dir)
+  await handleCodexHook(payload, run)
+  assert.equal((await readdir(dir)).length, 1)
+})
+
+test('separate processes converge and a failed post write can be retried', async t => {
+  const cache = await temporary(t)
+  const env = { ...process.env, ORCA_SUPERVISOR_CACHE_DIR: cache, ORCA_SUPERVISOR_CONFIG_DIR: cache }
+  const moduleUrl = new URL('./hook.mjs', import.meta.url).href
+  const script = `
+    import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+    if (process.env.FAIL_RENAME) { fs.renameSync = () => { throw new Error('injected'); }; syncBuiltinESMExports(); }
+    const { handleCodexHook } = await import(${JSON.stringify(moduleUrl)});
+    await handleCodexHook({ session_id: 's', tool_use_id: 'i', tool_name: 'Bash', tool_input: { command: 'private' }, hook_event_name: process.env.EVENT }, async () => JSON.stringify({hookSpecificOutput:{additionalContext:'advice'}}));
+  `
+  const run = (event, fail = false) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...env, EVENT: event, ...(fail ? { FAIL_RENAME: '1' } : {}) }, stdio: 'ignore' })
+    child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error(`child exited ${code}`)))
+  })
+  await Promise.all(Array.from({ length: 8 }, () => run('PreToolUse')))
+  const dir = join(cache, 'gate-advisory-records')
+  const names = await readdir(dir)
+  assert.equal(names.length, 1)
+  const record = join(dir, names[0])
+  await run('PostToolUseFailure', true)
+  assert.equal(JSON.parse(await readFile(record, 'utf8')).state, 'pending')
+  await Promise.all(Array.from({ length: 8 }, () => run('PostToolUseFailure')))
+  assert.equal(JSON.parse(await readFile(record, 'utf8')).state, 'executed')
+  assert.deepEqual(await readdir(dir), names)
+})
+
+test('real Codex hook correlates Jev advice and preserves legacy outcomes', async t => {
+  const home = await temporary(t)
+  const config = join(home, 'config')
+  const cache = join(home, 'cache')
+  await mkdir(config)
+  await writeFile(join(config, 'decision-provider.json'), JSON.stringify({ mode: 'jev' }))
+  const answers = { reversible: { type: 'noul', noul: 0.9 }, external: { type: 'noul', noul: 0.05 }, consequence: { type: 'score', score: 2.5, legend: { 0: 'a', 1: 'b', 2: 'c', 3: 'd' }, probabilities: { 0: 1, 1: 0, 2: 0, 3: 0 }, confidence: 0.9 } }
+  const env = { ...process.env, HOME: home, ORCA_SUPERVISOR_CONFIG_DIR: config, ORCA_SUPERVISOR_CACHE_DIR: cache, ORCA_USER_DATA_PATH: join(home, 'user-data'), TYPESAFE_API_KEY: 'test-private-key', NODE_OPTIONS: `--import=${join(root, 'adapters/claude/fixtures/system-one-fetch-preload.mjs')}`, SYSTEM_ONE_FETCH_SCRIPT: JSON.stringify({ 'api.typesafe.ai': { status: 200, body: JSON.stringify({ model: 'jev-latest', answers, usage: { input_tokens: 480, output_tokens: 10 } }) } }) }
+  const payload = { cwd: home, session_id: 'test-session', tool_name: 'Bash', tool_use_id: 'advice-id', tool_input: { command: 'some-unmeasured-tool --flag' } }
+  const hook = (event, id = 'advice-id') => execFileSync(process.execPath, [join(root, 'adapters/codex/hook.mjs')], { env, input: JSON.stringify({ ...payload, hook_event_name: event, tool_use_id: id }), encoding: 'utf8', timeout: 15000 })
+  const advice = JSON.parse(hook('PreToolUse'))
+  assert.match(advice.hookSpecificOutput.additionalContext, /Jev advice/)
+  assert.equal(advice.hookSpecificOutput.permissionDecision, undefined)
+  const path = join(cache, 'gate-approvals.jsonl')
+  hook('PostToolUse', 'different-id')
+  hook('PostToolUseFailure')
+  const dir = join(cache, 'gate-advisory-records')
+  const names = await readdir(dir)
+  assert.equal(names.length, 1)
+  assert.equal(JSON.parse(await readFile(join(dir, names[0]), 'utf8')).state, 'executed')
+  hook('PostToolUse')
+  hook('PostToolUse')
+  assert.equal((await readdir(dir)).length, 1)
+  assert.doesNotMatch(await readFile(join(dir, names[0]), 'utf8'), /some-unmeasured-tool|test-private-key/)
+  await writeFile(path, JSON.stringify({ type: 'gate-pending', toolUseId: 'legacy-id' }) + '\n', { flag: 'a' })
+  hook('PostToolUse', 'legacy-id')
+  const legacy = (await readFile(path, 'utf8')).trim().split('\n').map(JSON.parse).at(-1)
+  assert.equal(legacy.type, 'gate-outcome')
+  assert.equal(legacy.outcome, 'approved')
 })
 
 test('setup is idempotent, backs up original bytes, and reverts only advisor hooks', async t => {
@@ -90,6 +201,23 @@ test('worker sidecar installs under its filesystem grants and keeps requests cor
   assert.equal(store.get('codexIntegrationResult').ok, false)
   assert.equal((await integration.run('status')).installed, true)
   assert.equal((await integration.configure('uninstall')).installed, false)
+})
+
+test('restricted status discovers a managed Node', { skip: process.platform === 'win32' }, async t => {
+  const home = await temporary(t)
+  const codex = join(home, '.codex')
+  const bin = join(home, '.nvm/versions/node/v99.0.0/bin')
+  await mkdir(codex, { recursive: true })
+  await mkdir(bin, { recursive: true })
+  await symlink(process.execPath, join(bin, 'node'))
+  const preload = join(codex, 'electron.cjs')
+  await writeFile(preload, "Object.defineProperty(process.versions, 'electron', { value: 'test' })")
+  const integration = createCodexIntegration({ root, home, userData: join(home, 'orca'),
+    env: { ...process.env, HOME: home, CODEX_HOME: codex, ORCA_USER_DATA_PATH: join(home, 'orca'), PATH: '', NODE_OPTIONS: `--require=${preload}` },
+    storage: {}, log: () => {} })
+  assert.equal((await integration.run('install')).installed, true)
+  assert.match(await readFile(join(codex, 'hooks.json'), 'utf8'), /\.nvm/)
+  assert.equal((await integration.run('status')).installed, true)
 })
 
 test('activation with Codex selected does not install a Claude configuration', async t => {
