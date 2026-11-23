@@ -2178,7 +2178,7 @@ test('onAgentStatusChanged: stores the resolved projectName beside the raw proje
       ]
     }
   })
-  await onAgentStatusChanged(fakeOrca(), storageHost, { worktreeId: 'wt-new', paneKey: 'pane-new', state: 'working', receivedAt: 3 }, {
+  await onAgentStatusChanged(fakeOrca(), storageHost, { workspaceId: 'wt-new', paneKey: 'pane-new', state: 'working', receivedAt: 3 }, {
     resolveWorktreeProjects: async () => new Map([
       ['wt-new', { project: 'repo:r-local', rama: 'main', repoId: 'r-local' }],
       ['wt-old', { project: 'github:example/web-old-name', rama: 'main', repoId: 'r-origin' }]

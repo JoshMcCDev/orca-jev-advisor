@@ -36,8 +36,9 @@ import { gateDecisionFilesToRead, measurementFilesToRead, modelMeasurementFilesT
 import { auditSetsByKey, buildModuleCostReport, finishTranscriptTally, formatModuleCostReport, newTranscriptTally, ourHooksFromSettings, tallyTranscriptLine } from '../src/core/module_cost.ts'
 import { claudeAccountsDir, resolveOrcaUserDataDir } from '../src/core/orca_accounts.ts'
 import { normalizePlatform, resolveCacheDir } from '../src/core/paths.ts'
+import { PLUGIN_ID } from '../src/core/orca_enablement.ts'
 
-const PLUGIN_ACTOR = 'plugin:ab2web.orca-jev-advisor'
+const PLUGIN_ACTOR = `plugin:${PLUGIN_ID}`
 const HOUR_IN_NAME = /(\d{4}-\d{2}-\d{2}T\d{2})\.jsonl$/
 
 function parseArgs (argv) {

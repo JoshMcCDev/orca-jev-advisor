@@ -27,7 +27,7 @@ import { joinPath } from "./paths.ts";
  * outside Orca with no reliable path back to it, and a test asserts the two
  * never drift apart.
  */
-export const PLUGIN_ID = "ab2web.orca-jev-advisor";
+export const PLUGIN_ID = "joshmccdev.jev-advisor";
 
 /** The profile whose settings are in force, from Orca's profile index. */
 export function activeProfileId(profileIndex: unknown): string | null {

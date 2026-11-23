@@ -99,7 +99,7 @@ the existing 0600 fallback mirror for tools and hooks.
 `terminal.sendText` and `workspace.readContext` are **limited to
 the plugin's active worktree** -- that's verified, not an assumption.
 `agent.status.changed`, on the other hand, is the only global event: it
-carries `worktreeId` in its payload regardless of which worktree the
+carries `workspaceId` in its payload regardless of which worktree the
 worker instance that receives it is running in. Since `storage` doesn't
 appear on the list of capabilities limited to the active worktree, this
 plugin treats it as the shared channel: every instance that receives
@@ -168,6 +168,15 @@ does NOT do yet (see below).
   and suppresses automatic Claude setup on subsequent activation.
 
 ## How to load it as a development plugin
+
+This fork uses the plugin ID `jev-advisor` and publisher `joshmccdev`.
+It requires Orca 1.4.245 or later. Both panels appear in the right sidebar.
+This changes its Orca storage identity from `ab2web.orca-jev-advisor`;
+settings and secrets saved under the old identity do not automatically move.
+Disable the old plugin before enabling this fork: both workers can otherwise
+repoint the shared agent hooks. Review and reconfigure settings and secrets
+after enabling the new plugin. A Git URL install
+uses a published tag or an explicit commit; local edits are not included.
 
 The development plugin path must point to the repository root, where
 `orca-plugin.json` lives. Orca resolves the manifest's `main`, panel,

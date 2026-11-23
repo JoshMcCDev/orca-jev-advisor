@@ -1,17 +1,17 @@
 {
   "manifestVersion": 1,
-  "id": "orca-jev-advisor",
-  "publisher": "ab2web",
+  "id": "jev-advisor",
+  "publisher": "joshmccdev",
   "name": "Jev Advisor",
   "version": "0.13.10",
   "description": "Jev (TypeSafe)-backed decision layer for judging proposed actions and keeping a status board across Orca worktrees.",
   "author": {
     "name": "Ab2Web"
   },
-  "repository": "https://github.com/ab2webco/orca-jev-advisor",
+  "repository": "https://github.com/JoshMcCDev/orca-jev-advisor",
   "icon": "adapters/orca/icons/advisor.svg",
   "engines": {
-    "orca": ">=1.4.0"
+    "orca": ">=1.4.245"
   },
   "pluginApi": 1,
   "main": "adapters/orca/main.mjs",
@@ -20,16 +20,14 @@
       {
         "id": "advisor-board",
         "title": "Advisor",
-        "icon": "adapters/orca/icons/advisor.svg",
-        "entry": "adapters/orca/panels/board.html",
-        "surface": "nav"
+        "icon": "activity",
+        "entry": "adapters/orca/panels/board.html"
       },
       {
         "id": "advisor-config",
         "title": "Jev Advisor",
-        "icon": "adapters/orca/icons/advisor.svg",
-        "entry": "adapters/orca/panels/config.html",
-        "surface": "settings"
+        "icon": "wrench",
+        "entry": "adapters/orca/panels/config.html"
       }
     ],
     "commands": [
@@ -71,10 +69,10 @@
         "on": "agent.status.changed"
       },
       {
-        "on": "worktree.created"
+        "on": "workspace.created"
       },
       {
-        "on": "worktree.removed"
+        "on": "workspace.removed"
       }
     ]
   },

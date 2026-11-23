@@ -61,7 +61,7 @@ export function gateOwnFiles(input: { readonly configDir: string; readonly cache
     ...codexDirs.flatMap((dir) => [join(dir, "hooks.json"), join(dir, "config.toml")]),
   ]);
   const orcaDirs = input.orcaUserDataDir === null ? [] : spellings(input.orcaUserDataDir);
-  const storageDirs = orcaDirs.map((dir) => join(dir, "plugins-data", PLUGIN_ID));
+  const storageDirs = orcaDirs.flatMap((dir) => [PLUGIN_ID, "ab2web.orca-jev-advisor"].map((id) => join(dir, "plugins-data", id)));
   for (const dir of orcaDirs) files.add(join(dir, "orca-profile-index.json"));
   for (const dir of storageDirs) for (const name of GATE_OWN_ORCA_STORAGE_FILES) files.add(join(dir, name));
   return { files, roots: [...configDirs, ...cacheDirs, ...storageDirs, ...codexDirs], orcaUserDataDirs: orcaDirs };
