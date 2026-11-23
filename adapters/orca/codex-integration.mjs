@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { join, resolve } from 'node:path'
+import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { managedNodeRoots } from '../../src/core/node_runtime.ts'
 
 /** Worker-side transport; the sidecar owns hook files and never trusts them for Codex. */
@@ -14,8 +14,11 @@ export function createCodexIntegration ({ root, userData, home, env, storage, lo
     if (mode === 'install' || mode === 'status') {
       for (const { root: nodeRoot } of managedNodeRoots(process.platform, home)) grants.push(`--allow-fs-read=${nodeRoot}`, `--allow-fs-read=${nodeRoot}/*`)
     }
-    // Status validates the configured Node executable as well as install.
-    if (mode === 'install' || mode === 'status') grants.push('--allow-child-process')
+    if (mode === 'install' || mode === 'status') {
+      grants.push(`--allow-fs-read=${process.execPath}`)
+      for (const path of (env.PATH || '').split(delimiter).filter(isAbsolute)) grants.push(`--allow-fs-read=${path}`, `--allow-fs-read=${path}/*`)
+    }
+    if (mode === 'install') grants.push('--allow-child-process')
     execFile(process.execPath, [...grants, join(root, 'adapters/orca/install-codex-integration.mjs'), mode, root], {
       env, timeout: 20000, maxBuffer: 256 * 1024
     }, (error, stdout) => {

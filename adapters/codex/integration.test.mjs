@@ -160,6 +160,53 @@ test('setup is idempotent, backs up original bytes, and reverts only advisor hoo
   assert.equal((await configureCodex('status', root, options)).installed, false)
 })
 
+test('status does not execute discovery candidates and recognizes a custom Node', { skip: process.platform === 'win32' }, async t => {
+  const home = await temporary(t)
+  const customNode = join(home, 'custom-node')
+  const candidate = join(home, 'candidate')
+  const marker = join(home, 'executed')
+  await symlink(process.execPath, customNode)
+  await writeFile(candidate, `#!/bin/sh\ntouch '${marker}'\necho v24.0.0\n`, { mode: 0o755 })
+  const options = { homes: [home], node: customNode }
+  assert.equal((await configureCodex('install', root, options)).installed, true)
+  const previous = process.env.ORCA_JEV_NODE_CANDIDATES
+  process.env.ORCA_JEV_NODE_CANDIDATES = candidate
+  try {
+    assert.equal((await configureCodex('status', root, { homes: [home] })).installed, true)
+    await assert.rejects(stat(marker), { code: 'ENOENT' })
+  } finally {
+    if (previous === undefined) delete process.env.ORCA_JEV_NODE_CANDIDATES
+    else process.env.ORCA_JEV_NODE_CANDIDATES = previous
+  }
+})
+
+test('status never runs a discovery candidate', { skip: process.platform === 'win32' }, async t => {
+  const home = await temporary(t)
+  const candidate = join(home, 'candidate')
+  const marker = join(home, 'executed')
+  await writeFile(candidate, `#!/bin/sh\ntouch '${marker}'\necho v24.0.0\n`, { mode: 0o755 })
+  await configureCodex('install', root, { homes: [home], node: process.execPath })
+  const previous = process.env.ORCA_JEV_NODE_CANDIDATES
+  process.env.ORCA_JEV_NODE_CANDIDATES = candidate
+  try {
+    await configureCodex('status', root, { homes: [home] })
+    await assert.rejects(stat(marker), { code: 'ENOENT' })
+  } finally {
+    if (previous === undefined) delete process.env.ORCA_JEV_NODE_CANDIDATES
+    else process.env.ORCA_JEV_NODE_CANDIDATES = previous
+  }
+})
+
+test('install rejects an unsupported custom Node before changing hooks', { skip: process.platform === 'win32' }, async t => {
+  const home = await temporary(t)
+  const node = join(home, 'old-node')
+  const hooks = join(home, 'hooks.json')
+  await writeFile(node, '#!/bin/sh\necho v18.0.0\n', { mode: 0o755 })
+  await writeFile(hooks, '{}')
+  await assert.rejects(configureCodex('install', root, { homes: [home], node }), /Node 24 or newer/)
+  assert.equal(await readFile(hooks, 'utf8'), '{}')
+})
+
 test('invalid later targets cannot cause an earlier hook file to be overwritten', async t => {
   const base = await temporary(t)
   const homes = [join(base, 'one'), join(base, 'two')]

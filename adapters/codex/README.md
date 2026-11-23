@@ -32,7 +32,10 @@ node adapters/orca/install-codex-integration.mjs uninstall .
 ```
 
 Hook commands contain absolute Node and plugin paths; rerun setup after
-moving the plugin.
+moving the plugin. Installation checks the selected Node version. Status
+checks the configured executable's accessibility without launching it, so its
+Node version remains unverified. A sandbox that cannot inspect that executable
+reports the home as unreadable.
 
 Run `npm run jev-status -- --json` for read-only configuration and credential
 presence checks. Add `--check-provider` to send a small request to each

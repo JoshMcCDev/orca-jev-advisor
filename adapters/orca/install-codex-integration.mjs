@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { classifyNode, managedNodeRoots, nodeCandidatePaths } from '../../src/core/node_runtime.ts'
 import { resolveOrcaUserDataDir } from '../../src/core/orca_accounts.ts'
@@ -84,15 +85,14 @@ function quote (path) {
   return `'${path.replaceAll("'", "'\\''")}'`
 }
 
-async function configured (value, pluginRoot) {
+async function configured (value, pluginRoot, validatedNode = null) {
   const scriptPath = join(pluginRoot, 'adapters', 'codex', 'hook.mjs')
   try {
     if (!(await lstat(scriptPath)).isFile()) return false
     await readFile(scriptPath)
   } catch { return false }
   const script = quote(scriptPath)
-  let trustedNode
-  try { trustedNode = await nodeCommand() } catch { return false }
+  let configuredNode
   for (const event of ['PreToolUse', 'PostToolUse']) {
     const owned = (value.hooks?.[event] ?? []).flatMap(group => group.hooks.filter(hook => isRecord(hook) && hook.statusMessage === MARKER).map(hook => ({ group, hook })))
     if (owned.length !== 1) return false
@@ -113,8 +113,17 @@ async function configured (value, pluginRoot) {
       }
       path = executable.slice(1, -1).replaceAll("'\\''", "'")
     }
-    if (!path || quote(path) !== executable) return false
-    if (path !== trustedNode) return false
+    if (!isAbsolute(path) || quote(path) !== executable) return false
+    if (configuredNode && configuredNode !== path) return false
+    configuredNode = path
+  }
+  if (configuredNode === validatedNode) return true
+  try {
+    if (!(await stat(configuredNode)).isFile()) return false
+    await access(configuredNode, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
+  } catch (error) {
+    if (error.code === 'ERR_ACCESS_DENIED') throw error
+    return false
   }
   return true
 }
@@ -138,7 +147,7 @@ export async function configureCodex (mode, pluginRoot, options = {}) {
       try {
         const value = parseHooks(await readRaw(join(home, 'hooks.json')))
         const installed = await configured(value, pluginRoot)
-        return { home, installed, state: installed ? 'configured' : 'missing-or-stale' }
+        return { home, installed, state: installed ? 'configured' : 'missing-or-stale', nodeVersion: 'not-checked' }
       } catch { return { home, installed: false, state: 'unreadable' } }
     }))
     return { ok: true, targets, discoveryErrors, installed: discoveryErrors.length === 0 && targets.length > 0 && targets.every(target => target.installed), trustRequired: true }
@@ -150,7 +159,16 @@ export async function configureCodex (mode, pluginRoot, options = {}) {
     const raw = await readRaw(path)
     return { home, path, raw, value: parseHooks(raw) }
   }))
-  const command = mode === 'install' ? `${quote(options.node ?? await nodeCommand())} ${quote(join(pluginRoot, 'adapters', 'codex', 'hook.mjs'))}` : null
+  let node = null
+  if (mode === 'install') {
+    node = options.node ?? await nodeCommand()
+    if (options.node) {
+      let valid = false
+      try { valid = classifyNode(node, execFileSync(node, ['--version'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'pipe'] })).state === 'ok' } catch {}
+      if (!valid) throw new Error('Node 24 or newer is required for Codex hooks')
+    }
+  }
+  const command = node === null ? null : `${quote(node)} ${quote(join(pluginRoot, 'adapters', 'codex', 'hook.mjs'))}`
   const targets = []
   for (const { home, path, raw, value } of inputs) {
     if (mode !== 'status') {
@@ -164,7 +182,7 @@ export async function configureCodex (mode, pluginRoot, options = {}) {
       }
     }
     const current = mode === 'status' ? value : parseHooks(await readRaw(path))
-    const installed = await configured(current, pluginRoot)
+    const installed = await configured(current, pluginRoot, node)
     targets.push({ home, installed })
   }
   return { ok: true, targets, installed: targets.length > 0 && targets.every(target => target.installed), trustRequired: true }
